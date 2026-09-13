@@ -1,11 +1,11 @@
 # napkin M0 風險驗證結果
 
-> Historical record, frozen FROZEN_DATE. Source code is authoritative; where this
+> Historical record, frozen 2026-09-14. Source code is authoritative; where this
 > document and the code disagree, the code wins.
 
 **Plan:** `docs/decisions/plans/2026-09-13-napkin-m0-risk-validation.md`
 **Spec 風險表:** `docs/decisions/specs/2026-09-13-napkin-design.md` §10
-**實驗程式碼（已刪除，可從 git 歷史取回）:** SPIKE_COMMITS
+**實驗程式碼（已刪除，可從 git 歷史取回）:** `7e14330` `5a092f6` `7edc0cd`
 
 ## 1. fcitx5 中文輸入（input_probe）
 
@@ -59,3 +59,9 @@
 **結論：** 主方案：合併成單一 TTF（spec §6.3）
 
 ## 對後續里程碑的影響
+
+- M4（文字編輯）：主方案，文字編輯採用 egui `TextEdit` 疊在元件上（spec §7.3）。
+- M4（縮放手勢）：主方案：自行綁定 `zwp_pointer_gestures_v1`，保留 `Ctrl`+滾動。做法：以 `wayland_backend::client::Backend::from_foreign_display` 在 eframe 的 `wl_display` 上建立 guest 連線，開自己的 event queue，在專用執行緒上 `blocking_dispatch`，收到捏合事件後呼叫 `request_repaint`；與 winit 同時讀取同一連線是安全的，靠的是 libwayland 的 `prepare_read`／`read_events` 鎖定。程式碼見 commit `7e14330` 的 `spikes/m0/src/bin/pinch_probe.rs`。
+- M3（反鋸齒）：主方案，整個視窗使用 MSAA 4×（`NativeOptions::multisampling = 4`）。
+- M3（文字繪製）：主方案，glyphon 文字以「連續圖形一組、連續文字一組」的方式交錯繪製。
+- M3（字型載入）：主方案，合併成單一 TTF（spec §6.3）。
