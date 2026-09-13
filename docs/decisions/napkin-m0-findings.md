@@ -49,10 +49,10 @@
 
 | 字型 | 子集數 | codepoint 數 | mismatches |
 |---|---|---|---|
-| napkin-hand | | | |
-| napkin-sans | | | |
-| napkin-code | | | |
+| napkin-hand | 7 | 561 | 0 |
+| napkin-sans | 5 | 854 | 0 |
+| napkin-code | 4 | 333 | 0 |
 
-**結論：**
+**結論：** 主方案：合併成單一 TTF（spec §6.3）
 
 ## 對後續里程碑的影響
