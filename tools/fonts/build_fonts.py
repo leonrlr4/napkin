@@ -8,11 +8,14 @@
 Excalidraw ships each font split into unicode-range woff2 subsets and no full upstream
 font is published, so this merges the subsets into one TTF per font.
 
-The merged fonts are renamed napkin-hand / napkin-sans / napkin-code. Excalifont's name
-table says "Excalifont is a trademark of Excalidraw" and OFL grants no trademark rights,
-so a modified build must not present itself under that name; the other two follow the
-same rule for uniformity. `.excalidraw` files store a numeric fontFamily, not a name, so
-renaming does not affect file compatibility.
+The merged fonts are renamed napkin-hand / napkin-sans / napkin-code. The woff2 subsets
+this tool reads only carry name IDs 0-6, not the trademark statement; that statement is
+in Excalifont's original name table, reproduced in the "Origin File Name Table" header
+comment of packages/excalidraw/fonts/Excalifont/index.ts at the pinned commit (line 21):
+"Excalifont is a trademark of Excalidraw". OFL grants no trademark rights, so a modified
+build must not present itself under that name; the other two follow the same rule for
+uniformity. `.excalidraw` files store a numeric fontFamily, not a name, so renaming does
+not affect file compatibility.
 
 Run from anywhere: `tools/fonts/build_fonts.py`. Writes assets/fonts/ and exits non-zero
 if any codepoint of any subset is missing from, or maps to a different glyph in, the
@@ -110,6 +113,11 @@ def glyph_signature(font: TTFont, glyph: str) -> tuple:
 
 
 def mismatches(subsets: list[TTFont], merged: TTFont) -> list[str]:
+    """Compare each subset's cmap against the merged font: codepoint coverage, advance
+    width and outline bounds only. This does not check the GSUB/GPOS layout tables
+    (kerning, mark positioning) — see docs/decisions/napkin-m0-findings.md §5 for the
+    measured kerning deviation this check cannot catch.
+    """
     merged_cmap = merged.getBestCmap()
     errors = []
     for subset in subsets:
@@ -121,6 +129,23 @@ def mismatches(subsets: list[TTFont], merged: TTFont) -> list[str]:
             actual = glyph_signature(merged, merged_cmap[codepoint])
             if expected != actual:
                 errors.append(f"U+{codepoint:04X} glyph differs: {expected} != {actual}")
+    return errors
+
+
+def rename_violations(font: TTFont, family: str) -> list[str]:
+    """Check that `rename()` actually took: name IDs 1, 4, 6 and 16 must start with
+    `family`, and no name record may still read "Excalifont" (spec §6.3's rename
+    requirement — see the module docstring for why).
+    """
+    errors = []
+    for record in font["name"].names:
+        value = record.toUnicode()
+        if record.nameID in (1, 4, 6, 16) and not value.startswith(family):
+            errors.append(
+                f"name ID {record.nameID} is {value!r}, does not start with {family!r}"
+            )
+        if "Excalifont" in value:
+            errors.append(f"name ID {record.nameID} contains 'Excalifont': {value!r}")
     return errors
 
 

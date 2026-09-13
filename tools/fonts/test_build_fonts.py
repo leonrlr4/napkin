@@ -46,3 +46,27 @@ def test_codepoint_mapped_to_wrong_glyph_is_reported():
     errors = build_fonts.mismatches([reference], broken)
 
     assert any(error.startswith("U+0042 glyph differs") for error in errors)
+
+
+# spec §6.3 requires the merged fonts to shed Excalifont's name so a modified build
+# does not present itself as the trademarked original (see build_fonts.py module
+# docstring). These guard that rename against regressing back to the upstream name.
+COMMITTED_FONTS = {
+    "napkin-hand": build_fonts.OUT_DIR / "napkin-hand.ttf",
+    "napkin-sans": build_fonts.OUT_DIR / "napkin-sans.ttf",
+    "napkin-code": build_fonts.OUT_DIR / "napkin-code.ttf",
+}
+
+
+def test_committed_fonts_have_no_rename_violations():
+    for family, path in COMMITTED_FONTS.items():
+        assert build_fonts.rename_violations(TTFont(path), family) == []
+
+
+def test_reverted_name_is_reported():
+    font = TTFont(FONT)
+    font["name"].setName("Excalifont", 1, 3, 1, 0x409)
+
+    violations = build_fonts.rename_violations(font, "napkin-code")
+
+    assert any("Excalifont" in v for v in violations)
