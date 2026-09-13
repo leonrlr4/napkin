@@ -63,7 +63,7 @@ overlay 的形式出現：置中、佔螢幕 70%×70%、背後的桌面變暗；
 | perfect-freehand | `perfect-freehand@1.2.0` |
 | fractional indexing | Excalidraw repo 內的 `packages/fractional-indexing`（3.3.0）。**npm 上的同名套件是不相干的 0.18.0 預發版，不能當基準** |
 | 元件 id 格式 | `nanoid@3.3.3`（21 字元，字元集 `A-Za-z0-9_-`） |
-| 字型 | 字型選單的三個選項：Excalifont（`fontFamily: 5`，SIL OFL 1.1，宣告了 Reserved Font Name）、Nunito（`6`）、Comic Shanns（`8`，MIT）。來源是該 commit 的 `packages/excalidraw/fonts/` |
+| 字型 | 字型選單的三個選項：Excalifont（`fontFamily: 5`，SIL OFL 1.1；名稱表聲明「Excalifont is a trademark of Excalidraw」）、Nunito（`6`）、Comic Shanns（`8`，MIT）。來源是該 commit 的 `packages/excalidraw/fonts/` |
 
 ## 4. 架構
 
@@ -233,8 +233,9 @@ Cargo workspace，依賴方向只有 `app → scene → rough`。
   Nunito 5 個、Comic Shanns 4 個），而且上游沒有公開的完整字型檔。所以由 repo 內的開發
   工具 script，從 §3 固定的 commit 取出子集，用 fonttools 解壓並合併成單一 TTF，commit
   進 repo 並附上原授權文字。
-- **合併後的字型必須改名**：Excalifont 宣告了 Reserved Font Name，依 OFL 規定修改版不得
-  沿用原名。三種字型統一改名為 `napkin-hand`（Excalifont）、`napkin-sans`（Nunito）、
+- **合併後的字型必須改名**：Excalifont 的名稱表聲明它是 Excalidraw 的商標，而 OFL 不授予
+  商標使用權，所以修改（合併）後的版本不沿用原名，避免被當成官方字型。（Excalifont 並沒有
+  宣告 OFL 的 Reserved Font Name。）三種字型統一改名為 `napkin-hand`（Excalifont）、`napkin-sans`（Nunito）、
   `napkin-code`（Comic Shanns）。`.excalidraw` 檔案記錄的是數字 `fontFamily`，所以改名
   不影響相容性。
 - `fontFamily` 對應：`5`、`1`（Virgil）→ `napkin-hand`；`6`、`2`（Helvetica）、`7`、`9`、
@@ -401,6 +402,6 @@ port 自 commit `afa3a65` 的 `packages/common/src/colors.ts` `applyDarkModeFilt
 - **`fractional_index` crate**：編碼方式與 Excalidraw 不同。
 - **v1 打包 Xiaolai 字型**：Excalidraw repo 中的 Xiaolai 被切成 209 個網頁用的 woff2
   子集，不適合原生 app 直接使用。
-- **合併後沿用 Excalifont 原名**：違反 OFL 對 Reserved Font Name 的規定。
+- **合併後沿用 Excalifont 原名**：Excalifont 是 Excalidraw 的商標，OFL 不授予商標使用權。
 - **攔截視窗關閉事件改成隱藏**：需要與 Hyprland 雙向耦合。改為關閉即結束，由
   `napkin-toggle` 負責重新啟動。
