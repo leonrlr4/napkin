@@ -23,8 +23,11 @@
 | 檢查 | 結果 | 觀察 |
 |---|---|---|
 | E. 捏合時 log 出現 `ZOOM` | FAIL | winit 0.30.13 只在 macOS／iOS 送出 `PinchGesture`，Wayland 後端沒有綁定 `zwp_pointer_gestures_v1`，所以 egui 收不到捏合事件；Hyprland 有提供 `zwp_pointer_gestures_v1`（version 3）。 |
+| F. pinch_probe 捏合時 log 出現 `PINCH begin`／`update`／`end` | PASS | log 內有 3 行 `PINCH begin fingers=2`、339 行 `PINCH update ...`、3 行 `PINCH end cancelled=false`；cancelled 皆為 0、`EGUI  Zoom` 為 0 行，過程無 panic |
+| G. 方塊隨捏合平順縮放，放開後停止 | PASS | 方塊隨手指開合平順縮放，放開後停止；截圖顯示累積 zoom 在同一次手勢中持續上升（例如 0.835 → 1.166），單次事件 factor 介於 1.000～1.034 之間 |
+| H. 捏合期間一般滑鼠操作（移動、點擊）不受影響 | PASS | 捏合前後一般滑鼠移動與點擊皆正常運作，使用者回報「完全正常」 |
 
-**結論：** 暫定：winit 層不支援。使用者表示捏合縮放很重要，追加 pinch_probe 實驗，由 napkin 自行在 eframe 的 Wayland 連線上綁定 `zwp_pointer_gestures_v1`；實驗失敗時，v1 只支援 `Ctrl`+滾動縮放。
+**結論：** 主方案：napkin 在 eframe 的 Wayland 連線上自行綁定 zwp_pointer_gestures_v1 取得捏合縮放，同時保留 Ctrl+滾動。
 
 ## 3. MSAA（canvas_probe）
 
