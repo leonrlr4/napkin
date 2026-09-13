@@ -1,0 +1,12 @@
+[package]
+name = "napkin-spike-m0"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "wayland", "wgpu"] }
+egui-wgpu = "=0.36.2"
+glyphon = "=0.12.0"
+wgpu = "30"
