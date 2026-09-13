@@ -1,6 +1,6 @@
 # napkin M0 風險驗證結果
 
-> Historical record, frozen 2026-09-13. Source code is authoritative; where this
+> Historical record, frozen FROZEN_DATE. Source code is authoritative; where this
 > document and the code disagree, the code wins.
 
 **Plan:** `docs/decisions/plans/2026-09-13-napkin-m0-risk-validation.md`
