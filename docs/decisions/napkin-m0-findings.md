@@ -30,20 +30,20 @@
 
 | 檢查 | 結果 | 數值 |
 |---|---|---|
-| 程式沒有 panic | | |
-| 斜線裁切區的顏色數 ≥ 3 | | |
-| adapter backend | — | |
+| 程式沒有 panic | PASS | log 依序輸出 adapter 資訊、target format、多行 `callback rect px`、`screenshot saved to spikes/m0/out/canvas.ppm`，exit=0 |
+| 斜線裁切區的顏色數 ≥ 3 | PASS | 5（`magick ... -format '%k'`），目視確認斜線邊緣平滑、有灰階漸層像素 |
+| adapter backend | — | Vulkan（`Intel(R) Arc(tm) B390 (PTL)`，Mesa 26.2.2 開源驅動） |
 
-**結論：**
+**結論：** 主方案：整個視窗使用 MSAA 4×（`NativeOptions::multisampling = 4`）
 
 ## 4. glyphon 與圖形交錯繪製（canvas_probe）
 
 | 檢查 | 結果 | 數值 |
 |---|---|---|
-| 紅框裁切區的顏色數 > 2（文字畫在紅框上） | | |
-| 藍框裁切區的顏色數 = 1（文字被藍框蓋住） | | |
+| 紅框裁切區的顏色數 > 2（文字畫在紅框上） | PASS | 178，目視確認文字「Hello 手繪白板」清楚疊在紅框上 |
+| 藍框裁切區的顏色數 = 1（文字被藍框蓋住） | PASS | 1，目視確認藍框內部是純色，文字右半部完全被蓋住 |
 
-**結論：**
+**結論：** 主方案：glyphon 文字以「連續圖形一組、連續文字一組」的方式交錯繪製
 
 ## 5. 字型子集合併（build_fonts.py）
 
