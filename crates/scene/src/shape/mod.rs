@@ -1,0 +1,38 @@
+//! Turning an [`Element`](crate::element::Element) into rough.js drawables and freedraw
+//! outlines (`packages/element/src/shape.ts` at the pinned commit). Task 8 ports
+//! `generateRoughOptions`; the generators that build the shapes themselves are Tasks 9-12.
+
+mod options;
+
+pub use options::generate_rough_options;
+
+/// One segment of a freedraw stroke outline, in element-local coordinates. Mirrors the SVG
+/// path commands `getSvgPathFromStroke` emits (`M`/`Q`/`L`/`Z`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PathOp {
+    Move([f64; 2]),
+    Quad([f64; 4]),
+    Line([f64; 2]),
+    Close,
+}
+
+/// Rendering inputs `generateRoughOptions` and the shape generators need beyond the element
+/// itself: the app's dark-mode state and the canvas background color (used for arrowhead
+/// outline fills, ported in a later task).
+pub struct ShapeContext<'a> {
+    pub dark_mode: bool,
+    pub canvas_background_color: &'a str,
+}
+
+/// What an element draws: rough.js primitives for rectangle/diamond/ellipse/line/arrow,
+/// a background fill plus stroke outline for freedraw, or nothing for element types rough.js
+/// never draws (text, image, frame, ...).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ElementShape {
+    None,
+    Drawables(Vec<rough::Drawable>),
+    Freedraw {
+        fill: Option<Box<rough::Drawable>>,
+        stroke: Vec<PathOp>,
+    },
+}

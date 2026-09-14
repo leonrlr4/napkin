@@ -14,7 +14,9 @@ use scene::new_element::{
     ElementProps, GenericKind, new_arrow_element, new_freedraw_element, new_generic_element,
     new_line_element,
 };
+use scene::shape::generate_rough_options;
 use serde_json::{Value, json};
+use testkit::rough_json::options_value;
 use testkit::{Case, check_group, num, points_from, throws};
 
 fn dir() -> PathBuf {
@@ -200,5 +202,37 @@ fn colors() {
             "isTransparent" => json!(is_transparent(color)),
             other => panic!("unknown call {other}"),
         }
+    });
+}
+
+/// Element JSON from a case, which must load as a typed element when its type is one scene
+/// draws: a silent fallback to `Raw` would make every shape comparison vacuous.
+fn element_from(value: &Value) -> Element {
+    let element = Element::from_value(value.clone());
+    let drawn = [
+        "rectangle",
+        "diamond",
+        "ellipse",
+        "line",
+        "arrow",
+        "freedraw",
+        "text",
+    ];
+    if value["type"].as_str().is_some_and(|t| drawn.contains(&t)) {
+        assert!(
+            !matches!(element, Element::Raw(_)),
+            "baseline element fell back to Raw"
+        );
+    }
+    element
+}
+
+#[test]
+fn rough_options() {
+    check_group(&dir(), "rough_options", |case| {
+        let element = element_from(&case.args[0]);
+        let continuous = case.args[1].as_bool().expect("continuousPath");
+        let dark = case.args[2].as_bool().expect("isDarkMode");
+        options_value(&generate_rough_options(&element, continuous, dark).expect("drawable type"))
     });
 }

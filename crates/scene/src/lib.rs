@@ -8,6 +8,7 @@ pub mod file;
 pub mod fractional_index;
 pub mod json;
 pub mod new_element;
+pub mod shape;
 
 pub use crate::element::Element;
 pub use crate::file::SceneFile;
