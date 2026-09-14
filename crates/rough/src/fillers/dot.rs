@@ -41,7 +41,7 @@ fn dots_on_lines(lines: &[[Point; 2]], o: &mut Ctx) -> OpSet {
         while i < count {
             let y = min_y + offset + (i * gap);
             // `Math.random()` here is not reproducible; baselines for this filler compare
-            // structure only, per m1-global-rules.md decision 2.
+            // structure only (see the M1 plan's decision 2).
             let cx = (x - ro) + math_random() * 2.0 * ro;
             let cy = (y - ro) + math_random() * 2.0 * ro;
             let el = renderer::ellipse(cx, cy, fweight, fweight, o);

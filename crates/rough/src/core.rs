@@ -146,6 +146,8 @@ impl ResolvedOptions {
     }
 }
 
+/// One drawing instruction in an [`OpSet`]: rough.js's `{ op, data }`, with `data`'s length
+/// fixed by `op` (2 coordinates for `Move`/`LineTo`, 3 point pairs for a cubic Bezier).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Op {
     Move([f64; 2]),
@@ -172,6 +174,8 @@ impl Op {
     }
 }
 
+/// What an [`OpSet`] draws: the shape's own outline (`Path`), a solid fill (`FillPath`), or
+/// a pattern fill sketch such as hachure lines or dots (`FillSketch`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpSetType {
     Path,
@@ -189,12 +193,15 @@ impl OpSetType {
     }
 }
 
+/// One layer of a [`Drawable`]: an outline, a solid fill, or a pattern fill, as the ops that
+/// draw it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OpSet {
     pub kind: OpSetType,
     pub ops: Vec<Op>,
 }
 
+/// Which `RoughGenerator` method produced a [`Drawable`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
     Line,
@@ -224,6 +231,8 @@ impl Shape {
     }
 }
 
+/// A shape as `RoughGenerator` renders it: rough.js's `Drawable`, the resolved options it
+/// was drawn with, and one [`OpSet`] per outline/fill layer, in draw order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drawable {
     pub shape: Shape,

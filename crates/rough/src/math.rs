@@ -17,6 +17,8 @@ impl Random {
         Random { seed }
     }
 
+    /// rough.js `Random.prototype.next`: the next draw in `[0, 1)`, advancing the LCG state,
+    /// or [`math_random`] when the seed is falsy (0 or NaN).
     #[expect(
         clippy::should_implement_trait,
         reason = "keeps rough.js's name; not an iterator"

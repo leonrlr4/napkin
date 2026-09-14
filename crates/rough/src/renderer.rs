@@ -610,7 +610,8 @@ fn _curve(points: &[Point], close_point: Option<Point>, o: &mut Ctx) -> Vec<Op> 
 /// bin/renderer.js `_computeEllipsePoints`. Returns `(allPoints, corePoints)`. JS pushes the
 /// same array into both lists; `Point` is `Copy`, so copying it into each `Vec` here has the
 /// same effect as long as nothing rewrites `corePoints` in place before `allPoints` is turned
-/// into ops (true through Task 9; filling that mutates `corePoints` arrives later).
+/// into ops. The outline ops are built first, before a pattern fill rotates the estimated
+/// points in place; the solid fill recomputes its own points instead of reusing these.
 #[expect(clippy::too_many_arguments, reason = "mirrors renderer.js")]
 fn _compute_ellipse_points(
     increment: f64,

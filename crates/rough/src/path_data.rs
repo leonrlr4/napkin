@@ -1,5 +1,5 @@
 //! Port of `path-data-parser@0.1.0`: `lib/parser.js`, `lib/absolutize.js`, `lib/normalize.js`.
-//! `lib/serialize.js` is not ported (m1-global-rules.md, decision 5).
+//! `lib/serialize.js` is not ported (see the M1 plan's decision 5).
 
 use crate::js::{self, truthy};
 
@@ -148,9 +148,13 @@ fn tokenize(d: &str) -> Result<Vec<Token>, PathError> {
             tokens.push(Token::Command(c as char));
             i += 1;
         } else if let Some(len) = match_number(&bytes[i..]) {
-            // JS: `+parseFloat(text)` then back to a string, and later `+token.text` to get
-            // the number back out. Both round-trips are no-ops on the matched span's value,
-            // so parse it directly.
+            // JS: `parseFloat(text)` to a string via a template literal, and later
+            // `+token.text` to get the number back out. That round trip is a no-op for
+            // every value seen in the baselines, so this parses the matched span directly.
+            // One known divergence: for "-0", JS's `${parseFloat("-0")}` stringifies to
+            // "0" (`String(-0) === "0"`), so `+token.text` yields `+0`, while parsing the
+            // span directly here keeps `-0.0`. No baseline exercises "-0", and no shape
+            // rendering distinguishes signed zero, so this is left as is.
             let value: f64 = d[i..i + len]
                 .parse()
                 .expect("match_number only matches valid float syntax");
@@ -426,7 +430,7 @@ fn rotate(x: f64, y: f64, angle_rad: f64) -> (f64, f64) {
 /// caller-only rotate-and-group-by-3 step. Both of the JS function's return branches build
 /// this same list; only the top-level (non-recursive) call transforms it further, which
 /// [`arc_to_cubic_curves`] does.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "mirrors arcToCubicCurves")]
 fn arc_points(
     mut x1: f64,
     mut y1: f64,
@@ -552,7 +556,7 @@ fn arc_points(
 /// `lib/normalize.js` `arcToCubicCurves`, top-level (non-recursive) call: rotates
 /// [`arc_points`]'s flat point list back into world space and groups it into cubic
 /// Bezier control-point triples.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "mirrors arcToCubicCurves")]
 fn arc_to_cubic_curves(
     x1: f64,
     y1: f64,

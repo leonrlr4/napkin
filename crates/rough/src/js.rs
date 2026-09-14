@@ -30,6 +30,12 @@ pub fn math_round(x: f64) -> f64 {
 /// `Number.prototype.toFixed(digits)` for `|x| < 1e21`. JS rounds the exact binary value
 /// half away from zero; Rust's `{:.N}` rounds ties to even, so `0.0009765625` (exactly
 /// representable) gives `0.000976563` here and `0.000976562` with `format!`.
+///
+/// # Panics
+///
+/// Panics if `x` is NaN or infinite: `format!("{:.1100}", x.abs())` prints `"NaN"` or
+/// `"inf"`, which has no `.` for the split below to find. JS does not throw here;
+/// `toFixed` on NaN returns `"NaN"` and on an infinity returns `"Infinity"`.
 pub fn to_fixed(x: f64, digits: usize) -> String {
     // 1100 fractional digits hold the exact expansion of any f64.
     let exact = format!("{:.1100}", x.abs());

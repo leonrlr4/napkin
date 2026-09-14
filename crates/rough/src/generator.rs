@@ -1,5 +1,5 @@
 //! `bin/generator.js`. `opsToPath`, `toPaths` and `fillSketch` are not ported
-//! (m1-global-rules.md, decision 5).
+//! (see the M1 plan's decision 5).
 
 use crate::core::{Drawable, Op, OpSet, OpSetType, Options, Point, ResolvedOptions, Shape};
 use crate::js::truthy;
@@ -25,9 +25,10 @@ fn has_fill(o: &Ctx) -> bool {
     o.o.fill.as_deref().is_some_and(|f| !f.is_empty())
 }
 
-/// The character class JS regex `\s` matches: wider than `char::is_whitespace` (it adds
-/// U+180E-adjacent separators like U+1680 and U+FEFF, verified against V8's `/\s/` against
-/// every codepoint up to U+FFFF), used by [`preprocess_path`]'s second step.
+/// The character class JS regex `\s` matches, used by [`preprocess_path`]'s second step.
+/// Differs from `char::is_whitespace` in exactly two codepoints (verified against V8's
+/// `/\s/` for every codepoint up to U+FFFF): `char::is_whitespace` matches U+0085 (NEL),
+/// which `\s` does not, and `\s` matches U+FEFF (BOM), which `char::is_whitespace` does not.
 fn is_js_whitespace(c: char) -> bool {
     matches!(
         c,
@@ -80,13 +81,6 @@ impl RoughGenerator {
     pub fn new() -> Self {
         RoughGenerator {
             default_options: ResolvedOptions::default(),
-        }
-    }
-
-    /// bin/generator.js `constructor` with `config.options`: `this._o(config.options)`.
-    pub fn with_options(options: &Options) -> Self {
-        RoughGenerator {
-            default_options: ResolvedOptions::default().merge(options),
         }
     }
 
@@ -225,6 +219,10 @@ impl RoughGenerator {
     }
 
     /// bin/generator.js `curve`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `points` is empty (the JS throws a `TypeError` reading `points[0]`).
     pub fn curve(&self, points: &[Point], options: &Options) -> Drawable {
         let mut o = Ctx::new(self.default_options.merge(options));
         let mut paths = Vec::new();
@@ -267,6 +265,12 @@ impl RoughGenerator {
     }
 
     /// bin/generator.js `polygon`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `points` is empty and `options` requests a pattern fill (hachure,
+    /// cross-hatch, zigzag, dots, dashed or zigzag-line): `hachure_fill::hachure_lines`
+    /// indexes the empty polygon's first vertex (the JS throws a `TypeError` there too).
     pub fn polygon(&self, points: &[Point], options: &Options) -> Drawable {
         let mut o = Ctx::new(self.default_options.merge(options));
         let mut paths = Vec::new();
@@ -305,7 +309,8 @@ impl RoughGenerator {
             });
         }
         let d = preprocess_path(d);
-        let has_fill = has_fill(&o)
+        // JS `hasFill`, renamed to avoid shadowing the `has_fill` helper above.
+        let path_has_fill = has_fill(&o)
             && o.o.fill.as_deref() != Some("transparent")
             && o.o.fill.as_deref() != Some(NOS);
         let has_stroke = o.o.stroke != NOS;
@@ -319,7 +324,7 @@ impl RoughGenerator {
         // `pointsOnPath` runs before `svgPath`; a parse error is thrown from here first.
         let mut sets = points_on_path::points_on_path(&d, 1.0, Some(distance))?;
         let shape = renderer::svg_path(&d, &mut o)?;
-        if has_fill {
+        if path_has_fill {
             if o.o.fill_style == "solid" {
                 if sets.len() == 1 {
                     // `Object.assign(Object.assign({}, o), {...})`: the copy shares the
