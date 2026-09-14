@@ -3,7 +3,9 @@
 //! `tools/baseline/rough/generate.mjs`.
 
 pub mod core;
+mod fillers;
 pub mod generator;
+mod geometry;
 pub mod hachure_fill;
 pub mod js;
 pub mod math;

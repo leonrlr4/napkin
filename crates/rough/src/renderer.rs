@@ -47,6 +47,12 @@ impl Ctx {
         }
         Ctx::new(o)
     }
+
+    /// `ops.randomizer?.next()`: draws only if a randomizer already exists
+    /// (bin/fillers/scan-line-hachure.js).
+    pub fn existing_random(&self) -> Option<f64> {
+        self.randomizer.as_ref().map(|r| r.borrow_mut().next())
+    }
 }
 
 /// bin/renderer.js `line`.
@@ -342,21 +348,51 @@ pub(crate) fn solid_fill_polygon(polygon_list: &[Vec<Point>], o: &mut Ctx) -> Op
 }
 
 /// bin/renderer.js `patternFillPolygons`.
-pub(crate) fn pattern_fill_polygons(_polygon_list: &mut [Vec<Point>], _o: &mut Ctx) -> OpSet {
-    todo!()
+pub(crate) fn pattern_fill_polygons(polygon_list: &mut [Vec<Point>], o: &mut Ctx) -> OpSet {
+    crate::fillers::fill_polygons(polygon_list, o)
 }
 
-/// bin/renderer.js `patternFillArc`. Implemented in Task 10.
+/// bin/renderer.js `patternFillArc`.
 pub(crate) fn pattern_fill_arc(
-    _x: f64,
-    _y: f64,
-    _width: f64,
-    _height: f64,
-    _start: f64,
-    _stop: f64,
-    _o: &mut Ctx,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    start: f64,
+    stop: f64,
+    o: &mut Ctx,
 ) -> OpSet {
-    todo!()
+    let cx = x;
+    let cy = y;
+    let mut rx = (width / 2.0).abs();
+    let mut ry = (height / 2.0).abs();
+    rx += offset_opt(rx * 0.01, o, 1.0);
+    ry += offset_opt(ry * 0.01, o, 1.0);
+    let mut strt = start;
+    let mut stp = stop;
+    while strt < 0.0 {
+        strt += std::f64::consts::PI * 2.0;
+        stp += std::f64::consts::PI * 2.0;
+    }
+    if (stp - strt) > (std::f64::consts::PI * 2.0) {
+        strt = 0.0;
+        stp = std::f64::consts::PI * 2.0;
+    }
+    let increment = (stp - strt) / o.o.curve_step_count;
+    let mut points: Vec<Point> = Vec::new();
+    let mut angle = strt;
+    while angle <= stp {
+        points.push([cx + rx * angle.cos(), cy + ry * angle.sin()]);
+        angle += increment;
+    }
+    points.push([cx + rx * stp.cos(), cy + ry * stp.sin()]);
+    points.push([cx, cy]);
+    pattern_fill_polygons(&mut [points], o)
+}
+
+/// bin/renderer.js `doubleLineFillOps`.
+pub(crate) fn double_line_fill_ops(x1: f64, y1: f64, x2: f64, y2: f64, o: &mut Ctx) -> Vec<Op> {
+    _double_line(x1, y1, x2, y2, o, true)
 }
 
 // Private helpers

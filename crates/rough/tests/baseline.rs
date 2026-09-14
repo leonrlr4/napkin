@@ -162,3 +162,18 @@ fn outline_path() {
 fn fill_solid() {
     check_group(&dir(), "fill_solid", generate);
 }
+
+#[test]
+fn fill_hachure() {
+    check_group(&dir(), "fill_hachure", generate);
+}
+
+#[test]
+fn fill_cross_hatch() {
+    check_group(&dir(), "fill_cross_hatch", generate);
+}
+
+#[test]
+fn fill_zigzag() {
+    check_group(&dir(), "fill_zigzag", generate);
+}
