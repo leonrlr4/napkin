@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rough", "crates/testkit"]
+members = ["crates/rough", "crates/scene", "crates/testkit"]
 resolver = "3"
 
 [workspace.package]
@@ -8,6 +8,9 @@ rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
+getrandom = "0.3"
+regex = "1"
 rough = { path = "crates/rough" }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 testkit = { path = "crates/testkit" }
