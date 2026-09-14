@@ -63,7 +63,7 @@ fn dpr(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 fn len(a: [f64; 2]) -> f64 {
-    a[0].hypot(a[1])
+    rough::js::hypot(a[0], a[1])
 }
 
 fn uni(a: [f64; 2]) -> [f64; 2] {
@@ -74,7 +74,7 @@ fn uni(a: [f64; 2]) -> [f64; 2] {
 /// `dist`: note the argument order inside `hypot`, `(A[1]-B[1], A[0]-B[0])` and not
 /// `(A[0]-B[0], A[1]-B[1])`; harmless since `hypot` is symmetric, kept for a literal port.
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[1] - b[1]).hypot(a[0] - b[0])
+    rough::js::hypot(a[1] - b[1], a[0] - b[0])
 }
 
 /// `dist2`: distance *squared* (`len2(sub(A,B))`), unrelated to [`dist`].
@@ -83,6 +83,10 @@ fn dist_sq(a: [f64; 2], b: [f64; 2]) -> f64 {
     d[0] * d[0] + d[1] * d[1]
 }
 
+/// `sin`/`cos` are `f64`'s own, not ported: node's V8 build uses a glibc-derived
+/// large-table `Math.sin`/`Math.cos`, not the portable fdlibm code [`atan2`](rough::js::atan2)
+/// is ported from (see `crates/rough/src/js.rs`'s module docs). A residual ~1-ULP divergence
+/// from V8 is possible here, same as [`get_stroke_outline_points`]'s other geometry.
 fn rot_around(a: [f64; 2], c: [f64; 2], r: f64) -> [f64; 2] {
     let s = r.sin();
     let cs = r.cos();

@@ -46,7 +46,7 @@ pub(crate) fn is_path_a_loop(points: &[[f64; 2]]) -> bool {
     }
     let first = points[0];
     let last = points[points.len() - 1];
-    let distance = (last[0] - first[0]).hypot(last[1] - first[1]);
+    let distance = rough::js::hypot(last[0] - first[0], last[1] - first[1]);
     distance <= LINE_CONFIRM_THRESHOLD
 }
 

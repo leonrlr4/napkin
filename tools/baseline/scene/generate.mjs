@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, runCase, writeGroup } from "../lib/harness.mjs";
-import { colors, fractionalKeys, fractionalRanges, indexScenarios, newElementCalls, renderContexts, shapeElements } from "./cases.mjs";
+import { colors, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -120,6 +120,7 @@ writeGroup(
   source,
   shapeElements
     .filter(({ element }) => element.type === "freedraw")
+    .concat(freedrawOutlineExtras)
     .map(({ label, element }) => ({
       name: label,
       call: "getFreedrawOutlinePoints",

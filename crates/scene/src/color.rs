@@ -760,7 +760,12 @@ fn degrees_to_radians(degrees: f64) -> f64 {
     degrees * std::f64::consts::PI / 180.0
 }
 
-/// `cssHueRotate`.
+/// `cssHueRotate`. `sin`/`cos` are `f64`'s own, not ported: node's V8 build uses a
+/// glibc-derived large-table `Math.sin`/`Math.cos`, not a portable implementation (see
+/// `crates/rough/src/js.rs`'s module docs), so the rotated color can differ from
+/// Excalidraw's by up to ~1 ULP before [`math_round`] rounds it back to an integer channel
+/// value — the one caller here always passes `degrees: 180.0`, where `sin`/`cos` are exact
+/// enough that this has not been observed to matter, but is not proven not to.
 fn css_hue_rotate(red: f64, green: f64, blue: f64, degrees: f64) -> (f64, f64, f64) {
     let r = red / 255.0;
     let g = green / 255.0;

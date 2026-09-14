@@ -1,13 +1,16 @@
 //! Port of `@excalidraw/laser-pointer` (`packages/laser-pointer/src/{state,math}.ts`),
-//! restricted to the shape `createLaserPointer` builds: `simplify: 0` always, `keepHead`
-//! and `simplifyPhase` left at their defaults (`false`, `"output"`).
+//! restricted to the shape `createLaserPointer` builds: `simplify: 0`, `keepHead: false`
+//! and `simplifyPhase` at its default (`"output"`) always.
 //!
 //! `simplify: 0` means the `douglasPeucker` branches in `stabilizeTail` and
 //! `getStrokeOutline` (`simplifyPhase: "tail"`/`"output"`/`"input"`) never run; `simplify.ts`
-//! is therefore not ported, and [`LaserPointerOptions`] has no `simplify`/`simplify_phase`
-//! fields so those branches cannot be reached by construction. `keepHead` is a real
-//! (unconditionally `false`) field: its branch is ported since it costs nothing extra and
-//! keeps `getStrokeOutline` a direct port of the source.
+//! is therefore not ported, and [`Options`] has no `simplify`/`simplify_phase` fields so
+//! those branches cannot be reached by construction. `keepHead` is never set by
+//! `createLaserPointer` either (always `false`), and by the same reasoning [`Options`] has
+//! no `keep_head` field: `getStrokeOutline`'s two `if (this.options.keepHead) { ... }`
+//! branches are unreachable and not ported (Task 11 fix-round-1 finding 1 — an earlier
+//! version of this port ported them anyway, on the reasoning that they cost nothing extra;
+//! removed since nothing here ever sets `keepHead`).
 
 /// `[x, y, r]`; `r` carries whatever `sizeMapping` reads (pressure, pinned to `1` by
 /// `getConstantWidthFreedrawOutline`).
@@ -37,6 +40,12 @@ fn norm(p: Point) -> Point {
     [p[0] / len, p[1] / len, p[2]]
 }
 
+/// `f64::sin`/`f64::cos` (libm) can disagree with V8's `Math.sin`/`Math.cos` in the last
+/// bit (node's V8 build here uses `third_party/glibc`'s large-table implementation, not the
+/// portable fdlibm one `js::atan2` is ported from — see that function's doc comment and
+/// `crates/rough/src/js.rs`'s module docs); not ported, since porting it means porting that
+/// table-heavy glibc code. Unlike `js::atan2`/`js::hypot`, a divergence here only nudges a
+/// rotated point by ~1 ULP, not a loop bound.
 fn rot(p: Point, rad: f64) -> Point {
     let (s, c) = (rad.sin(), rad.cos());
     [c * p[0] - s * p[1], s * p[0] + c * p[1], p[2]]
@@ -47,11 +56,12 @@ fn plerp(a: Point, b: Point, t: f64) -> Point {
 }
 
 fn angle(p: Point, p1: Point, p2: Point) -> f64 {
-    (p2[1] - p[1]).atan2(p2[0] - p[0]) - (p1[1] - p[1]).atan2(p1[0] - p[0])
+    rough::js::atan2(p2[1] - p[1], p2[0] - p[0]) - rough::js::atan2(p1[1] - p[1], p1[0] - p[0])
 }
 
+/// `sin`/`cos` are `f64`'s own (see [`rot`]'s doc comment); `js::atan2` is V8-exact.
 fn norm_angle(a: f64) -> f64 {
-    a.sin().atan2(a.cos())
+    rough::js::atan2(a.sin(), a.cos())
 }
 
 fn mag(p: Point) -> f64 {
@@ -78,14 +88,15 @@ fn run_length(ps: &[Point]) -> f64 {
     len
 }
 
-/// `LaserPointerOptions`, minus `simplify`/`simplifyPhase` (see module docs) and
+/// `LaserPointerOptions`, minus `simplify`/`simplifyPhase` (see module docs), `keepHead`
+/// (`createLaserPointer` never sets it, so it is always `false`; both of `getStrokeOutline`'s
+/// `keepHead` branches are unreachable and, like `simplify`, not ported), and
 /// `sizeMapping`'s unused `runningLength`/`currentIndex`/`totalLength` fields:
 /// `createLaserPointer`'s `sizeMapping` (`(details) => Math.max(0.1, details.pressure)`) only
 /// reads `pressure`.
 pub(crate) struct Options {
     pub size: f64,
     pub streamline: f64,
-    pub keep_head: bool,
     pub size_mapping: fn(f64) -> f64,
 }
 
@@ -211,7 +222,17 @@ impl LaserPointer {
                 ps.push(add(n, smul(rot([1.0, 0.0, 0.0], theta), n_size)));
                 theta += std::f64::consts::PI / 16.0;
             }
-            ps.push(ps[0]);
+            // `ps.push(ps[0])`: both loops above run zero times when `p_angle` is `NaN`
+            // (any `theta <= ...` comparison against `NaN` is false), which happens for
+            // some extreme inputs (`plerp`'s `sub` can overflow to infinity, and
+            // `infinity * 0.0` is `NaN` — see `add_point`'s `streamline` transform). The
+            // source's `ps.push(ps[0])` then pushes `undefined` into `ps` (JS `Array.prototype
+            // .push` never rejects a value) and the caller's later destructuring of that
+            // element throws; napkin returns the (here, empty) outline as-is instead of
+            // panicking on the out-of-bounds index `ps[0]` would be.
+            if let Some(&first) = ps.first() {
+                ps.push(first);
+            }
             return ps;
         }
 
@@ -335,18 +356,9 @@ impl LaserPointer {
             prev_speed = speed;
         }
 
+        // `keepHead` is always `false` (see the `Options` doc comment): the source's
+        // `if (this.options.keepHead) { ... }` branch here never runs.
         if visible_start_index >= len - 2 {
-            if self.options.keep_head {
-                let c = points[len - 1];
-                let mut ps = Vec::new();
-                let mut theta = 0.0;
-                while theta <= std::f64::consts::PI * 2.0 {
-                    ps.push(add(c, smul(rot([1.0, 0.0, 0.0], theta), self.options.size)));
-                    theta += std::f64::consts::PI / 16.0;
-                }
-                ps.push(add(c, smul([1.0, 0.0, 0.0], self.options.size)));
-                return ps;
-            }
             return Vec::new();
         }
 
@@ -362,12 +374,9 @@ impl LaserPointer {
         let pp_dir_pu = rot(dir_pu, std::f64::consts::PI / 2.0);
 
         let start_cap_size = self.get_size(first[2]);
-
-        let end_cap_size = if self.options.keep_head {
-            self.options.size
-        } else {
-            self.get_size(penultimate[2])
-        };
+        // `keepHead` is always `false`: `end_cap_size` is always `getSize(...)`, never
+        // `this.options.size`.
+        let end_cap_size = self.get_size(penultimate[2]);
 
         // Lowered threshold to 0.1, ensuring virtually all strokes get proper rounded caps
         // for visual consistency.
@@ -401,5 +410,29 @@ impl LaserPointer {
         }
 
         stroke_outline
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 11 fix-round-1 finding 3's repro: `addPoint`'s `streamline` transform (`plerp`)
+    /// computes `sub(point, lastPoint)` (`B - A`), which overflows to infinity for two
+    /// points this far apart; `infinity * 0.0` (the `1 - streamline` scale factor here) is
+    /// `NaN`, which propagates into `p_angle`, and both of `getStrokeOutline`'s `len == 2`
+    /// loops (guarded by `theta <= ... + p_angle`) then run zero times. The source's
+    /// `ps.push(ps[0])` still succeeds on the resulting empty `ps` (pushing `undefined`);
+    /// this must not panic on the equivalent `ps[0]` indexing.
+    #[test]
+    fn get_stroke_outline_does_not_panic_on_nan_p_angle() {
+        let mut pointer = LaserPointer::new(Options {
+            size: 2.8,
+            streamline: 1.0,
+            size_mapping: |pressure| pressure.max(0.1),
+        });
+        pointer.add_point([-1e308, 0.0, 1.0]);
+        pointer.add_point([1e308, 0.0, 1.0]);
+        assert_eq!(pointer.get_stroke_outline(), Vec::<Point>::new());
     }
 }

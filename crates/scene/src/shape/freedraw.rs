@@ -21,6 +21,10 @@ const CONSTANT_WIDTH_SIZE_FACTOR: f64 = 1.4;
 const DEFAULT_STROKE_STREAMLINE: f64 = 0.5;
 
 /// `easing: (t) => Math.sin((t * Math.PI) / 2)` (`https://easings.net/#easeOutSine`).
+/// `sin` is `f64`'s own, not ported: node's V8 build uses a glibc-derived large-table
+/// `Math.sin`, not a portable implementation (see `crates/rough/src/js.rs`'s module docs
+/// and `laser_pointer`'s `rot`), so this stroke radius can differ from Excalidraw's by up
+/// to ~1 ULP.
 fn ease_out_sine(t: f64) -> f64 {
     (t * std::f64::consts::PI / 2.0).sin()
 }
@@ -78,7 +82,6 @@ fn constant_width_freedraw_outline(element: &FreedrawElement) -> Vec<[f64; 2]> {
     let mut pointer = LaserPointer::new(laser_pointer::Options {
         size: element.base.stroke_width * CONSTANT_WIDTH_SIZE_FACTOR,
         streamline: freedraw_streamline(element),
-        keep_head: false,
         size_mapping: |pressure| pressure.max(0.1),
     });
 

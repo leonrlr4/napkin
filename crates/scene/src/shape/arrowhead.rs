@@ -64,7 +64,10 @@ fn degrees_to_radians(degrees: f64) -> f64 {
 }
 
 /// `pointRotateRads`: `if (!angle) return point;` short-circuits for `0` (`+0`/`-0`) and
-/// `NaN`, both falsy in JS.
+/// `NaN`, both falsy in JS. `sin`/`cos` are `f64`'s own, not ported: node's V8 build uses a
+/// glibc-derived large-table `Math.sin`/`Math.cos`, not a portable implementation (see
+/// `crates/rough/src/js.rs`'s module docs), so a rotated arrowhead point can differ from
+/// Excalidraw's by up to ~1 ULP.
 fn point_rotate_rads(point: [f64; 2], center: [f64; 2], angle: f64) -> [f64; 2] {
     if angle == 0.0 || angle.is_nan() {
         return point;
@@ -170,7 +173,7 @@ fn arrowhead_points(
     let y1 = equation(0.3, 1);
 
     // Find the normalized direction vector based on the previously calculated points.
-    let distance = (x2 - x1).hypot(y2 - y1);
+    let distance = rough::js::hypot(x2 - x1, y2 - y1);
     let nx = (x2 - x1) / distance;
     let ny = (y2 - y1) / distance;
 
@@ -197,7 +200,7 @@ fn arrowhead_points(
     } else {
         [0.0, 0.0]
     };
-    let length = (cx - px).hypot(cy - py);
+    let length = rough::js::hypot(cx - px, cy - py);
 
     // Scale down the arrowhead until we hit a certain size so that it doesn't look weird.
     // This value is selected by minimizing a minimum size with the last segment of the
@@ -214,7 +217,7 @@ fn arrowhead_points(
     let ys = ty - ny * min_size;
 
     if arrowhead == "circle" || arrowhead == "circle_outline" {
-        let diameter = (ys - ty).hypot(xs - tx) + element.base.stroke_width - 2.0;
+        let diameter = rough::js::hypot(ys - ty, xs - tx) + element.base.stroke_width - 2.0;
         return Some(vec![tx, ty, diameter]);
     }
 
@@ -242,7 +245,7 @@ fn arrowhead_points(
             point_rotate_rads(
                 [tx + min_size * 2.0, ty],
                 [tx, ty],
-                (py - ty).atan2(px - tx),
+                rough::js::atan2(py - ty, px - tx),
             )
         } else {
             let [px, py] = if element.points.len() > 1 {
@@ -253,7 +256,7 @@ fn arrowhead_points(
             point_rotate_rads(
                 [tx - min_size * 2.0, ty],
                 [tx, ty],
-                (ty - py).atan2(tx - px),
+                rough::js::atan2(ty - py, tx - px),
             )
         };
 

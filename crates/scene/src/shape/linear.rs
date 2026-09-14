@@ -43,7 +43,7 @@ fn heading_for_point_is_horizontal(p: [f64; 2], o: [f64; 2]) -> bool {
 
 /// `pointDistance`.
 fn point_distance(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (b[0] - a[0]).hypot(b[1] - a[1])
+    rough::js::hypot(b[0] - a[0], b[1] - a[1])
 }
 
 /// `generateElbowArrowShape`.
