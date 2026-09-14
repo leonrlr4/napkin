@@ -78,16 +78,24 @@ fn point_rotate_rads(point: [f64; 2], center: [f64; 2], angle: f64) -> [f64; 2] 
 }
 
 /// `getCurvePathOps`. The JS falls back to `shape.sets[0].ops` when no `"path"` opset is
-/// found, indexing unconditionally; every `Drawable` this module examines is a line/arrow's
-/// own shape, which always draws a visible stroke (never `stroke: "none"`), so a `"path"`
-/// opset is always present and that fallback is unreachable here.
+/// found, indexing unconditionally: `shape.sets[0]` is `undefined` when `sets` is empty, and
+/// `.ops` on that throws a `TypeError` (`packages/utils/src/shape.ts:210`). That happens for
+/// a real drawable: `strokeColor: "none"` makes `rough`'s `line`/`curve`/`polygon`/
+/// `linear_path`/`path` all skip pushing their outline opset (`crates/rough/src/
+/// generator.rs`), and a line/arrow with a transparent background has no fill opset either,
+/// so `sets` is empty. Decision 7 extends here too: return an empty ops list instead of
+/// panicking, which `arrowhead_points`'s `ops.is_empty()` check then treats exactly like the
+/// JS's `ops.length < 1` short-circuit (skip this arrowhead).
 fn curve_path_ops(drawable: &Drawable) -> Vec<Op> {
     for set in &drawable.sets {
         if set.kind == OpSetType::Path {
             return set.ops.clone();
         }
     }
-    drawable.sets[0].ops.clone()
+    drawable
+        .sets
+        .first()
+        .map_or_else(Vec::new, |set| set.ops.clone())
 }
 
 /// `getArrowheadPoints`. Returns `None` wherever the JS returns `null`, and also where the
@@ -100,8 +108,13 @@ fn curve_path_ops(drawable: &Drawable) -> Vec<Op> {
 /// in the source rules it out for other inputs, so it is handled the same way.
 ///
 /// `element.points` (not the `[[0, 0]]`-padded array `_generateElementShape` draws with) is
-/// what the JS reads here; when it is empty, the shape drawn from `[[0, 0]]` has no ops, so
-/// `ops.is_empty()` already returns `None` before this function would need to index it.
+/// what the JS reads here. When `element.points` is empty, the shape drawn from the padded
+/// `[[0, 0]]` can still have ops (e.g. a round line/arrow's `curve()` still emits a
+/// `bcurveTo`, and an elbow arrow's degenerate `"M 0 0 L 0 0"` path still emits an op too),
+/// so `ops.is_empty()` does not always catch this case. The JS then indexes
+/// `element.points[element.points.length - 1]`, which is `undefined` on an empty array, and
+/// destructuring that throws a `TypeError` (`packages/element/src/bounds.ts:818-820`).
+/// Decision 7 extends here too: skip the arrowhead instead.
 fn arrowhead_points(
     element: &LinearElement,
     shape: &[Drawable],
@@ -163,7 +176,12 @@ fn arrowhead_points(
 
     let size = arrowhead_size(arrowhead);
 
-    // Length for -> arrows is based on the length of the last section.
+    // Length for -> arrows is based on the length of the last section. The JS indexes
+    // `element.points` unconditionally here and throws on an empty array (see this
+    // function's doc comment); skip the arrowhead instead.
+    if element.points.is_empty() {
+        return None;
+    }
     let last = element.points.len() - 1;
     let [cx, cy] = if position == Position::End {
         element.points[last]
@@ -471,5 +489,128 @@ pub(super) fn shapes(
             arrowhead_points(element, shape, position, arrowhead, 0.0),
             &arrowhead_line_options(element, options),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Map;
+
+    use crate::element::{Element, ElementBase, LinearElement, Roundness};
+    use crate::json::Slot;
+    use crate::shape::{ElementShape, ShapeContext, generate_element_shape};
+
+    /// A minimal but complete `ElementBase` for building typed arrows directly (bypassing
+    /// `Element::from_value`'s JSON round-trip, which these tests have no need for).
+    fn base(kind: &str) -> ElementBase {
+        ElementBase {
+            id: "e1".into(),
+            kind: kind.into(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            angle: 0.0,
+            stroke_color: "#1e1e1e".into(),
+            background_color: "transparent".into(),
+            fill_style: "solid".into(),
+            stroke_width: 2.0,
+            stroke_style: "solid".into(),
+            roughness: 1.0,
+            opacity: 100.0,
+            group_ids: Vec::new(),
+            index: Slot::Missing,
+            roundness: Slot::Missing,
+            seed: 1.0,
+            version: 1.0,
+            version_nonce: 1.0,
+            is_deleted: false,
+            updated: Slot::Missing,
+        }
+    }
+
+    fn round_roundness() -> Slot<Roundness> {
+        Slot::Value(Roundness {
+            kind: 3.0,
+            value: Slot::Missing,
+            extra: Map::new(),
+        })
+    }
+
+    fn ctx() -> ShapeContext<'static> {
+        ShapeContext {
+            dark_mode: false,
+            canvas_background_color: "#ffffff",
+        }
+    }
+
+    /// Expects exactly the line/arrow's own drawable(s), with every arrowhead skipped: the
+    /// shape must be `Drawables` of the given length, never a panic.
+    fn assert_drawable_count(element: &Element, expected: usize) {
+        match generate_element_shape(element, &ctx()) {
+            ElementShape::Drawables(d) => assert_eq!(
+                d.len(),
+                expected,
+                "expected {expected} drawable(s) (arrowheads skipped, not drawn), got {}",
+                d.len()
+            ),
+            other => panic!("expected Drawables, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_points_round_arrow_with_end_arrowhead_does_not_panic() {
+        // Finding 1: rough's `curve()` still emits a `bcurveTo` for the `[[0, 0]]`-padded
+        // single point, so `getArrowheadPoints` reaches `element.points[element.points.len()
+        // - 1]` with an empty `element.points` (unlike `arrow/single`/`arrow/empty` in the
+        // baseline, whose non-round shape has no ops at all).
+        let l = LinearElement {
+            base: ElementBase {
+                roundness: round_roundness(),
+                ..base("arrow")
+            },
+            points: vec![],
+            start_arrowhead: Slot::Missing,
+            end_arrowhead: Slot::Value("arrow".into()),
+            elbowed: None,
+            extra: Map::new(),
+        };
+        assert_drawable_count(&Element::Arrow(l), 1);
+    }
+
+    #[test]
+    fn empty_points_elbow_arrow_does_not_panic() {
+        // Finding 1: an elbow arrow's degenerate `"M 0 0 L 0 0"` path (from the padded
+        // single point) also emits an op, reaching the same `element.points` indexing with
+        // an empty array. `endArrowhead` defaults to `"arrow"` when absent.
+        let l = LinearElement {
+            base: base("arrow"),
+            points: vec![],
+            start_arrowhead: Slot::Missing,
+            end_arrowhead: Slot::Missing,
+            elbowed: Some(true),
+            extra: Map::new(),
+        };
+        assert_drawable_count(&Element::Arrow(l), 1);
+    }
+
+    #[test]
+    fn stroke_none_round_arrow_with_arrowhead_does_not_panic() {
+        // Finding 2: `strokeColor: "none"` makes rough's `curve()` skip the outline opset
+        // entirely (no fill either, since the background is transparent), so the line
+        // drawable's `sets` is empty and `getCurvePathOps`'s indexing fallback would panic.
+        let l = LinearElement {
+            base: ElementBase {
+                stroke_color: "none".into(),
+                roundness: round_roundness(),
+                ..base("arrow")
+            },
+            points: vec![[0.0, 0.0], [10.0, 10.0], [20.0, 0.0]],
+            start_arrowhead: Slot::Missing,
+            end_arrowhead: Slot::Value("arrow".into()),
+            elbowed: None,
+            extra: Map::new(),
+        };
+        assert_drawable_count(&Element::Arrow(l), 1);
     }
 }
