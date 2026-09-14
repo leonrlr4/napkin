@@ -177,3 +177,18 @@ fn fill_cross_hatch() {
 fn fill_zigzag() {
     check_group(&dir(), "fill_zigzag", generate);
 }
+
+#[test]
+fn fill_dots() {
+    check_group(&dir(), "fill_dots", generate);
+}
+
+#[test]
+fn fill_dashed() {
+    check_group(&dir(), "fill_dashed", generate);
+}
+
+#[test]
+fn fill_zigzag_line() {
+    check_group(&dir(), "fill_zigzag_line", generate);
+}

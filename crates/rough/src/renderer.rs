@@ -147,6 +147,12 @@ pub(crate) struct EllipseResult {
     pub opset: OpSet,
 }
 
+/// bin/renderer.js `ellipse`.
+pub(crate) fn ellipse(x: f64, y: f64, width: f64, height: f64, o: &mut Ctx) -> OpSet {
+    let params = generate_ellipse_params(width, height, o);
+    ellipse_with_params(x, y, o, &params).opset
+}
+
 /// bin/renderer.js `generateEllipseParams`.
 pub(crate) fn generate_ellipse_params(width: f64, height: f64, o: &mut Ctx) -> EllipseParams {
     let psq = (std::f64::consts::PI
