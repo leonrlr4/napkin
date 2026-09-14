@@ -214,9 +214,31 @@ fn bound01(component: &Component, max: f64) -> f64 {
     let process_percent = is_percentage(&effective);
     let mut n = component_parse_float(&effective).clamp(0.0, max);
     if process_percent {
-        // `parseInt(n * max, 10)`: truncates toward zero, which is `n * max`'s floor here
-        // since it is always non-negative (n and max both are).
-        n = (n * max).trunc() / 100.0;
+        // `parseInt(n * max, 10)`: JS first converts `n * max` to a string. For most
+        // values reachable here that string is plain decimal (`n * max` is finite, at
+        // most `max * max <= 360 * 360`, nowhere near the `>= 1e21` threshold where
+        // `ToString` would switch to exponential notation at the top end), so `parseInt`
+        // reads the same leading digits as truncating toward zero. But for
+        // `0 < n * max < 1e-6`, `ToString` *does* switch to exponential notation (e.g.
+        // "1e-7"), and `parseInt` then stops at the first non-digit character (`.` or
+        // `e`), reading only the mantissa's leading digit -- not 0, even though the
+        // truncated integer part is 0. `format!("{:e}", x)` prints that same leading
+        // digit first (Rust's exponential form is normalized the same way JS's is), so
+        // extracting the digits before its first non-digit character reproduces
+        // `parseInt`'s answer exactly, without reproducing JS's own number-to-string
+        // implementation.
+        let x = n * max;
+        let truncated = if x > 0.0 && x < 1e-6 {
+            let exponential = format!("{x:e}");
+            let leading_digits: String = exponential
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            leading_digits.parse().unwrap_or(0.0)
+        } else {
+            x.trunc()
+        };
+        n = truncated / 100.0;
     }
     if (n - max).abs() < 0.000001 {
         return 1.0;
