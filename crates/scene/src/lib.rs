@@ -2,8 +2,10 @@
 //! No egui, no rendering: shape output is data (spec §4.2).
 
 pub mod element;
+pub mod env;
 pub mod file;
 pub mod json;
+pub mod new_element;
 
 pub use crate::element::Element;
 pub use crate::file::SceneFile;
