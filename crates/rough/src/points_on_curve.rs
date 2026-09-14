@@ -92,6 +92,11 @@ fn get_points_on_bezier_curve_with_splitting(
 }
 
 /// `lib/index.js` `simplify`.
+///
+/// # Panics
+///
+/// Panics on an empty `points`, where the JS reads `points[-1]` as `undefined` and returns
+/// `[undefined, undefined]`.
 pub fn simplify(points: &[Point], distance: f64) -> Vec<Point> {
     let mut out = Vec::new();
     simplify_points(points, 0, points.len(), distance, &mut out);
@@ -100,6 +105,11 @@ pub fn simplify(points: &[Point], distance: f64) -> Vec<Point> {
 
 /// `lib/index.js` `simplifyPoints`: Ramer-Douglas-Peucker algorithm,
 /// <https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm>.
+///
+/// Panics if `end == 0` (mirrors the JS reading `points[-1]` as `undefined` rather than
+/// throwing; callers here never pass an empty range). `end == 1` is a normal case: the JS
+/// loop `for (let i = start + 1; i < end - 1; ++i)` then runs zero times, so the search for
+/// the farthest point is skipped below rather than indexed.
 fn simplify_points(
     points: &[Point],
     start: usize,
@@ -112,12 +122,14 @@ fn simplify_points(
     let e = points[end - 1];
     let mut max_dist_sq = 0.0;
     let mut max_ndx = 1; // JS: initialised to 1, not `start + 1`
-    for (offset, &p) in points[(start + 1)..(end - 1)].iter().enumerate() {
-        let i = start + 1 + offset;
-        let dist_sq = distance_to_segment_sq(p, s, e);
-        if dist_sq > max_dist_sq {
-            max_dist_sq = dist_sq;
-            max_ndx = i;
+    if end >= 2 {
+        for (offset, &p) in points[(start + 1)..(end - 1)].iter().enumerate() {
+            let i = start + 1 + offset;
+            let dist_sq = distance_to_segment_sq(p, s, e);
+            if dist_sq > max_dist_sq {
+                max_dist_sq = dist_sq;
+                max_ndx = i;
+            }
         }
     }
     // if that point is too far, split
@@ -133,6 +145,12 @@ fn simplify_points(
 }
 
 /// `lib/index.js` `pointsOnBezierCurves`.
+///
+/// # Panics
+///
+/// Panics if `points` has fewer than 4 points and `distance` is `Some` and positive: no
+/// segment is generated, so `simplify_points` runs on an empty accumulator (see
+/// [`simplify`]'s panics).
 pub fn points_on_bezier_curves(
     points: &[Point],
     tolerance: f64,

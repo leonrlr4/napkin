@@ -28,5 +28,11 @@
 {"name":"pointsOnPath/subpaths/t0.15/d0.5","call":"pointsOnPath","args":["M 0 0 L 40 0 L 40 40 Z M 60 0 L 100 0 L 80 40 Z",0.15,0.5],"compare":"exact","expected":[[[0,0],[40,0],[40,40],[0,0]],[[60,0],[100,0],[80,40],[60,0]]]},
 {"name":"pointsOnPath/elbow/t1/dundefined","call":"pointsOnPath","args":["M 0 0 L 34 0 Q 50 0, 50 16 L 50 84 Q 50 100, 66 100 L 150 100",1],"compare":"exact","expected":[[[0,0],[34,0],[34,0],[37.75,0.25],[41,1],[43.75,2.25],[46,4],[47.75,6.250000000000001],[49,9],[49.75,12.25],[50,16],[50,84],[50,84],[50.25,87.75],[51,91],[52.25,93.75],[54,96],[56.25,97.75],[59,99],[62.25,99.75],[66,100],[150,100]]]},
 {"name":"pointsOnPath/elbow/t1/d1.5","call":"pointsOnPath","args":["M 0 0 L 34 0 Q 50 0, 50 16 L 50 84 Q 50 100, 66 100 L 150 100",1,1.5],"compare":"exact","expected":[[[0,0],[37.75,0.25],[47.75,6.250000000000001],[50,16],[50.25,87.75],[56.25,97.75],[66,100],[150,100]]]},
-{"name":"pointsOnPath/elbow/t0.15/d0.5","call":"pointsOnPath","args":["M 0 0 L 34 0 Q 50 0, 50 16 L 50 84 Q 50 100, 66 100 L 150 100",0.15,0.5],"compare":"exact","expected":[[[0,0],[37.75,0.25],[43.75,2.25],[47.75,6.250000000000001],[49,9],[50,16],[50.25,87.75],[52.25,93.75],[56.25,97.75],[59,99],[66,100],[150,100]]]}
+{"name":"pointsOnPath/elbow/t0.15/d0.5","call":"pointsOnPath","args":["M 0 0 L 34 0 Q 50 0, 50 16 L 50 84 Q 50 100, 66 100 L 150 100",0.15,0.5],"compare":"exact","expected":[[[0,0],[37.75,0.25],[43.75,2.25],[47.75,6.250000000000001],[49,9],[50,16],[50.25,87.75],[52.25,93.75],[56.25,97.75],[59,99],[66,100],[150,100]]]},
+{"name":"pointsOnPath/singleMove/t1/dundefined","call":"pointsOnPath","args":["M 10 10",1],"compare":"exact","expected":[[[10,10]]]},
+{"name":"pointsOnPath/singleMove/t1/d1.5","call":"pointsOnPath","args":["M 10 10",1,1.5],"compare":"exact","expected":[[[10,10],[10,10]]]},
+{"name":"pointsOnPath/singleMove/t0.15/d0.5","call":"pointsOnPath","args":["M 10 10",0.15,0.5],"compare":"exact","expected":[[[10,10],[10,10]]]},
+{"name":"pointsOnPath/singleMoveAmongOthers/t1/dundefined","call":"pointsOnPath","args":["M 10 10 L 20 20 M 5 5",1],"compare":"exact","expected":[[[10,10],[20,20]],[[5,5]]]},
+{"name":"pointsOnPath/singleMoveAmongOthers/t1/d1.5","call":"pointsOnPath","args":["M 10 10 L 20 20 M 5 5",1,1.5],"compare":"exact","expected":[[[10,10],[20,20]],[[5,5],[5,5]]]},
+{"name":"pointsOnPath/singleMoveAmongOthers/t0.15/d0.5","call":"pointsOnPath","args":["M 10 10 L 20 20 M 5 5",0.15,0.5],"compare":"exact","expected":[[[10,10],[20,20]],[[5,5],[5,5]]]}
 ]}

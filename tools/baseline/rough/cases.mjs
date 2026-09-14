@@ -114,6 +114,8 @@ const pointsOnCurve = [
     })),
   ),
   ...[0.75, 2, 10].map((distance) => ({ name: `simplify/d${distance}`, call: "simplify", args: [NOISY, distance] })),
+  // `end == 1`: the JS loop that searches for the farthest point runs zero times.
+  { name: "simplify/onePoint", call: "simplify", args: [[[1, 1]], 0.75] },
   ...Object.entries({ ...CURVES, single: [[1, 1]] }).flatMap(([label, points]) =>
     [0, 0.5].map((tightness) => ({
       name: `curveToBezier/${label}/k${tightness}`,
@@ -123,7 +125,14 @@ const pointsOnCurve = [
   ),
 ];
 
-const pointsOnPath = Object.entries(PATHS).flatMap(([label, d]) =>
+// Single-point subpaths: each produces a `currentPoints` set of length 1, so `simplify`
+// runs with `end == 1`.
+const SINGLE_POINT_PATHS = {
+  singleMove: "M 10 10",
+  singleMoveAmongOthers: "M 10 10 L 20 20 M 5 5",
+};
+
+const pointsOnPath = Object.entries({ ...PATHS, ...SINGLE_POINT_PATHS }).flatMap(([label, d]) =>
   [
     [1, undefined],
     [1, 1.5],
@@ -233,6 +242,13 @@ const outlinePath = [
   ...Object.entries(BAD_PATHS).map(([label, d]) => ({ name: `path/${label}`, call: "path", args: [d, { seed: 1 }] })),
   { name: "path/empty", call: "path", args: ["", { seed: 1 }] },
   { name: "path/whitespace", call: "path", args: ["   ", { seed: 1 }] },
+  // Every subpath simplifies with `end == 1`: exercises points_on_curve's one-point case
+  // through RoughGenerator::path.
+  ...Object.entries(SINGLE_POINT_PATHS).map(([label, d]) => ({
+    name: `path/${label}`,
+    call: "path",
+    args: [d, { seed: 1, roughness: 1 }],
+  })),
 ];
 
 // Pattern fills emit a stroke per hachure line, so fill cases use small shapes: the
@@ -289,6 +305,12 @@ export const groups = {
     ...fillable({ fillStyle: "solid" }, [["gain0", { fillShapeRoughnessGain: 0 }]]),
     // No subpaths at all: the multi-set branch runs solidFillPolygon on an empty list.
     { name: "path/whitespace", call: "path", args: ["   ", { seed: 1, fill: "#f00", fillStyle: "solid" }] },
+    // Multiple subpaths, one of them single-point: covers the multi-subpath solid branch.
+    {
+      name: "path/singleMoveAmongOthers",
+      call: "path",
+      args: [SINGLE_POINT_PATHS.singleMoveAmongOthers, { seed: 1, roughness: 1, fill: "#f00", fillStyle: "solid" }],
+    },
   ],
   fill_hachure: [...fillable({ fillStyle: "hachure", hachureGap: 8 }, PATTERN_SWEEP), ...FILL_EDGES],
   fill_cross_hatch: fillable({ fillStyle: "cross-hatch", hachureGap: 8 }, PATTERN_SWEEP),
