@@ -3,10 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "rough": "node rough/generate.mjs"
+    "rough": "node rough/generate.mjs",
+    "scene": "node scene/generate.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
-    "roughjs": "4.6.4"
+    "perfect-freehand": "1.2.0",
+    "points-on-curve": "1.0.1",
+    "roughjs": "4.6.4",
+    "tinycolor2": "1.6.0"
   }
 }
