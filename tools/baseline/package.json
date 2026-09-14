@@ -1,0 +1,12 @@
+{
+  "name": "napkin-baseline",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "rough": "node rough/generate.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "roughjs": "4.6.4"
+  }
+}
