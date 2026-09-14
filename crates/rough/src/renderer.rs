@@ -311,8 +311,34 @@ pub(crate) fn svg_path(path: &str, o: &mut Ctx) -> Result<OpSet, PathError> {
 // Fills
 
 /// bin/renderer.js `solidFillPolygon`.
-pub(crate) fn solid_fill_polygon(_polygon_list: &[Vec<Point>], _o: &mut Ctx) -> OpSet {
-    todo!()
+pub(crate) fn solid_fill_polygon(polygon_list: &[Vec<Point>], o: &mut Ctx) -> OpSet {
+    let mut ops = Vec::new();
+    for points in polygon_list {
+        if !points.is_empty() {
+            let offset = if truthy(o.o.max_randomness_offset) {
+                o.o.max_randomness_offset
+            } else {
+                0.0
+            };
+            let len = points.len();
+            if len > 2 {
+                ops.push(Op::Move([
+                    points[0][0] + offset_opt(offset, o, 1.0),
+                    points[0][1] + offset_opt(offset, o, 1.0),
+                ]));
+                for point in &points[1..len] {
+                    ops.push(Op::LineTo([
+                        point[0] + offset_opt(offset, o, 1.0),
+                        point[1] + offset_opt(offset, o, 1.0),
+                    ]));
+                }
+            }
+        }
+    }
+    OpSet {
+        kind: OpSetType::FillPath,
+        ops,
+    }
 }
 
 /// bin/renderer.js `patternFillPolygons`.

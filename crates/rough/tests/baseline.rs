@@ -157,3 +157,8 @@ fn outline_elliptic() {
 fn outline_path() {
     check_group(&dir(), "outline_path", generate);
 }
+
+#[test]
+fn fill_solid() {
+    check_group(&dir(), "fill_solid", generate);
+}
