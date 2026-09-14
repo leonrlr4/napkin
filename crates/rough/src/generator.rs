@@ -86,20 +86,38 @@ impl RoughGenerator {
     }
 
     /// bin/generator.js `ellipse`.
-    pub fn ellipse(
-        &self,
-        _x: f64,
-        _y: f64,
-        _width: f64,
-        _height: f64,
-        _options: &Options,
-    ) -> Drawable {
-        todo!()
+    pub fn ellipse(&self, x: f64, y: f64, width: f64, height: f64, options: &Options) -> Drawable {
+        let mut o = Ctx::new(self.default_options.merge(options));
+        let mut paths = Vec::new();
+        let ellipse_params = renderer::generate_ellipse_params(width, height, &mut o);
+        let ellipse_response = renderer::ellipse_with_params(x, y, &mut o, &ellipse_params);
+        if has_fill(&o) {
+            if o.o.fill_style == "solid" {
+                let mut shape = renderer::ellipse_with_params(x, y, &mut o, &ellipse_params).opset;
+                shape.kind = OpSetType::FillPath;
+                paths.push(shape);
+            } else {
+                paths.push(renderer::pattern_fill_polygons(
+                    &mut [ellipse_response.estimated_points.clone()],
+                    &mut o,
+                ));
+            }
+        }
+        if o.o.stroke != NOS {
+            paths.push(ellipse_response.opset);
+        }
+        Drawable {
+            shape: Shape::Ellipse,
+            options: o.o,
+            sets: paths,
+        }
     }
 
     /// bin/generator.js `circle`.
-    pub fn circle(&self, _x: f64, _y: f64, _diameter: f64, _options: &Options) -> Drawable {
-        todo!()
+    pub fn circle(&self, x: f64, y: f64, diameter: f64, options: &Options) -> Drawable {
+        let mut ret = self.ellipse(x, y, diameter, diameter, options);
+        ret.shape = Shape::Circle;
+        ret
     }
 
     /// bin/generator.js `linearPath`.
@@ -117,16 +135,42 @@ impl RoughGenerator {
     #[expect(clippy::too_many_arguments, reason = "mirrors RoughGenerator.arc")]
     pub fn arc(
         &self,
-        _x: f64,
-        _y: f64,
-        _width: f64,
-        _height: f64,
-        _start: f64,
-        _stop: f64,
-        _closed: bool,
-        _options: &Options,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        start: f64,
+        stop: f64,
+        closed: bool,
+        options: &Options,
     ) -> Drawable {
-        todo!()
+        let mut o = Ctx::new(self.default_options.merge(options));
+        let mut paths = Vec::new();
+        let outline = renderer::arc(x, y, width, height, start, stop, closed, true, &mut o);
+        if closed && has_fill(&o) {
+            if o.o.fill_style == "solid" {
+                // `Object.assign({}, o)`: the copy shares the randomizer the outline above
+                // already created.
+                let mut fill_o = o.clone();
+                fill_o.o.disable_multi_stroke = true;
+                let mut shape =
+                    renderer::arc(x, y, width, height, start, stop, true, false, &mut fill_o);
+                shape.kind = OpSetType::FillPath;
+                paths.push(shape);
+            } else {
+                paths.push(renderer::pattern_fill_arc(
+                    x, y, width, height, start, stop, &mut o,
+                ));
+            }
+        }
+        if o.o.stroke != NOS {
+            paths.push(outline);
+        }
+        Drawable {
+            shape: Shape::Arc,
+            options: o.o,
+            sets: paths,
+        }
     }
 
     /// bin/generator.js `curve`.

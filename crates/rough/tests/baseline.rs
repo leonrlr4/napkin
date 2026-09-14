@@ -147,3 +147,8 @@ fn hachure_fill() {
 fn outline_linear() {
     check_group(&dir(), "outline_linear", generate);
 }
+
+#[test]
+fn outline_elliptic() {
+    check_group(&dir(), "outline_elliptic", generate);
+}
