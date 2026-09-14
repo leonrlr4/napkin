@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use scene::color::{apply_dark_mode_filter, is_transparent};
 use scene::element::{Element, Roundness, StrokeOptions};
 use scene::env::Env;
 use scene::fractional_index::{
@@ -185,6 +186,18 @@ fn fractional_index() {
                 sync_invalid_indices(&mut elements, &mut FixedEnv);
                 index_summary(&elements)
             }
+            other => panic!("unknown call {other}"),
+        }
+    });
+}
+
+#[test]
+fn colors() {
+    check_group(&dir(), "colors", |case| {
+        let color = case.args[0].as_str().expect("color");
+        match case.call.as_str() {
+            "applyDarkModeFilter" => json!(apply_dark_mode_filter(color)),
+            "isTransparent" => json!(is_transparent(color)),
             other => panic!("unknown call {other}"),
         }
     });
