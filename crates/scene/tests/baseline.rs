@@ -14,10 +14,12 @@ use scene::new_element::{
     ElementProps, GenericKind, new_arrow_element, new_freedraw_element, new_generic_element,
     new_line_element,
 };
-use scene::shape::generate_rough_options;
+use scene::shape::{
+    ElementShape, PathOp, ShapeContext, generate_element_shape, generate_rough_options,
+};
 use serde_json::{Value, json};
-use testkit::rough_json::options_value;
-use testkit::{Case, check_group, num, points_from, throws};
+use testkit::rough_json::{drawable_value, options_value};
+use testkit::{Case, check_group, num, numbers, points_from, throws};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
@@ -235,4 +237,55 @@ fn rough_options() {
         let dark = case.args[2].as_bool().expect("isDarkMode");
         options_value(&generate_rough_options(&element, continuous, dark).expect("drawable type"))
     });
+}
+
+fn path_op_value(op: &PathOp) -> Value {
+    let (name, data): (&str, &[f64]) = match op {
+        PathOp::Move(d) => ("move", d),
+        PathOp::Line(d) => ("line", d),
+        PathOp::Quad(d) => ("quad", d),
+        PathOp::Close => ("close", &[]),
+    };
+    json!({ "op": name, "data": numbers(data) })
+}
+
+/// The JSON Excalidraw's ShapeCache returns for each element type.
+fn shape_value(element: &Element, shape: &ElementShape) -> Value {
+    match shape {
+        ElementShape::None => Value::Null,
+        ElementShape::Drawables(drawables) => match element {
+            Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_) => {
+                assert_eq!(drawables.len(), 1, "generic elements have one drawable");
+                drawable_value(&drawables[0])
+            }
+            _ => Value::Array(drawables.iter().map(drawable_value).collect()),
+        },
+        ElementShape::Freedraw { fill, stroke } => {
+            let mut items: Vec<Value> = fill.iter().map(|d| drawable_value(d)).collect();
+            items.push(json!({ "svgPath": stroke.iter().map(path_op_value).collect::<Vec<_>>() }));
+            Value::Array(items)
+        }
+    }
+}
+
+fn check_shapes(group: &str) {
+    check_group(&dir(), group, |case| {
+        let element = element_from(&case.args[0]);
+        let context = &case.args[1];
+        let ctx = ShapeContext {
+            dark_mode: context["theme"] == "dark",
+            canvas_background_color: context["canvasBackgroundColor"].as_str().expect("color"),
+        };
+        shape_value(&element, &generate_element_shape(&element, &ctx))
+    });
+}
+
+#[test]
+fn shapes_generic() {
+    check_shapes("shapes_generic");
+}
+
+#[test]
+fn shapes_other() {
+    check_shapes("shapes_other");
 }
