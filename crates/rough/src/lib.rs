@@ -2,6 +2,7 @@
 //! versions Excalidraw's yarn.lock resolves for it. Baselines in `tests/baseline/` come from
 //! `tools/baseline/rough/generate.mjs`.
 
+pub mod hachure_fill;
 pub mod js;
 pub mod math;
 pub mod path_data;

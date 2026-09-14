@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use rough::math::Random;
 use rough::path_data::{self, Segment};
-use rough::{points_on_curve, points_on_path};
+use rough::{hachure_fill, points_on_curve, points_on_path};
 use serde_json::{Value, json};
 use testkit::{Case, check_group, num, point_value, points_from, to_value};
 
@@ -95,5 +95,23 @@ fn points_on_path() {
             Ok(sets) => Value::Array(sets.iter().map(|set| points_value(set)).collect()),
             Err(e) => throws(e),
         }
+    });
+}
+
+#[test]
+fn hachure_fill() {
+    check_group(&dir(), "hachure_fill", |case| {
+        let mut polygons: Vec<Vec<[f64; 2]>> = case.args[0]
+            .as_array()
+            .expect("polygons")
+            .iter()
+            .map(points_from)
+            .collect();
+        let lines =
+            hachure_fill::hachure_lines(&mut polygons, case.num(1), case.num(2), case.num(3));
+        json!({
+            "lines": lines.iter().map(|l| points_value(l)).collect::<Vec<_>>(),
+            "polygons": polygons.iter().map(|p| points_value(p)).collect::<Vec<_>>(),
+        })
     });
 }
