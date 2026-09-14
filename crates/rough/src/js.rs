@@ -21,6 +21,40 @@ pub fn math_round(x: f64) -> f64 {
     if x - floor >= 0.5 { floor + 1.0 } else { floor }
 }
 
+/// `Number.prototype.toFixed(digits)` for `|x| < 1e21`. JS rounds the exact binary value
+/// half away from zero; Rust's `{:.N}` rounds ties to even, so `0.0009765625` (exactly
+/// representable) gives `0.000976563` here and `0.000976562` with `format!`.
+pub fn to_fixed(x: f64, digits: usize) -> String {
+    // 1100 fractional digits hold the exact expansion of any f64.
+    let exact = format!("{:.1100}", x.abs());
+    let (int_part, frac) = exact.split_once('.').expect("fixed-point formatting");
+    let mut kept: Vec<u8> = int_part.bytes().chain(frac.bytes().take(digits)).collect();
+    if frac.as_bytes()[digits] >= b'5' {
+        let mut i = kept.len();
+        loop {
+            if i == 0 {
+                kept.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if kept[i] == b'9' {
+                kept[i] = b'0';
+            } else {
+                kept[i] += 1;
+                break;
+            }
+        }
+    }
+    let split = kept.len() - digits;
+    let digits_str = String::from_utf8(kept).expect("ascii digits");
+    let sign = if x < 0.0 { "-" } else { "" };
+    if digits == 0 {
+        format!("{sign}{digits_str}")
+    } else {
+        format!("{sign}{}.{}", &digits_str[..split], &digits_str[split..])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +72,27 @@ mod tests {
         assert_eq!(math_round(-2.5), -2.0);
         assert_eq!(math_round(2.5), 3.0);
         assert_eq!(math_round(0.49999999999999994), 0.0);
+    }
+
+    #[test]
+    fn to_fixed_matches_javascript() {
+        // Expected strings from node: `x.toFixed(9)`.
+        for (x, expected) in [
+            (0.0009765625, "0.000976563"),
+            (-0.0009765625, "-0.000976563"),
+            (0.1, "0.100000000"),
+            (-0.5000000005, "-0.500000001"),
+            (1.0 / 3.0, "0.333333333"),
+            (0.9999999995, "0.999999999"),
+            (1.0000000005, "1.000000001"),
+            (-2.0 / 3.0, "-0.666666667"),
+            (123.4560000005, "123.456000000"),
+            (0.0, "0.000000000"),
+            (3.0517578125e-5, "0.000030518"),
+            (-0.0000000001, "-0.000000000"),
+            (0.99999999999, "1.000000000"),
+        ] {
+            assert_eq!(to_fixed(x, 9), expected, "{x}");
+        }
     }
 }
