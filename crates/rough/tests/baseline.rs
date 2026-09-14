@@ -9,7 +9,7 @@ use rough::path_data::{self, Segment};
 use rough::{RoughGenerator, hachure_fill, points_on_curve, points_on_path};
 use serde_json::{Value, json};
 use testkit::rough_json::{drawable_value, options_from};
-use testkit::{Case, check_group, num, point_value, points_from, to_value};
+use testkit::{Case, check_group, num, numbers, points_from, points_value, to_value};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
@@ -17,10 +17,6 @@ fn dir() -> PathBuf {
 
 fn throws(error: impl Display) -> Value {
     json!({ "throws": error.to_string() })
-}
-
-fn numbers(values: &[f64]) -> Value {
-    Value::Array(values.iter().copied().map(to_value).collect())
 }
 
 fn segments_value(segments: &[Segment]) -> Value {
@@ -56,10 +52,6 @@ fn generate(case: &Case) -> Value {
         other => panic!("unknown generator call {other}"),
     };
     drawable_value(&drawable)
-}
-
-fn points_value(points: &[[f64; 2]]) -> Value {
-    Value::Array(points.iter().copied().map(point_value).collect())
 }
 
 fn optional_num(case: &Case, i: usize) -> Option<f64> {

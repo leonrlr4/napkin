@@ -4,11 +4,7 @@
 use rough::{Drawable, Op, Options, ResolvedOptions};
 use serde_json::{Map, Value, json};
 
-use crate::{num, to_value};
-
-fn numbers(values: &[f64]) -> Value {
-    Value::Array(values.iter().copied().map(to_value).collect())
-}
+use crate::{num, numbers, to_value};
 
 /// JS options object -> `Options`. Unknown keys fail the case, so a typo in cases.mjs
 /// cannot silently fall back to a default.

@@ -5,7 +5,7 @@
 
 import { join } from "node:path";
 
-import { REPO_ROOT, assertVersions, bundleAndImport, resolveFrom, runCase, writeGroup } from "../lib/harness.mjs";
+import { REPO_ROOT, assertVersions, bundleAndImport, encode, resolveFrom, runCase, writeGroup } from "../lib/harness.mjs";
 import { groups } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit. roughjs's own
@@ -89,7 +89,7 @@ for (const [group, specs] of Object.entries(groups)) {
     // recorded args must be what the Rust side receives.
     const recordedArgs = structuredClone(args);
     const { compare, expected } = runCase(name, () => calls[call](...structuredClone(args)));
-    return { name, call, args: recordedArgs, compare, expected };
+    return { name, call, args: encode(recordedArgs), compare, expected };
   });
   writeGroup(outDir, group, source, cases);
 }

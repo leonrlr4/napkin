@@ -97,6 +97,16 @@ pub fn point_value(p: [f64; 2]) -> Value {
     Value::Array(vec![to_value(p[0]), to_value(p[1])])
 }
 
+/// Encodes a flat number list the way the baseline generator does.
+pub fn numbers(values: &[f64]) -> Value {
+    Value::Array(values.iter().copied().map(to_value).collect())
+}
+
+/// Encodes a point list the way the baseline generator does.
+pub fn points_value(points: &[[f64; 2]]) -> Value {
+    Value::Array(points.iter().copied().map(point_value).collect())
+}
+
 pub fn points_from(value: &Value) -> Vec<[f64; 2]> {
     value
         .as_array()
