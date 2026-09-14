@@ -52,6 +52,8 @@ function drawable(d) {
 }
 
 const calls = {
+  atan2: (y, x) => Math.atan2(y, x),
+  hypot: (x, y) => Math.hypot(x, y),
   Random: (seed, count) => {
     const random = new lib.Random(seed);
     return Array.from({ length: count }, () => random.next());
@@ -82,8 +84,39 @@ const calls = {
 
 const outDir = join(REPO_ROOT, "crates", "rough", "tests", "baseline");
 const source = "roughjs@4.6.4 (hachure-fill@0.5.2, path-data-parser@0.1.0, points-on-curve@0.2.0, points-on-path@0.2.1)";
+// `js_math` isn't roughjs at all: it's node's own `Math.atan2`/`Math.hypot` (V8), which
+// `crates/rough/src/js.rs` ports for `crates/scene` bit-for-bit. Node's `process.version`
+// carries the V8 build (`process.versions.v8`) that pins the exact fdlibm/Torque revision.
+const jsMathSource = `node@${process.version.slice(1)} (V8 ${process.versions.v8}) Math.atan2/Math.hypot`;
+
+/**
+ * `encode` from harness.mjs, plus `-0`: the shared `encode` (and hence `JSON.stringify`,
+ * which does not distinguish `-0` from `0`) is deliberately left alone here, since it is
+ * shared with every other group and changing it risks silently changing baselines this fix
+ * must leave byte-identical. `js_math` needs the distinction — `Math.atan2`'s sign of zero
+ * is part of its contract (`atan2(-0, -0) === -Math.PI`, not `Math.PI`) and several of its
+ * random/edge cases are exactly zero on one or both operands.
+ */
+function encodeSignedZero(value) {
+  if (typeof value === "number" && Object.is(value, -0)) return "-0";
+  return encode(value);
+}
 
 for (const [group, specs] of Object.entries(groups)) {
+  if (group === "js_math") {
+    // `Math.atan2`/`Math.hypot` never call `Math.random` or throw, so the generic
+    // `runCase` (which exists for roughjs's Math.random reproducibility dance and its
+    // `throws` capture) is unneeded ceremony here.
+    const cases = specs.map(({ name, call, args }) => ({
+      name,
+      call,
+      args: args.map(encodeSignedZero),
+      compare: "exact",
+      expected: encodeSignedZero(calls[call](...args)),
+    }));
+    writeGroup(outDir, group, jsMathSource, cases);
+    continue;
+  }
   const cases = specs.map(({ name, call, args }) => {
     // structuredClone: calls such as hachureLines mutate their arguments, and the
     // recorded args must be what the Rust side receives.

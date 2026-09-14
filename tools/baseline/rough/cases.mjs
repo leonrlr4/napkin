@@ -292,8 +292,133 @@ const PATTERN_SWEEP = [
   ["singleStrokeFill", { disableMultiStrokeFill: true }],
 ];
 
+// --- js_math -----------------------------------------------------------------------
+//
+// `Math.atan2`/`Math.hypot` inputs for `js::atan2`/`js::hypot` (crates/rough/src/js.rs),
+// checked bit-for-bit (crates/rough/tests/baseline.rs), not the usual 1e-9 tolerance:
+// libm's `atan2`/`hypot` disagree with V8's fdlibm-derived/Torque implementations in the
+// last bit often enough to change loop bounds in `scene` (see the ported functions' doc
+// comments). A fixed-seed PRNG (not `Math.random`, which `harness.mjs` repoints at a
+// per-case stream for the reproducibility check the other groups need) keeps this
+// deterministic across regenerations.
+
+/** mulberry32: small, seedable, good enough for test-input coverage (not cryptographic). */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A uniformly-chosen bit pattern reinterpreted as `float64` (any exponent, any mantissa). */
+function randomBits(rng) {
+  const buf = new ArrayBuffer(8);
+  const dv = new DataView(buf);
+  dv.setUint32(0, Math.floor(rng() * 0x100000000), false);
+  dv.setUint32(4, Math.floor(rng() * 0x100000000), false);
+  return dv.getFloat64(0, false);
+}
+
+/** A random subnormal (biased exponent 0, non-zero mantissa): below `Number.MIN_VALUE`'s
+ * normal cousin `2.2250738585072014e-308`. */
+function randomSubnormal(rng, sign) {
+  const buf = new ArrayBuffer(8);
+  const dv = new DataView(buf);
+  const hi = Math.floor(rng() * 0x100000);
+  const lo = Math.floor(rng() * 0x100000000);
+  dv.setUint32(0, (sign < 0 ? 0x80000000 : 0) | hi, false);
+  dv.setUint32(4, lo, false);
+  return dv.getFloat64(0, false);
+}
+
+/**
+ * One operand for a `js_math` case: a mix of ordinary values, tiny/huge magnitudes, exact
+ * zero (both signs), subnormals, infinities, NaN and fully random bit patterns, so that
+ * 20,000 draws cover every distinct branch `atan2`/`hypot` take on operand magnitude and
+ * sign, not just a uniform range.
+ */
+function sampleDouble(rng) {
+  const bucket = Math.floor(rng() * 10);
+  const sign = rng() < 0.5 ? -1 : 1;
+  switch (bucket) {
+    case 0:
+      return sign * 0; // +0 / -0
+    case 1:
+      return sign * rng() * 1000; // ordinary range
+    case 2:
+      return sign * rng() * 1e6; // ordinary, wider range
+    case 3: { // tiny normal magnitude
+      const exp = -1 - Math.floor(rng() * 300);
+      return sign * rng() * 10 ** exp;
+    }
+    case 4: { // huge magnitude, up to ~1e308
+      const exp = 1 + Math.floor(rng() * 307);
+      return sign * (1 + rng()) * 10 ** exp;
+    }
+    case 5:
+      return randomSubnormal(rng, sign);
+    case 6:
+      return sign * Infinity;
+    case 7:
+      return NaN;
+    case 8:
+      return sign * (1 + (rng() - 0.5) * 0.01); // near 1: atan2's `x == 1` fast path, atan's interval boundaries
+    default:
+      return randomBits(rng); // arbitrary bit pattern, including further NaNs/infinities
+  }
+}
+
+function randomMathCases(name, call, count, seed) {
+  const rng = mulberry32(seed);
+  const cases = [];
+  for (let i = 0; i < count; i++) {
+    const a = sampleDouble(rng);
+    const b = sampleDouble(rng);
+    cases.push({ name: `${name}/r${String(i).padStart(6, "0")}`, call, args: [a, b] });
+  }
+  return cases;
+}
+
+const ATAN2_EDGES = [
+  [0, 0], [-0, 0], [0, -0], [-0, -0],
+  [1, 0], [-1, 0], [0, 1], [0, -1], [-0, 1], [-0, -1],
+  [1, 1], [1, -1], [-1, 1], [-1, -1],
+  [Infinity, Infinity], [Infinity, -Infinity], [-Infinity, Infinity], [-Infinity, -Infinity],
+  [Infinity, 5], [5, Infinity], [-Infinity, 5], [5, -Infinity],
+  [Infinity, 0], [0, Infinity], [-Infinity, 0], [0, -Infinity],
+  [NaN, 1], [1, NaN], [NaN, NaN], [NaN, Infinity],
+  [5, 1], [1, 1], [2, 1], // atan2(y,1): the `x === 1.0` fast path
+  [1e-320, 1e-320], [1e308, 1e308], [1e-320, -1e-320], [1e308, -1e308],
+  // Task 11 fix-round-1 finding 2's repro (laser-pointer corner angle, constant stroke
+  // [[0,0],[-2,-5]], strokeWidth 2, streamline 0.5): V8 and glibc `atan2` disagree in the
+  // last bit here, which used to change an outline point count.
+  [-2.5, -1],
+];
+
+const HYPOT_EDGES = [
+  [0, 0], [-0, 0], [0, -0], [-0, -0],
+  [1, 0], [0, 1], [-1, -1],
+  [Infinity, 5], [5, Infinity], [-Infinity, 5], [5, -Infinity], [Infinity, NaN], [NaN, Infinity],
+  [NaN, 5], [5, NaN], [NaN, NaN], [-Infinity, -Infinity],
+  [1e300, 1e300], [1e-300, 1e-300], [1e308, 1e308], [5e-324, 5e-324],
+  // perfect-freehand's `dist` (Task 11 fix-round-1 finding 2's repro): points
+  // [0,0], [0,0], [-0.1547364747990101,-2.9960067795929257], streamline 1, width 0.5.
+  [-0.1547364747990101, -2.9960067795929257],
+];
+
+const jsMath = [
+  ...ATAN2_EDGES.map(([y, x], i) => ({ name: `atan2/edge${i}`, call: "atan2", args: [y, x] })),
+  ...randomMathCases("atan2", "atan2", 20000, 1),
+  ...HYPOT_EDGES.map(([x, y], i) => ({ name: `hypot/edge${i}`, call: "hypot", args: [x, y] })),
+  ...randomMathCases("hypot", "hypot", 20000, 2),
+];
+
 export const groups = {
   random,
+  js_math: jsMath,
   path_data: pathData,
   points_on_curve: pointsOnCurve,
   points_on_path: pointsOnPath,

@@ -74,6 +74,10 @@ fn as_number(value: &Value) -> Option<f64> {
             "NaN" => Some(f64::NAN),
             "Infinity" => Some(f64::INFINITY),
             "-Infinity" => Some(f64::NEG_INFINITY),
+            // Only `js_math` (crates/rough/tests/baseline/js_math.json) writes this:
+            // `JSON.stringify(-0) === "0"` loses the sign every other group ignores, but
+            // `js::atan2`/`js::hypot`'s bit-exact check does not.
+            "-0" => Some(-0.0),
             _ => None,
         },
         _ => None,

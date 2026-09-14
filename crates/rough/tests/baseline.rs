@@ -8,7 +8,9 @@ use rough::path_data::{self, Segment};
 use rough::{RoughGenerator, hachure_fill, points_on_curve, points_on_path};
 use serde_json::{Value, json};
 use testkit::rough_json::{drawable_value, options_from};
-use testkit::{Case, check_group, num, numbers, points_from, points_value, throws, to_value};
+use testkit::{
+    Case, check_group, load_group, num, numbers, points_from, points_value, throws, to_value,
+};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
@@ -63,6 +65,48 @@ fn random() {
                 .collect(),
         )
     });
+}
+
+/// `js::atan2`/`js::hypot` against node's `Math.atan2`/`Math.hypot`, bit-for-bit: this is
+/// the one baseline group [`TOLERANCE`](testkit::TOLERANCE) must not paper over, since a
+/// last-bit difference from V8 is exactly the bug these two functions exist to avoid (loop
+/// bounds in `scene` that depend on the exact rounded result, not an approximation of it).
+#[test]
+fn js_math() {
+    let cases = load_group(&dir().join("js_math.json"));
+    assert!(!cases.is_empty(), "js_math: baseline has no cases");
+    let mut failures = Vec::new();
+    for case in &cases {
+        let expected = num(&case.expected);
+        let actual = match case.call.as_str() {
+            "atan2" => rough::js::atan2(case.num(0), case.num(1)),
+            "hypot" => rough::js::hypot(case.num(0), case.num(1)),
+            other => panic!("unknown js_math call {other}"),
+        };
+        let matches = if expected.is_nan() || actual.is_nan() {
+            expected.is_nan() && actual.is_nan()
+        } else {
+            expected.to_bits() == actual.to_bits()
+        };
+        if !matches {
+            failures.push(format!(
+                "{}: expected {expected:?} (bits {:#018x}), got {actual:?} (bits {:#018x})",
+                case.name,
+                expected.to_bits(),
+                actual.to_bits(),
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        let shown: Vec<_> = failures.iter().take(20).map(|f| format!("  {f}")).collect();
+        panic!(
+            "js_math: {} of {} cases failed\n{}{}",
+            failures.len(),
+            cases.len(),
+            shown.join("\n"),
+            if failures.len() > 20 { "\n  ..." } else { "" }
+        );
+    }
 }
 
 #[test]
