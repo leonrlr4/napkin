@@ -368,5 +368,15 @@ mod tests {
             first,
             "copy made after the first draw continues the shared one"
         );
+        // A copied (unshared) randomizer would also pass the assertion above, since its next
+        // draw is the second value too. Only a shared one has been advanced by `after`, so
+        // `a` now yields the third value of the sequence.
+        let mut fresh = Random::new(1.0);
+        let sequence: Vec<f64> = (0..3).map(|_| fresh.next()).collect();
+        assert_eq!(
+            a.random(),
+            sequence[2],
+            "the original sees the draw its later copy made"
+        );
     }
 }
