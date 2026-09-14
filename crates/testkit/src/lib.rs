@@ -9,7 +9,7 @@ pub mod rough_json;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Absolute tolerance for every compared number (spec §9.1). V8 and glibc may disagree in
 /// the last bit of `sin`/`cos`; everything else in the ports is exact arithmetic.
@@ -114,6 +114,11 @@ pub fn points_from(value: &Value) -> Vec<[f64; 2]> {
         .iter()
         .map(|p| [num(&p[0]), num(&p[1])])
         .collect()
+}
+
+/// Encodes a thrown JS error the way the generators record it: `{"throws": message}`.
+pub fn throws(error: impl std::fmt::Display) -> Value {
+    json!({ "throws": error.to_string() })
 }
 
 fn numbers_match(expected: f64, actual: f64) -> bool {

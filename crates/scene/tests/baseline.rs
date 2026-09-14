@@ -1,16 +1,20 @@
 //! Compares scene with Excalidraw's own code at the pinned commit, recorded in
 //! `tests/baseline/*.json` by tools/baseline/scene/generate.mjs.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-use scene::element::{Roundness, StrokeOptions};
+use scene::element::{Element, Roundness, StrokeOptions};
 use scene::env::Env;
+use scene::fractional_index::{
+    generate_key_between, generate_n_keys_between, sync_invalid_indices, sync_moved_indices,
+};
 use scene::new_element::{
     ElementProps, GenericKind, new_arrow_element, new_freedraw_element, new_generic_element,
     new_line_element,
 };
-use serde_json::Value;
-use testkit::{check_group, num, points_from};
+use serde_json::{Value, json};
+use testkit::{Case, check_group, num, points_from, throws};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
@@ -109,5 +113,79 @@ fn new_element() {
         value["id"] = opts["id"].clone();
         value["seed"] = opts["seed"].clone();
         value
+    });
+}
+
+fn key_arg(case: &Case, i: usize) -> Option<&str> {
+    case.args[i].as_str()
+}
+
+/// Elements shaped like the generator's `{ id, type, index, version, versionNonce, updated }`.
+/// They lack most fields, so they load as `Raw`, which is also the path images and frames take.
+fn index_elements(indices: &Value) -> Vec<Element> {
+    indices
+        .as_array()
+        .expect("indices")
+        .iter()
+        .enumerate()
+        .map(|(i, index)| {
+            Element::from_value(json!({
+                "id": format!("e{i}"), "type": "rectangle", "index": index,
+                "version": 1, "versionNonce": 0, "updated": 1,
+            }))
+        })
+        .collect()
+}
+
+fn index_summary(elements: &[Element]) -> Value {
+    Value::Array(
+        elements
+            .iter()
+            .map(|e| {
+                let v = e.to_value();
+                json!({ "id": v["id"], "index": v["index"], "version": v["version"] })
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn fractional_index() {
+    check_group(&dir(), "fractional_index", |case| {
+        match case.call.as_str() {
+            "generateKeyBetween" => {
+                match generate_key_between(key_arg(case, 0), key_arg(case, 1)) {
+                    Ok(key) => json!(key),
+                    Err(e) => throws(e),
+                }
+            }
+            "generateNKeysBetween" => {
+                match generate_n_keys_between(
+                    key_arg(case, 0),
+                    key_arg(case, 1),
+                    case.num(2) as usize,
+                ) {
+                    Ok(keys) => json!(keys),
+                    Err(e) => throws(e),
+                }
+            }
+            "syncMovedIndices" => {
+                let mut elements = index_elements(&case.args[0]);
+                let moved: HashSet<String> = case.args[1]
+                    .as_array()
+                    .expect("moved positions")
+                    .iter()
+                    .map(|i| format!("e{}", num(i)))
+                    .collect();
+                sync_moved_indices(&mut elements, &moved, &mut FixedEnv);
+                index_summary(&elements)
+            }
+            "syncInvalidIndices" => {
+                let mut elements = index_elements(&case.args[0]);
+                sync_invalid_indices(&mut elements, &mut FixedEnv);
+                index_summary(&elements)
+            }
+            other => panic!("unknown call {other}"),
+        }
     });
 }

@@ -1,7 +1,6 @@
 //! Compares the port with roughjs@4.6.4 output recorded in `tests/baseline/*.json`.
 //! One test per baseline group, so each porting task turns exactly its groups green.
 
-use std::fmt::Display;
 use std::path::PathBuf;
 
 use rough::math::Random;
@@ -9,14 +8,10 @@ use rough::path_data::{self, Segment};
 use rough::{RoughGenerator, hachure_fill, points_on_curve, points_on_path};
 use serde_json::{Value, json};
 use testkit::rough_json::{drawable_value, options_from};
-use testkit::{Case, check_group, num, numbers, points_from, points_value, to_value};
+use testkit::{Case, check_group, num, numbers, points_from, points_value, throws, to_value};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
-}
-
-fn throws(error: impl Display) -> Value {
-    json!({ "throws": error.to_string() })
 }
 
 fn segments_value(segments: &[Segment]) -> Value {
