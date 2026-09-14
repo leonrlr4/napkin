@@ -1,17 +1,14 @@
 //! Port of `points-on-path@0.2.1`: `lib/index.js`.
 
+use crate::core::Point;
+use crate::js::truthy;
 use crate::path_data::{self, PathError, Segment};
 use crate::points_on_curve;
 
-/// A number's JS truthiness: only `0` and `NaN` are falsy.
-fn truthy(x: f64) -> bool {
-    x != 0.0 && !x.is_nan()
-}
-
 /// `lib/index.js` `pointsOnPath`, `appendPendingCurve` closure.
 fn append_pending_curve(
-    pending_curve: &mut Vec<[f64; 2]>,
-    current_points: &mut Vec<[f64; 2]>,
+    pending_curve: &mut Vec<Point>,
+    current_points: &mut Vec<Point>,
     tolerance: f64,
 ) {
     if pending_curve.len() >= 4 {
@@ -26,9 +23,9 @@ fn append_pending_curve(
 
 /// `lib/index.js` `pointsOnPath`, `appendPendingPoints` closure.
 fn append_pending_points(
-    pending_curve: &mut Vec<[f64; 2]>,
-    current_points: &mut Vec<[f64; 2]>,
-    sets: &mut Vec<Vec<[f64; 2]>>,
+    pending_curve: &mut Vec<Point>,
+    current_points: &mut Vec<Point>,
+    sets: &mut Vec<Vec<Point>>,
     tolerance: f64,
 ) {
     append_pending_curve(pending_curve, current_points, tolerance);
@@ -42,13 +39,13 @@ pub fn points_on_path(
     d: &str,
     tolerance: f64,
     distance: Option<f64>,
-) -> Result<Vec<Vec<[f64; 2]>>, PathError> {
+) -> Result<Vec<Vec<Point>>, PathError> {
     let segments = path_data::parse_path(d)?;
     let normalized = path_data::normalize(&path_data::absolutize(&segments));
-    let mut sets: Vec<Vec<[f64; 2]>> = Vec::new();
-    let mut current_points: Vec<[f64; 2]> = Vec::new();
+    let mut sets: Vec<Vec<Point>> = Vec::new();
+    let mut current_points: Vec<Point> = Vec::new();
     let mut start = [0.0, 0.0];
-    let mut pending_curve: Vec<[f64; 2]> = Vec::new();
+    let mut pending_curve: Vec<Point> = Vec::new();
 
     for Segment { key, data } in &normalized {
         match key {

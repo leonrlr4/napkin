@@ -6,8 +6,9 @@ use std::path::PathBuf;
 
 use rough::math::Random;
 use rough::path_data::{self, Segment};
-use rough::{hachure_fill, points_on_curve, points_on_path};
+use rough::{RoughGenerator, hachure_fill, points_on_curve, points_on_path};
 use serde_json::{Value, json};
+use testkit::rough_json::{drawable_value, options_from};
 use testkit::{Case, check_group, num, point_value, points_from, to_value};
 
 fn dir() -> PathBuf {
@@ -29,6 +30,32 @@ fn segments_value(segments: &[Segment]) -> Value {
             .map(|s| json!({ "key": s.key.to_string(), "data": numbers(&s.data) }))
             .collect(),
     )
+}
+
+/// Dispatches a RoughGenerator call. The options object is always the last argument.
+fn generate(case: &Case) -> Value {
+    let g = RoughGenerator::new();
+    let o = options_from(case.args.last().expect("options"));
+    let n = |i| case.num(i);
+    let drawable = match case.call.as_str() {
+        "line" => g.line(n(0), n(1), n(2), n(3), &o),
+        "rectangle" => g.rectangle(n(0), n(1), n(2), n(3), &o),
+        "ellipse" => g.ellipse(n(0), n(1), n(2), n(3), &o),
+        "circle" => g.circle(n(0), n(1), n(2), &o),
+        "linearPath" => g.linear_path(&points_from(&case.args[0]), &o),
+        "arc" => {
+            let closed = case.args[6].as_bool().expect("closed");
+            g.arc(n(0), n(1), n(2), n(3), n(4), n(5), closed, &o)
+        }
+        "curve" => g.curve(&points_from(&case.args[0]), &o),
+        "polygon" => g.polygon(&points_from(&case.args[0]), &o),
+        "path" => match g.path(case.args[0].as_str().expect("path string"), &o) {
+            Ok(d) => d,
+            Err(e) => return throws(e),
+        },
+        other => panic!("unknown generator call {other}"),
+    };
+    drawable_value(&drawable)
 }
 
 fn points_value(points: &[[f64; 2]]) -> Value {
@@ -114,4 +141,9 @@ fn hachure_fill() {
             "polygons": polygons.iter().map(|p| points_value(p)).collect::<Vec<_>>(),
         })
     });
+}
+
+#[test]
+fn outline_linear() {
+    check_group(&dir(), "outline_linear", generate);
 }

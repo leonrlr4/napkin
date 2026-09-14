@@ -1,7 +1,7 @@
 //! Port of `path-data-parser@0.1.0`: `lib/parser.js`, `lib/absolutize.js`, `lib/normalize.js`.
 //! `lib/serialize.js` is not ported (m1-global-rules.md, decision 5).
 
-use crate::js;
+use crate::js::{self, truthy};
 
 /// A single path-data command: a letter key plus its numeric parameters.
 #[derive(Clone, Debug, PartialEq)]
@@ -406,11 +406,6 @@ pub fn absolutize(segments: &[Segment]) -> Vec<Segment> {
         }
     }
     out
-}
-
-/// A number's JS truthiness: only `0` and `NaN` are falsy.
-fn truthy(x: f64) -> bool {
-    x != 0.0 && !x.is_nan()
 }
 
 /// `lib/normalize.js` `degToRad`.

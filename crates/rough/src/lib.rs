@@ -2,9 +2,15 @@
 //! versions Excalidraw's yarn.lock resolves for it. Baselines in `tests/baseline/` come from
 //! `tools/baseline/rough/generate.mjs`.
 
+pub mod core;
+pub mod generator;
 pub mod hachure_fill;
 pub mod js;
 pub mod math;
 pub mod path_data;
 pub mod points_on_curve;
 pub mod points_on_path;
+mod renderer;
+
+pub use crate::core::{Drawable, Op, OpSet, OpSetType, Options, Point, ResolvedOptions, Shape};
+pub use crate::generator::RoughGenerator;

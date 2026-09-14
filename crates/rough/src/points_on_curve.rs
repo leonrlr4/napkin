@@ -1,18 +1,20 @@
 //! Port of `points-on-curve@0.2.0`: `lib/index.js`, `lib/curve-to-bezier.js`.
 
+use crate::core::Point;
+
 /// `lib/index.js` `distance`: distance between 2 points.
-fn distance(p1: [f64; 2], p2: [f64; 2]) -> f64 {
+fn distance(p1: Point, p2: Point) -> f64 {
     distance_sq(p1, p2).sqrt()
 }
 
 /// `lib/index.js` `distanceSq`: distance between 2 points squared.
-fn distance_sq(p1: [f64; 2], p2: [f64; 2]) -> f64 {
+fn distance_sq(p1: Point, p2: Point) -> f64 {
     (p1[0] - p2[0]).powf(2.0) + (p1[1] - p2[1]).powf(2.0)
 }
 
 /// `lib/index.js` `distanceToSegmentSq`: distance squared from a point `p` to the line
 /// segment `vw`.
-fn distance_to_segment_sq(p: [f64; 2], v: [f64; 2], w: [f64; 2]) -> f64 {
+fn distance_to_segment_sq(p: Point, v: Point, w: Point) -> f64 {
     let l2 = distance_sq(v, w);
     if l2 == 0.0 {
         return distance_sq(p, v);
@@ -23,13 +25,13 @@ fn distance_to_segment_sq(p: [f64; 2], v: [f64; 2], w: [f64; 2]) -> f64 {
 }
 
 /// `lib/index.js` `lerp`.
-fn lerp(a: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
+fn lerp(a: Point, b: Point, t: f64) -> Point {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
 
 /// `lib/index.js` `flatness`. Adapted from
 /// <https://seant23.wordpress.com/2010/11/12/offset-bezier-curves/>.
-fn flatness(points: &[[f64; 2]], offset: usize) -> f64 {
+fn flatness(points: &[Point], offset: usize) -> f64 {
     let p1 = points[offset];
     let p2 = points[offset + 1];
     let p3 = points[offset + 2];
@@ -55,10 +57,10 @@ fn flatness(points: &[[f64; 2]], offset: usize) -> f64 {
 /// an optional `newPoints` parameter defaulting to `[]`; every call site here already has an
 /// accumulator in hand, so it is always `&mut Vec`.
 fn get_points_on_bezier_curve_with_splitting(
-    points: &[[f64; 2]],
+    points: &[Point],
     offset: usize,
     tolerance: f64,
-    out_points: &mut Vec<[f64; 2]>,
+    out_points: &mut Vec<Point>,
 ) {
     if flatness(points, offset) < tolerance {
         let p0 = points[offset];
@@ -90,7 +92,7 @@ fn get_points_on_bezier_curve_with_splitting(
 }
 
 /// `lib/index.js` `simplify`.
-pub fn simplify(points: &[[f64; 2]], distance: f64) -> Vec<[f64; 2]> {
+pub fn simplify(points: &[Point], distance: f64) -> Vec<Point> {
     let mut out = Vec::new();
     simplify_points(points, 0, points.len(), distance, &mut out);
     out
@@ -99,11 +101,11 @@ pub fn simplify(points: &[[f64; 2]], distance: f64) -> Vec<[f64; 2]> {
 /// `lib/index.js` `simplifyPoints`: Ramer-Douglas-Peucker algorithm,
 /// <https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm>.
 fn simplify_points(
-    points: &[[f64; 2]],
+    points: &[Point],
     start: usize,
     end: usize,
     epsilon: f64,
-    out_points: &mut Vec<[f64; 2]>,
+    out_points: &mut Vec<Point>,
 ) {
     // find the most distance point from the endpoints
     let s = points[start];
@@ -132,10 +134,10 @@ fn simplify_points(
 
 /// `lib/index.js` `pointsOnBezierCurves`.
 pub fn points_on_bezier_curves(
-    points: &[[f64; 2]],
+    points: &[Point],
     tolerance: f64,
     distance: Option<f64>,
-) -> Vec<[f64; 2]> {
+) -> Vec<Point> {
     let mut new_points = Vec::new();
     let num_segments = (points.len() as f64 - 1.0) / 3.0;
     let mut i = 0.0;
@@ -160,7 +162,7 @@ pub fn points_on_bezier_curves(
 
 /// `lib/curve-to-bezier.js` `curveToBezier`. Returns `None` where the JS throws (fewer than
 /// three points).
-pub fn curve_to_bezier(points_in: &[[f64; 2]], curve_tightness: f64) -> Option<Vec<[f64; 2]>> {
+pub fn curve_to_bezier(points_in: &[Point], curve_tightness: f64) -> Option<Vec<Point>> {
     let len = points_in.len();
     if len < 3 {
         return None;

@@ -4,6 +4,8 @@
 //! JSON cannot hold NaN or ±Infinity, so the generator writes them as the strings `"NaN"`,
 //! `"Infinity"` and `"-Infinity"`; [`num`] and [`to_value`] translate both ways.
 
+pub mod rough_json;
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 

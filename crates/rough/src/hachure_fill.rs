@@ -2,7 +2,8 @@
 
 use std::cmp::Ordering;
 
-use crate::js;
+use crate::core::Point;
+use crate::js::{self, truthy};
 
 /// One edge of the polygon's edge table: the `y` range it spans, its current `x` at `ymin`,
 /// and the slope used to advance `x` as the scanline moves.
@@ -14,18 +15,13 @@ struct Edge {
     islope: f64,
 }
 
-/// JS truthiness for a number: `0`, `-0` and `NaN` are falsy, everything else is truthy.
-fn truthy(x: f64) -> bool {
-    x != 0.0 && !x.is_nan()
-}
-
 /// `bin/hachure.js` `areSamePoints`.
-fn are_same_points(p1: [f64; 2], p2: [f64; 2]) -> bool {
+fn are_same_points(p1: Point, p2: Point) -> bool {
     p1[0] == p2[0] && p1[1] == p2[1]
 }
 
 /// `bin/hachure.js` `rotatePoints`: rotates `points` in place around `center` by `degrees`.
-fn rotate_points(points: &mut [[f64; 2]], center: [f64; 2], degrees: f64) {
+fn rotate_points(points: &mut [Point], center: Point, degrees: f64) {
     if points.is_empty() {
         return;
     }
@@ -44,7 +40,7 @@ fn rotate_points(points: &mut [[f64; 2]], center: [f64; 2], degrees: f64) {
 /// and rotates that array in place, so all the mutated points share a single `cos`/`sin` pair
 /// computed once. Rotating each line separately here produces identical values: `cos`/`sin`
 /// depend only on `degrees`, not on iteration order.
-fn rotate_lines(lines: &mut [[[f64; 2]; 2]], center: [f64; 2], degrees: f64) {
+fn rotate_lines(lines: &mut [[Point; 2]], center: Point, degrees: f64) {
     for line in lines.iter_mut() {
         rotate_points(line, center, degrees);
     }
@@ -54,11 +50,11 @@ fn rotate_lines(lines: &mut [[[f64; 2]; 2]], center: [f64; 2], degrees: f64) {
 /// (rather than a list of polygons) into a one-element list; rough.js never calls it that way,
 /// so that branch is not ported (see the M1 plan's decision 5).
 pub fn hachure_lines(
-    polygons: &mut [Vec<[f64; 2]>],
+    polygons: &mut [Vec<Point>],
     hachure_gap: f64,
     hachure_angle: f64,
     hachure_step_offset: f64,
-) -> Vec<[[f64; 2]; 2]> {
+) -> Vec<[Point; 2]> {
     let angle = hachure_angle;
     let gap = hachure_gap.max(0.1);
     let rotation_center = [0.0, 0.0];
@@ -79,11 +75,11 @@ pub fn hachure_lines(
 
 /// `bin/hachure.js` `straightHachureLines`.
 fn straight_hachure_lines(
-    polygons: &[Vec<[f64; 2]>],
+    polygons: &[Vec<Point>],
     gap: f64,
     hachure_step_offset: f64,
-) -> Vec<[[f64; 2]; 2]> {
-    let mut vertex_array: Vec<Vec<[f64; 2]>> = Vec::new();
+) -> Vec<[Point; 2]> {
+    let mut vertex_array: Vec<Vec<Point>> = Vec::new();
     for polygon in polygons {
         // `[...polygon]` is a shallow copy; if a closing point is appended it lands in this
         // new array, so it never mutates the caller's polygon.
@@ -95,7 +91,7 @@ fn straight_hachure_lines(
             vertex_array.push(vertices);
         }
     }
-    let mut lines: Vec<[[f64; 2]; 2]> = Vec::new();
+    let mut lines: Vec<[Point; 2]> = Vec::new();
     let gap = gap.max(0.1);
     // Create sorted edges table
     let mut edges: Vec<Edge> = Vec::new();

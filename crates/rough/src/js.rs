@@ -15,6 +15,12 @@ pub fn to_int32(x: f64) -> i32 {
     }) as i32
 }
 
+/// JS truthiness of a number (`if (x)`, `x || y`, `x ? a : b`): `0`, `-0` and `NaN` are
+/// falsy, every other value, infinities included, is truthy.
+pub fn truthy(x: f64) -> bool {
+    x != 0.0 && !x.is_nan()
+}
+
 /// `Math.round`: halves round towards +∞ (`Math.round(-2.5) == -2`), unlike `f64::round`.
 pub fn math_round(x: f64) -> f64 {
     let floor = x.floor();
@@ -65,6 +71,16 @@ mod tests {
         assert_eq!(to_int32(4_294_967_297.0), 1);
         assert_eq!(to_int32(-7.9), -7);
         assert_eq!(to_int32(f64::NAN), 0);
+    }
+
+    #[test]
+    fn truthy_treats_only_zero_and_nan_as_false() {
+        assert!(!truthy(0.0));
+        assert!(!truthy(-0.0));
+        assert!(!truthy(f64::NAN));
+        assert!(truthy(1e-300));
+        assert!(truthy(-1.0));
+        assert!(truthy(f64::INFINITY));
     }
 
     #[test]
