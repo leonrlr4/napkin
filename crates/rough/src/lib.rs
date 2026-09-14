@@ -5,3 +5,5 @@
 pub mod js;
 pub mod math;
 pub mod path_data;
+pub mod points_on_curve;
+pub mod points_on_path;

@@ -6,8 +6,9 @@ use std::path::PathBuf;
 
 use rough::math::Random;
 use rough::path_data::{self, Segment};
+use rough::{points_on_curve, points_on_path};
 use serde_json::{Value, json};
-use testkit::{check_group, to_value};
+use testkit::{Case, check_group, num, point_value, points_from, to_value};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
@@ -28,6 +29,14 @@ fn segments_value(segments: &[Segment]) -> Value {
             .map(|s| json!({ "key": s.key.to_string(), "data": numbers(&s.data) }))
             .collect(),
     )
+}
+
+fn points_value(points: &[[f64; 2]]) -> Value {
+    Value::Array(points.iter().copied().map(point_value).collect())
+}
+
+fn optional_num(case: &Case, i: usize) -> Option<f64> {
+    case.args.get(i).map(num)
 }
 
 #[test]
@@ -54,6 +63,37 @@ fn path_data() {
             "absolutize" => segments_value(&path_data::absolutize(&parsed)),
             "normalize" => segments_value(&path_data::normalize(&path_data::absolutize(&parsed))),
             other => panic!("unknown call {other}"),
+        }
+    });
+}
+
+#[test]
+fn points_on_curve() {
+    check_group(&dir(), "points_on_curve", |case| {
+        let points = points_from(&case.args[0]);
+        match case.call.as_str() {
+            "pointsOnBezierCurves" => points_value(&points_on_curve::points_on_bezier_curves(
+                &points,
+                case.num(1),
+                optional_num(case, 2),
+            )),
+            "simplify" => points_value(&points_on_curve::simplify(&points, case.num(1))),
+            "curveToBezier" => match points_on_curve::curve_to_bezier(&points, case.num(1)) {
+                Some(out) => points_value(&out),
+                None => throws("A curve must have at least three points."),
+            },
+            other => panic!("unknown call {other}"),
+        }
+    });
+}
+
+#[test]
+fn points_on_path() {
+    check_group(&dir(), "points_on_path", |case| {
+        let d = case.args[0].as_str().expect("path");
+        match points_on_path::points_on_path(d, case.num(1), optional_num(case, 2)) {
+            Ok(sets) => Value::Array(sets.iter().map(|set| points_value(set)).collect()),
+            Err(e) => throws(e),
         }
     });
 }
