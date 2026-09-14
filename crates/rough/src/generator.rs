@@ -5,6 +5,7 @@ use crate::core::{Drawable, Op, OpSet, OpSetType, Options, Point, ResolvedOption
 use crate::js::truthy;
 use crate::path_data::PathError;
 use crate::points_on_curve;
+use crate::points_on_path;
 use crate::renderer::{self, Ctx};
 
 const NOS: &str = "none";
@@ -22,6 +23,56 @@ pub struct RoughGenerator {
 /// JS `if (o.fill)`: a missing or empty string is falsy.
 fn has_fill(o: &Ctx) -> bool {
     o.o.fill.as_deref().is_some_and(|f| !f.is_empty())
+}
+
+/// The character class JS regex `\s` matches: wider than `char::is_whitespace` (it adds
+/// U+180E-adjacent separators like U+1680 and U+FEFF, verified against V8's `/\s/` against
+/// every codepoint up to U+FFFF), used by [`preprocess_path`]'s second step.
+fn is_js_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}'
+    ) || ('\u{2000}'..='\u{200a}').contains(&c)
+        || matches!(
+            c,
+            '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
+        )
+}
+
+/// bin/generator.js `path`'s three-step string preprocessing, applied in order:
+/// `.replace(/\n/g, ' ').replace(/(-\s)/g, '-').replace('/(\s\s)/g', ' ')`.
+///
+/// The third call's first argument is a string literal, not a `RegExp`, so
+/// `String.prototype.replace` treats it as plain text and rewrites only its first
+/// occurrence. Inside a JS string literal `\s` is not a recognized escape sequence, so it
+/// collapses to a bare `s` (confirmed with `node -e "console.log('/(\s\s)/g')"`, which
+/// prints `/(ss)/g`); the runtime search text is therefore 7 characters, not the 9-character
+/// text `bin/generator.js` shows source-side. No path in this crate's baselines contains
+/// either spelling, so the two are behaviorally equivalent here, but the runtime value is
+/// the one a future caller could actually hit.
+fn preprocess_path(d: &str) -> String {
+    let step1: String = d.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+
+    let mut step2 = String::with_capacity(step1.len());
+    let mut chars = step1.chars().peekable();
+    while let Some(c) = chars.next() {
+        step2.push(c);
+        if c == '-' && chars.peek().is_some_and(|&next| is_js_whitespace(next)) {
+            chars.next();
+        }
+    }
+
+    const LITERAL_SEARCH: &str = "/(ss)/g";
+    match step2.find(LITERAL_SEARCH) {
+        Some(idx) => {
+            let mut step3 = String::with_capacity(step2.len());
+            step3.push_str(&step2[..idx]);
+            step3.push(' ');
+            step3.push_str(&step2[idx + LITERAL_SEARCH.len()..]);
+            step3
+        }
+        None => step2,
+    }
 }
 
 impl RoughGenerator {
@@ -241,8 +292,71 @@ impl RoughGenerator {
     }
 
     /// bin/generator.js `path`.
-    pub fn path(&self, _d: &str, _options: &Options) -> Result<Drawable, PathError> {
-        todo!()
+    pub fn path(&self, d: &str, options: &Options) -> Result<Drawable, PathError> {
+        let mut o = Ctx::new(self.default_options.merge(options));
+        let mut paths = Vec::new();
+        // JS `if (!d)`: an empty string is falsy; a string of only whitespace is truthy and
+        // goes through the full path below.
+        if d.is_empty() {
+            return Ok(Drawable {
+                shape: Shape::Path,
+                options: o.o,
+                sets: paths,
+            });
+        }
+        let d = preprocess_path(d);
+        let has_fill = has_fill(&o)
+            && o.o.fill.as_deref() != Some("transparent")
+            && o.o.fill.as_deref() != Some(NOS);
+        let has_stroke = o.o.stroke != NOS;
+        let simplified = o.o.simplification.is_some_and(|s| truthy(s) && s < 1.0);
+        let distance = if simplified {
+            let simplification_or_1 = o.o.simplification.filter(|&s| truthy(s)).unwrap_or(1.0);
+            4.0 - 4.0 * simplification_or_1
+        } else {
+            (1.0 + o.o.roughness) / 2.0
+        };
+        // `pointsOnPath` runs before `svgPath`; a parse error is thrown from here first.
+        let mut sets = points_on_path::points_on_path(&d, 1.0, Some(distance))?;
+        let shape = renderer::svg_path(&d, &mut o)?;
+        if has_fill {
+            if o.o.fill_style == "solid" {
+                if sets.len() == 1 {
+                    // `Object.assign(Object.assign({}, o), {...})`: the copy shares the
+                    // randomizer `shape` above already created.
+                    let mut fill_o = o.clone();
+                    fill_o.o.disable_multi_stroke = true;
+                    fill_o.o.roughness = if truthy(o.o.roughness) {
+                        o.o.roughness + o.o.fill_shape_roughness_gain
+                    } else {
+                        0.0
+                    };
+                    let fill_shape = renderer::svg_path(&d, &mut fill_o)?;
+                    paths.push(OpSet {
+                        kind: OpSetType::FillPath,
+                        ops: _merged_shape(fill_shape.ops),
+                    });
+                } else {
+                    paths.push(renderer::solid_fill_polygon(&sets, &mut o));
+                }
+            } else {
+                paths.push(renderer::pattern_fill_polygons(&mut sets, &mut o));
+            }
+        }
+        if has_stroke {
+            if simplified {
+                for set in &sets {
+                    paths.push(renderer::linear_path(set, false, &mut o));
+                }
+            } else {
+                paths.push(shape);
+            }
+        }
+        Ok(Drawable {
+            shape: Shape::Path,
+            options: o.o,
+            sets: paths,
+        })
     }
 }
 

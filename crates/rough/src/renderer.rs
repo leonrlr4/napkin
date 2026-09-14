@@ -6,6 +6,7 @@ use std::rc::Rc;
 use crate::core::{Op, OpSet, OpSetType, Point, ResolvedOptions};
 use crate::js::truthy;
 use crate::math::Random;
+use crate::path_data::{self, PathError, Segment};
 
 /// The options object rough.js threads through the renderer. `random(ops)` lazily hangs a
 /// `Random` on it; a copy made with `Object.assign({}, o)` shares that `Random` if it
@@ -267,6 +268,44 @@ pub(crate) fn arc(
         kind: OpSetType::Path,
         ops,
     }
+}
+
+/// bin/renderer.js `svgPath`.
+pub(crate) fn svg_path(path: &str, o: &mut Ctx) -> Result<OpSet, PathError> {
+    let segments = path_data::normalize(&path_data::absolutize(&path_data::parse_path(path)?));
+    let mut ops = Vec::new();
+    let mut first: Point = [0.0, 0.0];
+    let mut current: Point = [0.0, 0.0];
+    for Segment { key, data } in &segments {
+        match key {
+            'M' => {
+                current = [data[0], data[1]];
+                first = [data[0], data[1]];
+            }
+            'L' => {
+                ops.extend(_double_line(
+                    current[0], current[1], data[0], data[1], o, false,
+                ));
+                current = [data[0], data[1]];
+            }
+            'C' => {
+                let (x1, y1, x2, y2, x, y) = (data[0], data[1], data[2], data[3], data[4], data[5]);
+                ops.extend(_bezier_to(x1, y1, x2, y2, x, y, current, o));
+                current = [x, y];
+            }
+            'Z' => {
+                ops.extend(_double_line(
+                    current[0], current[1], first[0], first[1], o, false,
+                ));
+                current = first;
+            }
+            _ => {}
+        }
+    }
+    Ok(OpSet {
+        kind: OpSetType::Path,
+        ops,
+    })
 }
 
 // Fills
@@ -597,6 +636,67 @@ fn _arc(
     points.push([cx + rx * stp.cos(), cy + ry * stp.sin()]);
     points.push([cx + rx * stp.cos(), cy + ry * stp.sin()]);
     _curve(&points, None, o)
+}
+
+/// bin/renderer.js `_bezierTo`.
+#[expect(clippy::too_many_arguments, reason = "mirrors renderer.js")]
+fn _bezier_to(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    x: f64,
+    y: f64,
+    current: Point,
+    o: &mut Ctx,
+) -> Vec<Op> {
+    let mut ops = Vec::new();
+    let mro = if truthy(o.o.max_randomness_offset) {
+        o.o.max_randomness_offset
+    } else {
+        1.0
+    };
+    let ros = [mro, mro + 0.3];
+    let mut f: Point;
+    let iterations = if o.o.disable_multi_stroke { 1 } else { 2 };
+    let preserve_vertices = o.o.preserve_vertices;
+    for i in 0..iterations {
+        if i == 0 {
+            ops.push(Op::Move([current[0], current[1]]));
+        } else {
+            ops.push(Op::Move([
+                current[0]
+                    + if preserve_vertices {
+                        0.0
+                    } else {
+                        offset_opt(ros[0], o, 1.0)
+                    },
+                current[1]
+                    + if preserve_vertices {
+                        0.0
+                    } else {
+                        offset_opt(ros[0], o, 1.0)
+                    },
+            ]));
+        }
+        f = if preserve_vertices {
+            [x, y]
+        } else {
+            [
+                x + offset_opt(ros[i], o, 1.0),
+                y + offset_opt(ros[i], o, 1.0),
+            ]
+        };
+        ops.push(Op::BCurveTo([
+            x1 + offset_opt(ros[i], o, 1.0),
+            y1 + offset_opt(ros[i], o, 1.0),
+            x2 + offset_opt(ros[i], o, 1.0),
+            y2 + offset_opt(ros[i], o, 1.0),
+            f[0],
+            f[1],
+        ]));
+    }
+    ops
 }
 
 #[cfg(test)]

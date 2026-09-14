@@ -152,3 +152,8 @@ fn outline_linear() {
 fn outline_elliptic() {
     check_group(&dir(), "outline_elliptic", generate);
 }
+
+#[test]
+fn outline_path() {
+    check_group(&dir(), "outline_path", generate);
+}
