@@ -32,6 +32,20 @@ from pathlib import Path
 from fontTools.merge import Merger
 from fontTools.ttLib import TTFont
 
+# Before changing EXCALIDRAW_COMMIT, finish three hardening steps deferred when this tool
+# first shipped, so the re-pinned build can be trusted:
+# 1. Byte-for-byte reproducible output. fontTools stamps head.created and head.modified
+#    with the build time, so two runs of the same commit give different TTFs and the
+#    re-pin diff cannot show which fonts really changed. fontTools honours
+#    SOURCE_DATE_EPOCH; set it and check that two builds hash the same.
+# 2. Build into a temporary directory and replace assets/fonts only after every check
+#    passes. build() currently saves the TTF into OUT_DIR before mismatches() runs, so a
+#    failing build leaves a broken font behind. If a font directory yields no .woff2
+#    subsets (for example after an upstream rename), fail with a message naming the
+#    directory instead of the bare IndexError from Merger.merge([]) it produces now.
+# 3. Turn the MIT-text assert in license_text() into a real exception (`python -O` strips
+#    asserts), and pin fonttools in one place: the version is repeated in this file's
+#    script header and in test_build_fonts.py's docstring.
 EXCALIDRAW_COMMIT = "afa3a653fc5d2b742adcbd5a6063187b056d2419"
 FONTS_PATH = "packages/excalidraw/fonts"
 OUT_DIR = Path(__file__).resolve().parents[2] / "assets" / "fonts"
