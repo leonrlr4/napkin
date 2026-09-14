@@ -3,6 +3,7 @@
 //! `generateRoughOptions`; the generators that build the shapes themselves are Tasks 9-12.
 
 mod arrowhead;
+mod freedraw;
 mod generic;
 mod linear;
 mod options;
@@ -11,6 +12,7 @@ use rough::RoughGenerator;
 
 use crate::element::Element;
 
+pub use freedraw::freedraw_outline_points;
 pub use options::generate_rough_options;
 
 /// One segment of a freedraw stroke outline, in element-local coordinates. Mirrors the SVG

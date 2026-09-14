@@ -15,11 +15,12 @@ use scene::new_element::{
     new_line_element,
 };
 use scene::shape::{
-    ElementShape, PathOp, ShapeContext, generate_element_shape, generate_rough_options,
+    ElementShape, PathOp, ShapeContext, freedraw_outline_points, generate_element_shape,
+    generate_rough_options,
 };
 use serde_json::{Value, json};
 use testkit::rough_json::{drawable_value, options_value};
-use testkit::{Case, check_group, num, numbers, points_from, throws};
+use testkit::{Case, check_group, num, numbers, point_value, points_from, throws};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
@@ -293,4 +294,19 @@ fn shapes_other() {
 #[test]
 fn shapes_linear() {
     check_shapes("shapes_linear");
+}
+
+#[test]
+fn freedraw_outline() {
+    check_group(&dir(), "freedraw_outline", |case| {
+        let Element::Freedraw(element) = element_from(&case.args[0]) else {
+            panic!("not a freedraw element");
+        };
+        Value::Array(
+            freedraw_outline_points(&element)
+                .into_iter()
+                .map(point_value)
+                .collect(),
+        )
+    });
 }

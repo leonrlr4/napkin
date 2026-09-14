@@ -7,7 +7,9 @@ pub mod env;
 pub mod file;
 pub mod fractional_index;
 pub mod json;
+mod laser_pointer;
 pub mod new_element;
+mod perfect_freehand;
 pub mod shape;
 
 pub use crate::element::Element;
