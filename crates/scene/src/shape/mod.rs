@@ -2,7 +2,9 @@
 //! outlines (`packages/element/src/shape.ts` at the pinned commit). Task 8 ports
 //! `generateRoughOptions`; the generators that build the shapes themselves are Tasks 9-12.
 
+mod arrowhead;
 mod generic;
+mod linear;
 mod options;
 
 use rough::RoughGenerator;
@@ -67,7 +69,13 @@ pub fn generate_element_shape(element: &Element, ctx: &ShapeContext) -> ElementS
             g,
             ctx.dark_mode,
         )]),
-        Element::Line(_) | Element::Arrow(_) => todo!("line/arrow shapes: Task 10"),
+        Element::Line(l) | Element::Arrow(l) => ElementShape::Drawables(linear::shape(
+            &generator,
+            element,
+            l,
+            ctx.dark_mode,
+            ctx.canvas_background_color,
+        )),
         Element::Freedraw(_) => todo!("freedraw shapes: Task 12"),
         // `stickynote`/`frame`/`magicframe`/`text`/`image` all return `null` in the JS;
         // napkin has no typed stickynote/frame/magicframe/image element, so those load as

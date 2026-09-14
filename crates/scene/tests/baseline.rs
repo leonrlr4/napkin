@@ -289,3 +289,8 @@ fn shapes_generic() {
 fn shapes_other() {
     check_shapes("shapes_other");
 }
+
+#[test]
+fn shapes_linear() {
+    check_shapes("shapes_linear");
+}

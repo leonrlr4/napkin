@@ -22,8 +22,9 @@ fn dash_array_dashed(stroke_width: f64) -> Vec<f64> {
     vec![8.0, 8.0 + stroke_width]
 }
 
-/// `getDashArrayDotted`.
-fn dash_array_dotted(stroke_width: f64) -> Vec<f64> {
+/// `getDashArrayDotted`. `pub(super)`: `arrowhead.rs`'s `getArrowheadLineOptions` reuses it
+/// for dotted arrow caps.
+pub(super) fn dash_array_dotted(stroke_width: f64) -> Vec<f64> {
     vec![1.5, 6.0 + stroke_width]
 }
 
