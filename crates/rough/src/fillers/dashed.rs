@@ -2,6 +2,7 @@
 
 use crate::core::{Op, OpSet, OpSetType, Point};
 use crate::geometry::line_length;
+use crate::js;
 use crate::renderer::{self, Ctx};
 
 use super::scan_line_hachure::polygon_hachure_lines;
@@ -48,7 +49,7 @@ fn dashed_line(lines: &[[Point; 2]], o: &mut Ctx) -> Vec<Op> {
             p2 = line[0];
         }
         // `Math.atan(dy / dx)`, not `atan2`.
-        let alpha = ((p2[1] - p1[1]) / (p2[0] - p1[0])).atan();
+        let alpha = js::atan((p2[1] - p1[1]) / (p2[0] - p1[0]));
         let mut i = 0.0;
         while i < count {
             let lstart = i * (offset + gap);

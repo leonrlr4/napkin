@@ -30,8 +30,8 @@ pub fn math_round(x: f64) -> f64 {
 /// `Math.atan`, ported from V8's `atan` (`src/base/ieee754.cc`, itself adapted from
 /// fdlibm), V8 14.6.202.34 — the version node 26.7.0 (`process.versions.v8`) embeds, and
 /// the one the baseline generator's node runs. Used by [`atan2`] (`x == 1.0`, and every
-/// other branch reduces to `atan(fabs(y/x))`); not exposed on its own since `scene` and
-/// `rough` have no direct `Math.atan` call site.
+/// other branch reduces to `atan(fabs(y/x))`) and, through the public [`atan`] wrapper, by
+/// `rough`'s dashed and zigzag-line fillers.
 ///
 /// Rust's own `f64::atan`/`atan2` are libm (glibc on this machine), which disagrees with
 /// V8's implementation in the last bit often enough to change loop bounds in `scene` (see
@@ -132,6 +132,12 @@ fn fdlibm_atan(mut x: f64) -> f64 {
         let z = ATAN_HI[id as usize] - ((x * (s1 + s2) - ATAN_LO[id as usize]) - x);
         if hx < 0 { -z } else { z }
     }
+}
+
+/// `Math.atan`, ported from V8's `fdlibm_atan` like [`atan2`]. Used at `rough`'s
+/// `fillers/dashed.rs` and `fillers/zigzag_line.rs` call sites instead of `f64::atan`.
+pub fn atan(x: f64) -> f64 {
+    fdlibm_atan(x)
 }
 
 /// `Math.atan2`, ported from V8's `atan2` (`src/base/ieee754.cc`), same V8 version and

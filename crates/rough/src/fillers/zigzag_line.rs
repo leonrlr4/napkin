@@ -2,6 +2,7 @@
 
 use crate::core::{Op, OpSet, OpSetType, Point};
 use crate::geometry::line_length;
+use crate::js;
 use crate::js::math_round;
 use crate::renderer::{self, Ctx};
 
@@ -42,7 +43,7 @@ fn zigzag_lines(lines: &[[Point; 2]], zo: f64, o: &mut Ctx) -> Vec<Op> {
             p2 = line[0];
         }
         // `Math.atan(dy / dx)`, not `atan2`.
-        let alpha = ((p2[1] - p1[1]) / (p2[0] - p1[0])).atan();
+        let alpha = js::atan((p2[1] - p1[1]) / (p2[0] - p1[0]));
         let mut i = 0.0;
         while i < count {
             let lstart = i * 2.0 * zo;
