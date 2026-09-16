@@ -1,15 +1,26 @@
 //! The eframe [`App`](eframe::App) that hosts the canvas: theme, document title, the camera,
 //! the load-error banner and the GPU canvas itself.
 
+use std::time::Instant;
+
 use eframe::egui;
 
+use crate::bench;
 use crate::camera::{Camera, SceneRect, normalized_zoom};
 use crate::document::Document;
 use crate::input::{self, CanvasInput};
 use crate::render::callback::{self, CanvasCallback};
 use crate::render::color::render_color;
-use crate::render::gpu::CanvasFrame;
+use crate::render::gpu::{CanvasFrame, CanvasRenderer};
+use crate::stats::FrameStats;
 use crate::theme::{self, Theme};
+
+/// The camera and wall-clock origin `--bench`'s script runs from, captured once the first
+/// real frame (positive view size, camera initialized) arrives (decision: "第一個畫面後開始").
+struct BenchRun {
+    start: Instant,
+    base_camera: Camera,
+}
 
 pub struct Viewer {
     document: Document,
@@ -18,10 +29,18 @@ pub struct Viewer {
     /// `None` until the first frame, when the canvas's `view_size` becomes known and the
     /// camera is set from `appState.napkin` or the document's bounds (decision 5).
     camera: Option<Camera>,
-    /// Set from `--bench`; unread until a later M3 task wires up the hidden frame-time
-    /// panel (spec §9.3).
-    #[allow(dead_code)]
+    /// Set from `--bench`: drives the camera with [`bench::camera_at`] once the first real
+    /// frame arrives, then prints a summary and closes the window (spec §9.3, decision 11).
     bench: bool,
+    /// `--bench`'s script state, `None` until the first real frame starts it.
+    bench_run: Option<BenchRun>,
+    /// Set once the closing `bench:` summary line has been printed, so a frame or two of
+    /// shutdown latency after `ViewportCommand::Close` cannot print it twice.
+    bench_done: bool,
+    /// Rolling frame-time statistics for the hidden panel and `--bench`'s summary line.
+    stats: FrameStats,
+    /// Toggled by F12; the panel is hidden by default (spec §9.3).
+    show_stats: bool,
     /// Last frame's `ui.input(|i| i.focused)`, to detect the false-to-true edge that
     /// triggers a theme re-read (spec §7.6).
     focused: bool,
@@ -43,6 +62,10 @@ impl Viewer {
             theme: load_theme(),
             camera: None,
             bench,
+            bench_run: None,
+            bench_done: false,
+            stats: FrameStats::new(),
+            show_stats: false,
             focused: false,
         }
     }
@@ -111,13 +134,20 @@ fn load_theme() -> Theme {
 }
 
 impl eframe::App for Viewer {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let frame_start = Instant::now();
+        self.stats.frame_started(frame_start);
+
         let focused = ui.input(|i| i.focused);
         if focused && !self.focused {
             self.theme = load_theme();
         }
         self.focused = focused;
         ui.ctx().set_visuals(self.theme.visuals());
+
+        if ui.input(|i| i.key_pressed(egui::Key::F12)) {
+            self.show_stats = !self.show_stats;
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.background))
@@ -141,9 +171,45 @@ impl eframe::App for Viewer {
                 let Some(camera) = self.camera.as_mut() else {
                     return;
                 };
-                // The input that changed the camera already triggered this repaint, so no
-                // `request_repaint` call is needed here.
-                input::apply(camera, &CanvasInput::from_egui(ui, &response));
+
+                if self.bench {
+                    if self.bench_run.is_none() {
+                        // The script starts now, on the first frame with a real camera: reset
+                        // the statistics so the summary only covers the script itself, not
+                        // whatever startup frames came before it.
+                        self.bench_run = Some(BenchRun {
+                            start: frame_start,
+                            base_camera: *camera,
+                        });
+                        self.stats = FrameStats::new();
+                        self.stats.frame_started(frame_start);
+                    }
+                    let run = self.bench_run.as_ref().expect("set above");
+                    let elapsed = run.start.elapsed().as_secs_f64();
+                    match bench::camera_at(elapsed, run.base_camera, view_size) {
+                        Some(next) => {
+                            *camera = next;
+                            ui.ctx().request_repaint();
+                        }
+                        None => {
+                            if !self.bench_done {
+                                println!(
+                                    "bench: frames {}, interval p99 {:.2} ms, cpu p99 {:.2} ms",
+                                    self.stats.frames(),
+                                    self.stats.interval_p99().unwrap_or(0.0),
+                                    self.stats.cpu_p99().unwrap_or(0.0),
+                                );
+                                self.bench_done = true;
+                            }
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            return;
+                        }
+                    }
+                } else {
+                    // The input that changed the camera already triggered this repaint, so
+                    // no `request_repaint` call is needed here.
+                    input::apply(camera, &CanvasInput::from_egui(ui, &response));
+                }
 
                 let background =
                     render_color(self.document.file.view_background_color(), self.theme.dark);
@@ -176,11 +242,50 @@ impl eframe::App for Viewer {
                 ));
             });
 
+        // The renderer's stats are from the *previous* frame's `prepare` call: this frame's
+        // `prepare` (via the paint callback queued above) has not run yet. `prepare_time` is
+        // folded into this frame's CPU sample on that basis (decision: Preflight 1).
+        let render_stats = frame
+            .wgpu_render_state()
+            .and_then(|render_state| {
+                let renderer = render_state.renderer.read();
+                renderer
+                    .callback_resources
+                    .get::<CanvasRenderer>()
+                    .map(CanvasRenderer::stats)
+            })
+            .unwrap_or_default();
+        self.stats
+            .cpu_finished(frame_start.elapsed() + render_stats.prepare_time);
+
         egui::Area::new(egui::Id::new("napkin-document-name"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
             .show(ui.ctx(), |ui| {
                 ui.label(&self.document.name);
             });
+
+        if self.show_stats {
+            egui::Area::new(egui::Id::new("napkin-stats-panel"))
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-8.0, -8.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(format!("frames {}", self.stats.frames()));
+                        ui.label(format_ms("interval p99", self.stats.interval_p99()));
+                        ui.label(format_ms("cpu p99", self.stats.cpu_p99()));
+                        ui.label(format!("drawn elements {}", render_stats.drawn_elements));
+                        ui.label(format!("cached meshes {}", render_stats.cached_meshes));
+                        ui.label(format!("buffer vertices {}", render_stats.buffer_vertices));
+                    });
+                });
+        }
+    }
+}
+
+/// `"{label} {value:.2} ms"`, or `"{label} -"` when there is no sample yet.
+fn format_ms(label: &str, value: Option<f64>) -> String {
+    match value {
+        Some(value) => format!("{label} {value:.2} ms"),
+        None => format!("{label} -"),
     }
 }
 

@@ -161,6 +161,11 @@ pub struct RenderStats {
     pub drawn_elements: usize,
     pub cached_meshes: usize,
     pub buffer_vertices: u32,
+    /// How long the `prepare` call that produced these stats took, from entry to return
+    /// (Task 8's frame-time panel adds this into the CPU sample it records for the *previous*
+    /// frame, since `prepare` for the current frame has not run yet when the viewer reads
+    /// this).
+    pub prepare_time: std::time::Duration,
 }
 
 /// A `DrawItem` resolved to the GPU buffer segments and stencil state `paint` needs; built once
@@ -711,6 +716,7 @@ impl CanvasRenderer {
         queue: &wgpu::Queue,
         frame: &CanvasFrame,
     ) -> Vec<wgpu::CommandBuffer> {
+        let started = std::time::Instant::now();
         let view_size = [
             f64::from(frame.size_px[0]) / f64::from(frame.pixels_per_point),
             f64::from(frame.size_px[1]) / f64::from(frame.pixels_per_point),
@@ -750,8 +756,12 @@ impl CanvasRenderer {
             drawn_elements,
             cached_meshes: self.cache.mesh_count(),
             buffer_vertices: self.allocator.used().0,
+            prepare_time: std::time::Duration::ZERO,
         };
         self.cache.evict(600);
+        // Measured last, right before `prepare` returns, so it covers the whole call
+        // including the eviction pass above.
+        self.stats.prepare_time = started.elapsed();
 
         rotated_text_commands
     }
