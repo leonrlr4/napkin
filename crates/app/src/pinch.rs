@@ -149,13 +149,14 @@ delegate_noop!(GestureState: ignore wl_pointer::WlPointer);
 ///
 /// # Lifetime of the borrowed `wl_display`
 ///
-/// winit disconnects its Wayland connection (`wl_display_disconnect`) only when eframe's
-/// event loop returns, and [`eframe::App::on_exit`] runs before that. `Viewer::on_exit` calls
-/// [`PinchListener::stop`], which joins the dispatch thread before returning, so once
-/// `on_exit` has run, nothing is left touching the borrowed `wl_display` pointer. For the
-/// entire lifetime of the dispatch thread (from `start` until that join completes), the
-/// pointer is therefore still valid. [`Drop`] calls `stop` again as a second line of defense
-/// in case `on_exit` is ever skipped.
+/// winit disconnects the Wayland connection (`wl_display_disconnect`) when its thread-local
+/// `EventLoop` value is dropped at thread exit, which happens after eframe has dropped the
+/// `Viewer` (so after [`eframe::App::on_exit`] has already returned). `Viewer::on_exit` calls
+/// [`PinchListener::stop`], which joins the dispatch thread before returning, so nothing is
+/// left touching the borrowed `wl_display` pointer once `on_exit` has run, well before winit
+/// gets around to disconnecting it. For the entire lifetime of the dispatch thread (from
+/// `start` until that join completes), the pointer is therefore still valid. [`Drop`] calls
+/// `stop` again as a second line of defense in case `on_exit` is ever skipped.
 pub struct PinchListener {
     receiver: Receiver<PinchEvent>,
     /// Written to (with the value 1) by [`PinchListener::stop`] to wake the dispatch thread
@@ -235,7 +236,16 @@ impl PinchListener {
                             PollFd::new(&fd, PollFlags::IN),
                             PollFd::new(&stop, PollFlags::IN),
                         ];
-                        if rustix::event::poll(&mut fds, None).is_err() {
+                        // A signal delivered to this thread (e.g. while attached to a debugger)
+                        // interrupts `poll` with EINTR; that is not the connection dying, so
+                        // retry instead of ending the thread over it.
+                        let poll_result = loop {
+                            match rustix::event::poll(&mut fds, None) {
+                                Err(rustix::io::Errno::INTR) => continue,
+                                result => break result,
+                            }
+                        };
+                        if poll_result.is_err() {
                             break;
                         }
                         if fds[1].revents().contains(PollFlags::IN) {

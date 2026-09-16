@@ -17,7 +17,8 @@ use crate::stats::FrameStats;
 use crate::theme::{self, Theme};
 
 /// The camera and wall-clock origin `--bench`'s script runs from, captured once the first
-/// real frame (positive view size, camera initialized) arrives (decision: "第一個畫面後開始").
+/// real frame (positive view size, camera initialized) arrives: `bench::camera_at` needs a
+/// concrete starting camera and wall-clock origin to compute each later frame's camera from.
 struct BenchRun {
     start: Instant,
     base_camera: Camera,
@@ -77,7 +78,11 @@ impl Viewer {
             bench_done: false,
             stats: FrameStats::new(),
             show_stats: false,
-            focused: false,
+            // Assume the window starts focused: `theme` was just loaded above, so the first
+            // `ui()` call's `focused && !self.focused` check must not read it a second time
+            // merely because `self.focused` starts at the type's default. If the window is
+            // not actually focused yet, the next real focus transition still reloads it.
+            focused: true,
             pinch,
             pinch_tracker: PinchTracker::default(),
         }
@@ -273,8 +278,8 @@ impl eframe::App for Viewer {
             });
 
         // The renderer's stats are from the *previous* frame's `prepare` call: this frame's
-        // `prepare` (via the paint callback queued above) has not run yet. `prepare_time` is
-        // folded into this frame's CPU sample on that basis (decision: Preflight 1).
+        // `prepare` (via the paint callback queued above) has not run yet, so `prepare_time` is
+        // folded into this frame's CPU sample rather than the frame it actually measures.
         let render_stats = frame
             .wgpu_render_state()
             .and_then(|render_state| {

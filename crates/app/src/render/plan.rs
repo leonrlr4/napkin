@@ -219,12 +219,13 @@ fn element_alpha(element: &Element, frame_opacity: &HashMap<&str, f64>) -> f32 {
     (own * frame) as f32
 }
 
-/// Every non-deleted `frame` element's `id` -> its own `opacity` (0-100), which multiplies
-/// into its children's alpha.
+/// Every non-deleted frame-like element's `id` -> its own `opacity` (0-100), which multiplies
+/// into its children's alpha. Excalidraw's `getRenderOpacity` looks up whatever element
+/// `frameId` points to, not only `type: "frame"`: a `magicframe` is a valid frame container too.
 fn frame_opacities(elements: &[Element]) -> HashMap<&str, f64> {
     elements
         .iter()
-        .filter(|e| !e.is_deleted() && e.kind() == "frame")
+        .filter(|e| !e.is_deleted() && matches!(e.kind(), "frame" | "magicframe"))
         .filter_map(|e| Some((e.id()?, e.opacity())))
         .collect()
 }
@@ -502,6 +503,23 @@ mod tests {
             panic!("isolated")
         };
         assert_eq!(draw.key.alpha_bits, 0.25f32.to_bits());
+    }
+
+    #[test]
+    fn magicframe_opacity_multiplies_its_children_too() {
+        let frame = json!({ "id": "f", "type": "magicframe", "x": -5, "y": -5, "width": 100, "height": 100, "angle": 0, "opacity": 40, "version": 1 });
+        let child = sample::with(
+            sample::generic("rectangle", "c", [0.0, 0.0, 10.0, 10.0]),
+            json!({ "opacity": 50, "frameId": "f" }),
+        );
+        let file = sample::file(vec![frame, child]);
+        let items = plan_frame(&file, &mut SceneCache::new(), &view());
+        assert_eq!(kinds(&items), ["meshes1", "text1", "isolated1"]);
+        let DrawItem::Isolated { draw, .. } = &items[2] else {
+            panic!("isolated")
+        };
+        // 40% frame opacity * 50% element opacity = 20%.
+        assert_eq!(draw.key.alpha_bits, 0.2f32.to_bits());
     }
 
     #[test]

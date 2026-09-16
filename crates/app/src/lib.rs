@@ -1,5 +1,5 @@
-//! napkin's eframe application: CLI parsing, file loading, the omarchy theme and the
-//! egui viewer. The camera, tessellation and GPU canvas are added by later M3 tasks.
+//! napkin's eframe application: CLI parsing, file loading, the omarchy theme, the camera, and
+//! the egui viewer with its wgpu canvas (tessellation, text and the render pipelines).
 
 pub mod bench;
 pub mod camera;

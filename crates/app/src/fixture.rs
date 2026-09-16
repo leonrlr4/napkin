@@ -24,7 +24,7 @@ const STROKE_COLORS: [&str; 5] = ["#1e1e1e", "#e03131", "#2f9e44", "#1971c2", "#
 const FILL_STYLES: [&str; 4] = ["hachure", "cross-hatch", "solid", "zigzag"];
 
 /// A `Numerical Recipes` linear congruential generator: `state = state * 1664525 + 1013904223`
-/// (wrapping `u32` arithmetic), the same constants the brief specifies.
+/// (wrapping `u32` arithmetic), `Numerical Recipes`' own multiplier and increment.
 struct Lcg(u32);
 
 impl Lcg {

@@ -21,7 +21,7 @@ napkin 是常駐的原生 Rust 手繪白板，存檔格式就是 `.excalidraw`�
 cargo test --workspace
 cargo test -p rough --test baseline fill_hachure   # 單一基準群組：測試名 = 群組名 = tests/baseline/<名>.json
 cargo test -p scene --test corpus                  # excalidraw.com 語料 round-trip
-cargo clippy --workspace --all-targets && cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
 ```
 
 重新產生基準，只在改了 `tools/baseline/rough/cases.mjs` 或 `tools/baseline/scene/cases.mjs` 之後做，產出的 JSON 要 commit：

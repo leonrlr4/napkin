@@ -1,6 +1,6 @@
-//! Frame-time statistics for the hidden frame-time panel (Task 8) and `--bench` (`bench.rs`):
-//! a rolling window of per-frame intervals and CPU time, and the nearest-rank percentile over
-//! either.
+//! Frame-time statistics for the hidden frame-time panel (toggled by F12) and `--bench`
+//! (`bench.rs`): a rolling window of per-frame intervals and CPU time, and the nearest-rank
+//! percentile over either.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
