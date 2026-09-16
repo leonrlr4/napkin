@@ -23,7 +23,8 @@ pub struct CanvasInput {
     pub wheels: Vec<Wheel>,
     /// Pointer movement while panning with Space+primary or middle drag.
     pub pan_drag: [f64; 2],
-    /// Multiplicative zoom from a pinch gesture.
+    /// Multiplicative zoom from platform pinch events (egui's `Event::Zoom`); Task 9 adds
+    /// Wayland gesture events to this same field.
     pub pinch: Option<f64>,
 }
 
@@ -81,39 +82,46 @@ impl CanvasInput {
             });
 
         let line_scroll_speed = ui.ctx().options(|o| o.input_options.line_scroll_speed) as f64;
-        let wheels = ui.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|event| match event {
-                    egui::Event::MouseWheel {
-                        unit,
-                        delta,
-                        modifiers,
-                        ..
-                    } => {
-                        // egui's `delta` points the direction the *content* moves; CSS
-                        // `deltaY`/`deltaX` point the direction the *wheel* scrolls, the
-                        // opposite sign.
-                        let raw = match unit {
-                            egui::MouseWheelUnit::Point => [delta.x as f64, delta.y as f64],
-                            egui::MouseWheelUnit::Line => [
-                                delta.x as f64 * line_scroll_speed,
-                                delta.y as f64 * line_scroll_speed,
-                            ],
-                            egui::MouseWheelUnit::Page => {
-                                [delta.x as f64 * view_size[1], delta.y as f64 * view_size[1]]
-                            }
-                        };
-                        Some(Wheel {
-                            delta: [-raw[0], -raw[1]],
-                            ctrl: modifiers.ctrl || modifiers.command,
-                            shift: modifiers.shift,
-                        })
-                    }
-                    _ => None,
-                })
-                .collect()
-        });
+        // Excalidraw's `handleWheel` returns early unless the wheel event's target is the
+        // canvas (App.tsx 13996-14012); the egui equivalent is the pointer hovering this
+        // response, same gate as `pointer` above.
+        let wheels = if response.hovered() {
+            ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::MouseWheel {
+                            unit,
+                            delta,
+                            modifiers,
+                            ..
+                        } => {
+                            // egui's `delta` points the direction the *content* moves; CSS
+                            // `deltaY`/`deltaX` point the direction the *wheel* scrolls, the
+                            // opposite sign.
+                            let raw = match unit {
+                                egui::MouseWheelUnit::Point => [delta.x as f64, delta.y as f64],
+                                egui::MouseWheelUnit::Line => [
+                                    delta.x as f64 * line_scroll_speed,
+                                    delta.y as f64 * line_scroll_speed,
+                                ],
+                                egui::MouseWheelUnit::Page => {
+                                    [delta.x as f64 * view_size[1], delta.y as f64 * view_size[1]]
+                                }
+                            };
+                            Some(Wheel {
+                                delta: [-raw[0], -raw[1]],
+                                ctrl: modifiers.ctrl || modifiers.command,
+                                shift: modifiers.shift,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+        } else {
+            Vec::new()
+        };
 
         let pan_drag = if response.dragged_by(egui::PointerButton::Middle)
             || (ui.input(|i| i.key_down(egui::Key::Space))
@@ -125,12 +133,25 @@ impl CanvasInput {
             [0.0, 0.0]
         };
 
+        // Not `InputState::zoom_delta()`: egui folds Ctrl+wheel zoom into that too, which
+        // would double-apply the zoom already handled by the `wheels` ctrl branch above.
+        // Every raw `Event::Zoom` this frame multiplies together into one pinch factor.
+        let pinch = ui.input(|i| {
+            let mut factors = i.events.iter().filter_map(|event| match event {
+                egui::Event::Zoom(factor) => Some(*factor as f64),
+                _ => None,
+            });
+            factors
+                .next()
+                .map(|first| factors.fold(first, |acc, f| acc * f))
+        });
+
         CanvasInput {
             view_size,
             pointer,
             wheels,
             pan_drag,
-            pinch: None,
+            pinch,
         }
     }
 }
