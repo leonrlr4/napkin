@@ -126,6 +126,16 @@ pub struct TextElement {
     pub extra: Map<String, Value>,
 }
 
+/// Where an element sits: its top-left origin, size and rotation in radians.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub angle: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Element {
     Rectangle(GenericElement),
@@ -237,6 +247,81 @@ impl Element {
             _ => self.base().is_some_and(|b| b.is_deleted),
         }
     }
+
+    /// The typed element structs' `extra` map, where `frameId` lives (it is not an
+    /// `ElementBase` field). `None` for `Raw`, which has no separate extra map.
+    fn extra(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Element::Rectangle(e) | Element::Diamond(e) | Element::Ellipse(e) => Some(&e.extra),
+            Element::Line(e) | Element::Arrow(e) => Some(&e.extra),
+            Element::Text(e) => Some(&e.extra),
+            Element::Freedraw(e) => Some(&e.extra),
+            Element::Raw(_) => None,
+        }
+    }
+
+    /// `None` for a `Raw` element whose `x`, `y`, `width` or `height` is missing or not a
+    /// number; a missing or non-numeric `angle` reads as 0.
+    pub fn placement(&self) -> Option<Placement> {
+        match self {
+            Element::Raw(v) => {
+                let x = v.get("x").and_then(Value::as_f64)?;
+                let y = v.get("y").and_then(Value::as_f64)?;
+                let width = v.get("width").and_then(Value::as_f64)?;
+                let height = v.get("height").and_then(Value::as_f64)?;
+                let angle = v.get("angle").and_then(Value::as_f64).unwrap_or(0.0);
+                Some(Placement {
+                    x,
+                    y,
+                    width,
+                    height,
+                    angle,
+                })
+            }
+            _ => self.base().map(|b| Placement {
+                x: b.x,
+                y: b.y,
+                width: b.width,
+                height: b.height,
+                angle: b.angle,
+            }),
+        }
+    }
+
+    /// `frameId` when it is a string.
+    pub fn frame_id(&self) -> Option<&str> {
+        match self {
+            Element::Raw(v) => v.get("frameId").and_then(Value::as_str),
+            _ => self
+                .extra()
+                .and_then(|e| e.get("frameId"))
+                .and_then(Value::as_str),
+        }
+    }
+
+    /// `opacity` (0 to 100); a `Raw` element without a numeric one reads as 100.
+    pub fn opacity(&self) -> f64 {
+        match self {
+            Element::Raw(v) => v.get("opacity").and_then(Value::as_f64).unwrap_or(100.0),
+            _ => self.base().map(|b| b.opacity).unwrap_or(100.0),
+        }
+    }
+
+    /// The `type` string.
+    pub fn kind(&self) -> &str {
+        match self {
+            Element::Raw(v) => v.get("type").and_then(Value::as_str).unwrap_or(""),
+            _ => self.base().map(|b| b.kind.as_str()).unwrap_or(""),
+        }
+    }
+
+    /// `version`; a `Raw` element without a numeric one reads as 0.
+    pub fn version(&self) -> f64 {
+        match self {
+            Element::Raw(v) => v.get("version").and_then(Value::as_f64).unwrap_or(0.0),
+            _ => self.base().map(|b| b.version).unwrap_or(0.0),
+        }
+    }
 }
 
 impl Serialize for Element {
@@ -334,5 +419,58 @@ mod tests {
             element.to_value(),
             json!({"id": "i", "type": "image", "index": "a1", "fileId": "f"})
         );
+    }
+
+    #[test]
+    fn typed_elements_expose_placement_and_attributes() {
+        let mut value = rectangle();
+        value["angle"] = json!(0.5);
+        value["opacity"] = json!(60);
+        value["frameId"] = json!("frame-1");
+        let element = Element::from_value(value);
+        assert!(matches!(element, Element::Rectangle(_)));
+        assert_eq!(
+            element.placement(),
+            Some(Placement {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+                angle: 0.5
+            })
+        );
+        assert_eq!(element.frame_id(), Some("frame-1"));
+        assert_eq!(element.opacity(), 60.0);
+        assert_eq!(element.kind(), "rectangle");
+        assert_eq!(element.version(), 3.0);
+    }
+
+    #[test]
+    fn raw_elements_expose_placement_and_attributes() {
+        let image = Element::from_value(json!({
+            "id": "i", "type": "image", "x": 5, "y": 6, "width": 7, "height": 8,
+            "opacity": 40, "frameId": "f", "version": 9
+        }));
+        assert!(matches!(image, Element::Raw(_)));
+        assert_eq!(
+            image.placement(),
+            Some(Placement {
+                x: 5.0,
+                y: 6.0,
+                width: 7.0,
+                height: 8.0,
+                angle: 0.0
+            })
+        );
+        assert_eq!(image.frame_id(), Some("f"));
+        assert_eq!(image.opacity(), 40.0);
+        assert_eq!(image.kind(), "image");
+        assert_eq!(image.version(), 9.0);
+
+        let bare = Element::from_value(json!({ "id": "b", "type": "magic", "x": "no" }));
+        assert_eq!(bare.placement(), None);
+        assert_eq!(bare.frame_id(), None);
+        assert_eq!(bare.opacity(), 100.0);
+        assert_eq!(bare.version(), 0.0);
     }
 }

@@ -12,5 +12,5 @@ pub mod new_element;
 mod perfect_freehand;
 pub mod shape;
 
-pub use crate::element::Element;
+pub use crate::element::{Element, Placement};
 pub use crate::file::SceneFile;
