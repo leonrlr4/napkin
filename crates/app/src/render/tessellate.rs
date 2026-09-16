@@ -130,15 +130,17 @@ impl Builder {
             color,
         };
         let options = FillOptions::tolerance(frame.style.tolerance).with_fill_rule(rule);
-        if FillTessellator::new()
-            .tessellate_path(
-                shape,
-                &options,
-                &mut BuffersBuilder::new(&mut buffers, ctor),
-            )
-            .is_ok()
-        {
-            self.absorb(buffers);
+        match FillTessellator::new().tessellate_path(
+            shape,
+            &options,
+            &mut BuffersBuilder::new(&mut buffers, ctor),
+        ) {
+            Ok(_) => self.absorb(buffers),
+            // Tessellation runs once per zoom-bucket cache miss, not once per frame, so this
+            // does not spam. The part is dropped rather than panicking: a crafted or buggy
+            // file must not take napkin down, but a silently vanished part left nothing to
+            // grep for.
+            Err(error) => eprintln!("napkin: fill tessellation failed: {error}"),
         }
     }
 
@@ -153,15 +155,15 @@ impl Builder {
             .with_line_width(width)
             .with_line_join(LineJoin::Round)
             .with_line_cap(LineCap::Round);
-        if StrokeTessellator::new()
-            .tessellate_path(
-                shape,
-                &options,
-                &mut BuffersBuilder::new(&mut buffers, ctor),
-            )
-            .is_ok()
-        {
-            self.absorb(buffers);
+        match StrokeTessellator::new().tessellate_path(
+            shape,
+            &options,
+            &mut BuffersBuilder::new(&mut buffers, ctor),
+        ) {
+            Ok(_) => self.absorb(buffers),
+            // See the matching comment in `fill`: tessellation is cached per zoom bucket, and
+            // the part is dropped (not a panic) so a crafted file cannot take napkin down.
+            Err(error) => eprintln!("napkin: stroke tessellation failed: {error}"),
         }
     }
 
@@ -342,6 +344,44 @@ mod tests {
 
     use super::*;
     use crate::sample;
+
+    /// `FillTessellator::tessellate_path` returns `Err(UnsupportedParamater::ToleranceIsNaN)`
+    /// for a NaN tolerance without touching the path at all (verified against lyon_tessellation
+    /// 1.0.22's `fill.rs`), so this drives `Builder::fill`'s error branch without needing a
+    /// path lyon would reject outright (a NaN *coordinate* instead panics much earlier, in
+    /// `lyon_path`'s own `debug_assert!(p.x.is_finite())`, before any tessellator runs).
+    #[test]
+    fn fill_tessellation_error_is_dropped_without_panicking() {
+        let mut path_builder = lyon::path::Path::builder();
+        path_builder.begin(lyon::math::point(0.0, 0.0));
+        path_builder.line_to(lyon::math::point(10.0, 0.0));
+        path_builder.line_to(lyon::math::point(10.0, 10.0));
+        path_builder.end(true);
+        let path = path_builder.build();
+
+        let style = Style {
+            dark: false,
+            alpha: 1.0,
+            tolerance: f32::NAN,
+        };
+        let frame = Frame {
+            placement: Placement {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+                angle: 0.0,
+            },
+            center: [5.0, 5.0],
+            style: &style,
+        };
+        let mut builder = Builder::new();
+        builder.fill(&path, [1.0, 0.0, 0.0, 1.0], FillRule::NonZero, &frame);
+        let mesh = builder.finish();
+
+        assert!(mesh.parts.is_empty());
+        assert!(mesh.vertices.is_empty());
+    }
 
     fn mesh_of(value: serde_json::Value, alpha: f32) -> Mesh {
         let element = Element::from_value(value);
