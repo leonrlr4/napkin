@@ -1,0 +1,10 @@
+[package]
+name = "testkit"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rough.workspace = true
+serde_json.workspace = true

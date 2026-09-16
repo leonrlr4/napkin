@@ -1,0 +1,225 @@
+//! Compares the port with roughjs@4.6.4 output recorded in `tests/baseline/*.json`.
+//! One test per baseline group, so each porting task turns exactly its groups green.
+
+use std::path::PathBuf;
+
+use rough::math::Random;
+use rough::path_data::{self, Segment};
+use rough::{RoughGenerator, hachure_fill, points_on_curve, points_on_path};
+use serde_json::{Value, json};
+use testkit::rough_json::{drawable_value, options_from};
+use testkit::{
+    Case, check_group, load_group, num, numbers, points_from, points_value, throws, to_value,
+};
+
+fn dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline")
+}
+
+fn segments_value(segments: &[Segment]) -> Value {
+    Value::Array(
+        segments
+            .iter()
+            .map(|s| json!({ "key": s.key.to_string(), "data": numbers(&s.data) }))
+            .collect(),
+    )
+}
+
+/// Dispatches a RoughGenerator call. The options object is always the last argument.
+fn generate(case: &Case) -> Value {
+    let g = RoughGenerator::new();
+    let o = options_from(case.args.last().expect("options"));
+    let n = |i| case.num(i);
+    let drawable = match case.call.as_str() {
+        "line" => g.line(n(0), n(1), n(2), n(3), &o),
+        "rectangle" => g.rectangle(n(0), n(1), n(2), n(3), &o),
+        "ellipse" => g.ellipse(n(0), n(1), n(2), n(3), &o),
+        "circle" => g.circle(n(0), n(1), n(2), &o),
+        "linearPath" => g.linear_path(&points_from(&case.args[0]), &o),
+        "arc" => {
+            let closed = case.args[6].as_bool().expect("closed");
+            g.arc(n(0), n(1), n(2), n(3), n(4), n(5), closed, &o)
+        }
+        "curve" => g.curve(&points_from(&case.args[0]), &o),
+        "polygon" => g.polygon(&points_from(&case.args[0]), &o),
+        "path" => match g.path(case.args[0].as_str().expect("path string"), &o) {
+            Ok(d) => d,
+            Err(e) => return throws(e),
+        },
+        other => panic!("unknown generator call {other}"),
+    };
+    drawable_value(&drawable)
+}
+
+fn optional_num(case: &Case, i: usize) -> Option<f64> {
+    case.args.get(i).map(num)
+}
+
+#[test]
+fn random() {
+    check_group(&dir(), "random", |case| {
+        let mut random = Random::new(case.num(0));
+        Value::Array(
+            (0..case.num(1) as usize)
+                .map(|_| to_value(random.next()))
+                .collect(),
+        )
+    });
+}
+
+/// `js::atan2`/`js::hypot` against node's `Math.atan2`/`Math.hypot`, bit-for-bit: this is
+/// the one baseline group [`TOLERANCE`](testkit::TOLERANCE) must not paper over, since a
+/// last-bit difference from V8 is exactly the bug these two functions exist to avoid (loop
+/// bounds in `scene` that depend on the exact rounded result, not an approximation of it).
+#[test]
+fn js_math() {
+    let cases = load_group(&dir().join("js_math.json"));
+    assert!(!cases.is_empty(), "js_math: baseline has no cases");
+    let mut failures = Vec::new();
+    for case in &cases {
+        let expected = num(&case.expected);
+        let actual = match case.call.as_str() {
+            "atan2" => rough::js::atan2(case.num(0), case.num(1)),
+            "hypot" => rough::js::hypot(case.num(0), case.num(1)),
+            other => panic!("unknown js_math call {other}"),
+        };
+        let matches = if expected.is_nan() || actual.is_nan() {
+            expected.is_nan() && actual.is_nan()
+        } else {
+            expected.to_bits() == actual.to_bits()
+        };
+        if !matches {
+            failures.push(format!(
+                "{}: expected {expected:?} (bits {:#018x}), got {actual:?} (bits {:#018x})",
+                case.name,
+                expected.to_bits(),
+                actual.to_bits(),
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        let shown: Vec<_> = failures.iter().take(20).map(|f| format!("  {f}")).collect();
+        panic!(
+            "js_math: {} of {} cases failed\n{}{}",
+            failures.len(),
+            cases.len(),
+            shown.join("\n"),
+            if failures.len() > 20 { "\n  ..." } else { "" }
+        );
+    }
+}
+
+#[test]
+fn path_data() {
+    check_group(&dir(), "path_data", |case| {
+        let parsed = match path_data::parse_path(case.args[0].as_str().expect("path")) {
+            Ok(segments) => segments,
+            Err(e) => return throws(e),
+        };
+        match case.call.as_str() {
+            "parsePath" => segments_value(&parsed),
+            "absolutize" => segments_value(&path_data::absolutize(&parsed)),
+            "normalize" => segments_value(&path_data::normalize(&path_data::absolutize(&parsed))),
+            other => panic!("unknown call {other}"),
+        }
+    });
+}
+
+#[test]
+fn points_on_curve() {
+    check_group(&dir(), "points_on_curve", |case| {
+        let points = points_from(&case.args[0]);
+        match case.call.as_str() {
+            "pointsOnBezierCurves" => points_value(&points_on_curve::points_on_bezier_curves(
+                &points,
+                case.num(1),
+                optional_num(case, 2),
+            )),
+            "simplify" => points_value(&points_on_curve::simplify(&points, case.num(1))),
+            "curveToBezier" => match points_on_curve::curve_to_bezier(&points, case.num(1)) {
+                Some(out) => points_value(&out),
+                None => throws("A curve must have at least three points."),
+            },
+            other => panic!("unknown call {other}"),
+        }
+    });
+}
+
+#[test]
+fn points_on_path() {
+    check_group(&dir(), "points_on_path", |case| {
+        let d = case.args[0].as_str().expect("path");
+        match points_on_path::points_on_path(d, case.num(1), optional_num(case, 2)) {
+            Ok(sets) => Value::Array(sets.iter().map(|set| points_value(set)).collect()),
+            Err(e) => throws(e),
+        }
+    });
+}
+
+#[test]
+fn hachure_fill() {
+    check_group(&dir(), "hachure_fill", |case| {
+        let mut polygons: Vec<Vec<[f64; 2]>> = case.args[0]
+            .as_array()
+            .expect("polygons")
+            .iter()
+            .map(points_from)
+            .collect();
+        let lines =
+            hachure_fill::hachure_lines(&mut polygons, case.num(1), case.num(2), case.num(3));
+        json!({
+            "lines": lines.iter().map(|l| points_value(l)).collect::<Vec<_>>(),
+            "polygons": polygons.iter().map(|p| points_value(p)).collect::<Vec<_>>(),
+        })
+    });
+}
+
+#[test]
+fn outline_linear() {
+    check_group(&dir(), "outline_linear", generate);
+}
+
+#[test]
+fn outline_elliptic() {
+    check_group(&dir(), "outline_elliptic", generate);
+}
+
+#[test]
+fn outline_path() {
+    check_group(&dir(), "outline_path", generate);
+}
+
+#[test]
+fn fill_solid() {
+    check_group(&dir(), "fill_solid", generate);
+}
+
+#[test]
+fn fill_hachure() {
+    check_group(&dir(), "fill_hachure", generate);
+}
+
+#[test]
+fn fill_cross_hatch() {
+    check_group(&dir(), "fill_cross_hatch", generate);
+}
+
+#[test]
+fn fill_zigzag() {
+    check_group(&dir(), "fill_zigzag", generate);
+}
+
+#[test]
+fn fill_dots() {
+    check_group(&dir(), "fill_dots", generate);
+}
+
+#[test]
+fn fill_dashed() {
+    check_group(&dir(), "fill_dashed", generate);
+}
+
+#[test]
+fn fill_zigzag_line() {
+    check_group(&dir(), "fill_zigzag_line", generate);
+}
