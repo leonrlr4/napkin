@@ -89,10 +89,15 @@ dependencies = [
  "glyphon",
  "lyon",
  "pollster 0.4.0",
+ "raw-window-handle",
  "rough",
+ "rustix 1.1.4",
  "scene",
  "serde_json",
  "toml",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "wgpu",
 ]
 

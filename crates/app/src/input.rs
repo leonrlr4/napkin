@@ -23,8 +23,9 @@ pub struct CanvasInput {
     pub wheels: Vec<Wheel>,
     /// Pointer movement while panning with Space+primary or middle drag.
     pub pan_drag: [f64; 2],
-    /// Multiplicative zoom from platform pinch events (egui's `Event::Zoom`); Task 9 adds
-    /// Wayland gesture events to this same field.
+    /// Multiplicative zoom from this frame's pinch gestures: platform pinch events (egui's
+    /// `Event::Zoom`) and, on Wayland, `zwp_pointer_gestures_v1` events forwarded through
+    /// [`crate::pinch::PinchListener`], multiplied together into one factor.
     pub pinch: Option<f64>,
 }
 

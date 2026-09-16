@@ -15,11 +15,16 @@ getrandom = "0.3"
 glyphon = "=0.12.0"
 lyon = "1.0.19"
 pollster = "0.4"
+raw-window-handle = "0.6"
 regex = "1"
 rough = { path = "crates/rough" }
+rustix = { version = "1", features = ["event"] }
 scene = { path = "crates/scene" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 testkit = { path = "crates/testkit" }
 toml = "0.8"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wgpu = "30"

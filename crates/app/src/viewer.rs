@@ -9,6 +9,7 @@ use crate::bench;
 use crate::camera::{Camera, SceneRect, normalized_zoom};
 use crate::document::Document;
 use crate::input::{self, CanvasInput};
+use crate::pinch::{PinchListener, PinchTracker};
 use crate::render::callback::{self, CanvasCallback};
 use crate::render::color::render_color;
 use crate::render::gpu::{CanvasFrame, CanvasRenderer};
@@ -44,6 +45,11 @@ pub struct Viewer {
     /// Last frame's `ui.input(|i| i.focused)`, to detect the false-to-true edge that
     /// triggers a theme re-read (spec §7.6).
     focused: bool,
+    /// `None` when the compositor isn't Wayland or lacks `zwp_pointer_gestures_v1`; the
+    /// reason is logged once in [`Viewer::new`] and the canvas falls back to Ctrl+wheel zoom.
+    pinch: Option<PinchListener>,
+    /// Turns this listener's begin-relative `scale` into per-event zoom factors.
+    pinch_tracker: PinchTracker,
 }
 
 impl Viewer {
@@ -56,6 +62,11 @@ impl Viewer {
         if let Some(render_state) = &cc.wgpu_render_state {
             callback::install(render_state);
         }
+        let pinch = PinchListener::start(cc)
+            .inspect_err(|reason| {
+                eprintln!("napkin: touchpad pinch zoom unavailable: {reason}");
+            })
+            .ok();
         Viewer {
             document,
             load_error,
@@ -67,6 +78,8 @@ impl Viewer {
             stats: FrameStats::new(),
             show_stats: false,
             focused: false,
+            pinch,
+            pinch_tracker: PinchTracker::default(),
         }
     }
 }
@@ -134,6 +147,14 @@ fn load_theme() -> Theme {
 }
 
 impl eframe::App for Viewer {
+    /// Stops the pinch dispatch thread before eframe disconnects the Wayland display it
+    /// borrows from (see [`PinchListener`]'s doc comment).
+    fn on_exit(&mut self) {
+        if let Some(pinch) = &mut self.pinch {
+            pinch.stop();
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let frame_start = Instant::now();
         self.stats.frame_started(frame_start);
@@ -206,9 +227,18 @@ impl eframe::App for Viewer {
                         }
                     }
                 } else {
+                    let mut canvas_input = CanvasInput::from_egui(ui, &response);
+                    if let Some(pinch) = &self.pinch {
+                        for event in pinch.events() {
+                            if let Some(factor) = self.pinch_tracker.factor(event) {
+                                canvas_input.pinch =
+                                    Some(canvas_input.pinch.map_or(factor, |f| f * factor));
+                            }
+                        }
+                    }
                     // The input that changed the camera already triggered this repaint, so
                     // no `request_repaint` call is needed here.
-                    input::apply(camera, &CanvasInput::from_egui(ui, &response));
+                    input::apply(camera, &canvas_input);
                 }
 
                 let background =
