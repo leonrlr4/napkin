@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 這是什麼
 
-napkin 是常駐的原生 Rust 手繪白板，存檔格式就是 `.excalidraw`，對同一個 seed 要畫出和 excalidraw.com 一樣的線條。Cargo workspace，依賴方向只有 `app → scene → rough`（`app` 還沒建立）：
+napkin 是常駐的原生 Rust 手繪白板，存檔格式就是 `.excalidraw`，對同一個 seed 要畫出和 excalidraw.com 一樣的線條。Cargo workspace，依賴方向只有 `app → scene → rough`：
 
 - `crates/rough`：roughjs@4.6.4 逐行 port。零依賴，不知道 Excalidraw 的存在。
 - `crates/scene`：`.excalidraw` 讀寫、新元件預設值、fractional index、深色模式色彩、Excalidraw 的形狀規則（元件 → rough ops 或 freedraw 外框，純資料）。不依賴 egui，不渲染。
+- `crates/app`：binary `napkin`。eframe 視窗與 wgpu 畫布，依賴 `scene`；`scene` 與 `rough` 不能反過來依賴它。
 - `crates/testkit`：只給測試用，讀 JSON 基準並比對。
 
 程式碼、註解、commit message、PR 描述用英文；`docs/decisions/` 底下的文件用中文。這條 repo 慣例壓過全域「個人專案用中文」的規則。

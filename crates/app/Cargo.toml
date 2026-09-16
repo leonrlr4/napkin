@@ -1,0 +1,25 @@
+[package]
+name = "app"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "napkin"
+path = "src/main.rs"
+
+[dependencies]
+bytemuck.workspace = true
+eframe.workspace = true
+egui-wgpu.workspace = true
+glyphon.workspace = true
+lyon.workspace = true
+rough.workspace = true
+scene.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
