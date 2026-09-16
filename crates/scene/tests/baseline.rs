@@ -297,6 +297,11 @@ fn shapes_linear() {
 }
 
 #[test]
+fn shapes_freedraw() {
+    check_shapes("shapes_freedraw");
+}
+
+#[test]
 fn freedraw_outline() {
     check_group(&dir(), "freedraw_outline", |case| {
         let Element::Freedraw(element) = element_from(&case.args[0]) else {

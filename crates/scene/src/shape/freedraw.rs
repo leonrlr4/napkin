@@ -5,9 +5,14 @@
 //! `afa3a653fc5d2b742adcbd5a6063187b056d2419`. `getFreedrawStrokeCenterPoints` (bucket-fill
 //! boundary helper) has no napkin caller yet and is not ported.
 
-use crate::element::FreedrawElement;
+use rough::{RoughGenerator, points_on_curve};
+
+use crate::element::{Element, FreedrawElement};
 use crate::laser_pointer::{self, LaserPointer};
 use crate::perfect_freehand;
+
+use super::options::{generate_rough_options, is_path_a_loop};
+use super::{ElementShape, PathOp};
 
 /// `VARIABLE_WIDTH_FREEDRAW.SIZE_FACTOR`.
 const VARIABLE_WIDTH_SIZE_FACTOR: f64 = 4.25;
@@ -109,5 +114,122 @@ pub fn freedraw_outline_points(element: &FreedrawElement) -> Vec<[f64; 2]> {
         constant_width_freedraw_outline(element)
     } else {
         variable_width_freedraw_outline(element)
+    }
+}
+
+/// `med`: midpoint of two stroke-outline points. Computed from the untruncated
+/// coordinates; only the numbers written into the resulting [`PathOp`]s go through
+/// [`truncate_path_number`], not this intermediate.
+fn med(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
+}
+
+/// One coordinate as it comes out of `getSvgPathFromStroke`: JS prints the number, then the
+/// TO_FIXED_PRECISION regex keeps at most two decimals and deletes the digits, `e` and `-`
+/// that follow. Truncation, not rounding; and a mantissa with a decimal point loses its
+/// exponent, so 1.4999e-7 becomes 1.49. Excalidraw draws that path, so napkin must too.
+/// Assumes |x| < 1e21, where JS switches to exponent form with a "+" the regex keeps.
+pub(crate) fn truncate_path_number(x: f64) -> f64 {
+    // JS prints |x| < 1e-6 in exponent form; `{:e}` and `{}` give the same shortest digits.
+    let text = if x != 0.0 && x.abs() < 1e-6 {
+        format!("{x:e}")
+    } else {
+        format!("{x}")
+    };
+    match text.split_once('.') {
+        None => x,
+        Some((int_part, frac)) => {
+            let kept: String = frac
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .take(2)
+                .collect();
+            format!("{int_part}.{kept}")
+                .parse()
+                .expect("decimal literal")
+        }
+    }
+}
+
+/// A point's coordinates individually run through [`truncate_path_number`], matching the
+/// SVG-path regex applied to each number in the joined path string.
+fn truncated_point(p: [f64; 2]) -> [f64; 2] {
+    [truncate_path_number(p[0]), truncate_path_number(p[1])]
+}
+
+fn truncated_quad(control: [f64; 2], end: [f64; 2]) -> PathOp {
+    let control = truncated_point(control);
+    let end = truncated_point(end);
+    PathOp::Quad([control[0], control[1], end[0], end[1]])
+}
+
+/// `getSvgPathFromStroke`, as [`PathOp`]s instead of an SVG path string: napkin's renderer
+/// (M3) consumes structured ops rather than reparsing SVG.
+fn svg_path_from_stroke(points: &[[f64; 2]]) -> Vec<PathOp> {
+    let Some((&first, _)) = points.split_first() else {
+        return Vec::new();
+    };
+    let max = points.len() - 1;
+
+    let mut ops = vec![PathOp::Move(truncated_point(first))];
+    for (i, &point) in points.iter().enumerate() {
+        if i == max {
+            ops.push(truncated_quad(point, med(point, first)));
+            ops.push(PathOp::Line(truncated_point(first)));
+            ops.push(PathOp::Close);
+        } else {
+            ops.push(truncated_quad(point, med(point, points[i + 1])));
+        }
+    }
+    ops
+}
+
+/// `_generateElementShape`'s `"freedraw"` case: an optional rough fill when the stroke
+/// outlines a loop, plus the stroke outline itself (`getFreeDrawSvgPath`).
+pub(super) fn shape(
+    generator: &RoughGenerator,
+    element: &Element,
+    freedraw: &FreedrawElement,
+    dark_mode: bool,
+) -> ElementShape {
+    let fill = is_path_a_loop(&freedraw.points).then(|| {
+        let simplified = points_on_curve::simplify(&freedraw.points, 0.75);
+        let mut options =
+            generate_rough_options(element, false, dark_mode).expect("freedraw draws");
+        options.stroke = Some("none".to_owned());
+        Box::new(generator.curve(&simplified, &options))
+    });
+
+    ElementShape::Freedraw {
+        fill,
+        stroke: svg_path_from_stroke(&freedraw_outline_points(freedraw)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncates_like_the_svg_path_regex() {
+        // Expected values from node: the TO_FIXED_PRECISION regex applied to `${x}`.
+        for (x, expected) in [
+            (1.4999999997655777e-7, 1.49),
+            (1.2e-7, 1.2),
+            (1e-7, 1e-7),
+            (-1.2e-7, -1.2),
+            (-2.6789, -2.67),
+            (0.29, 0.29),
+            (2.675, 2.67),
+            (123.0, 123.0),
+            (0.000001, 0.0),
+            (-0.000001, 0.0),
+            (12.5, 12.5),
+            (0.30000000000000004, 0.3),
+            (5e-324, 5e-324),
+            (-0.0000015, 0.0),
+        ] {
+            assert_eq!(truncate_path_number(x), expected, "{x:e}");
+        }
     }
 }

@@ -78,7 +78,7 @@ pub fn generate_element_shape(element: &Element, ctx: &ShapeContext) -> ElementS
             ctx.dark_mode,
             ctx.canvas_background_color,
         )),
-        Element::Freedraw(_) => todo!("freedraw shapes: Task 12"),
+        Element::Freedraw(f) => freedraw::shape(&generator, element, f, ctx.dark_mode),
         // `stickynote`/`frame`/`magicframe`/`text`/`image` all return `null` in the JS;
         // napkin has no typed stickynote/frame/magicframe/image element, so those load as
         // `Element::Raw` and land here too.
