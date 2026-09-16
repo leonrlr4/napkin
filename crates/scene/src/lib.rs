@@ -6,10 +6,12 @@ pub mod element;
 pub mod env;
 pub mod file;
 pub mod fractional_index;
+pub mod geometry;
 pub mod json;
 mod laser_pointer;
 pub mod new_element;
 mod perfect_freehand;
+pub mod sample;
 pub mod shape;
 
 pub use crate::element::{Element, Placement};

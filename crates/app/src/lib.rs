@@ -9,7 +9,6 @@ pub mod fixture;
 pub mod input;
 pub mod pinch;
 pub mod render;
-pub mod sample;
 pub mod stats;
 pub mod theme;
 pub mod viewer;

@@ -187,7 +187,7 @@ impl Default for SceneCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sample;
+    use scene::sample;
 
     fn rect() -> scene::Element {
         scene::Element::from_value(sample::generic("rectangle", "a", [0.0, 0.0, 10.0, 10.0]))

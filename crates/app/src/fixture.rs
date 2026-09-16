@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use crate::sample;
+use scene::sample;
 
 /// Scene extent: elements are placed within `0..SCENE_WIDTH` x `0..SCENE_HEIGHT`.
 const SCENE_WIDTH: f64 = 4000.0;

@@ -2,7 +2,7 @@ mod support;
 
 use app::camera::Camera;
 use app::render::gpu::{CanvasFrame, CanvasRenderer};
-use app::sample;
+use scene::sample;
 use serde_json::json;
 
 fn close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {

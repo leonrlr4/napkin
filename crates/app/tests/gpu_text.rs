@@ -2,7 +2,7 @@ mod support;
 
 use app::camera::Camera;
 use app::render::gpu::{CanvasFrame, CanvasRenderer};
-use app::sample;
+use scene::sample;
 use serde_json::json;
 
 fn white_pixels(image: &support::Image, x0: u32, x1: u32, y0: u32, y1: u32) -> usize {

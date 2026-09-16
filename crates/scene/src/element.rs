@@ -6,7 +6,7 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::json::{Slot, semantic_eq};
 
@@ -124,6 +124,13 @@ pub struct TextElement {
     pub line_height: Option<f64>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// Which end of a line or arrow a binding or arrowhead applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearEnd {
+    Start,
+    End,
 }
 
 /// Where an element sits: its top-left origin, size and rotation in radians.
@@ -322,6 +329,180 @@ impl Element {
             _ => self.base().map(|b| b.version).unwrap_or(0.0),
         }
     }
+
+    /// `versionNonce`; a `Raw` element without a numeric one reads as 0.
+    pub fn version_nonce(&self) -> f64 {
+        match self {
+            Element::Raw(v) => v.get("versionNonce").and_then(Value::as_f64).unwrap_or(0.0),
+            _ => self.base().map(|b| b.version_nonce).unwrap_or(0.0),
+        }
+    }
+
+    /// `locked === true`.
+    pub fn is_locked(&self) -> bool {
+        self.field("locked")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// `groupIds`, innermost first; missing or non-string entries are skipped. A typed
+    /// element's `ElementBase::group_ids` is already an all-string array (a non-string entry
+    /// would have failed the exact round-trip check in `from_value` and landed as `Raw`
+    /// instead), so only the `Raw` path needs to filter.
+    pub fn group_ids(&self) -> Vec<&str> {
+        match self {
+            Element::Raw(v) => v
+                .get("groupIds")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default(),
+            _ => self
+                .base()
+                .map(|b| b.group_ids.iter().map(String::as_str).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// A text element's `containerId` when it is a string; `None` for every other type.
+    pub fn container_id(&self) -> Option<&str> {
+        match self {
+            Element::Text(t) => t.container_id.value().map(String::as_str),
+            Element::Raw(v) if v.get("type").and_then(Value::as_str) == Some("text") => {
+                v.get("containerId").and_then(Value::as_str)
+            }
+            _ => None,
+        }
+    }
+
+    /// `boundElements` as `(id, type)` pairs; `null`, missing or malformed entries are
+    /// skipped.
+    pub fn bound_elements(&self) -> Vec<(&str, &str)> {
+        match self.field("boundElements") {
+            Some(Value::Array(entries)) => entries
+                .iter()
+                .filter_map(|entry| {
+                    let id = entry.get("id")?.as_str()?;
+                    let kind = entry.get("type")?.as_str()?;
+                    Some((id, kind))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `startBinding.elementId` / `endBinding.elementId` of a line or arrow.
+    pub fn binding_target(&self, end: LinearEnd) -> Option<&str> {
+        self.field(binding_key(end))?
+            .get("elementId")
+            .and_then(Value::as_str)
+    }
+
+    /// Sets `x` and `y` (a `Raw` element only when both are already numbers).
+    pub fn set_position(&mut self, x: f64, y: f64) {
+        match self {
+            Element::Raw(Value::Object(map)) => {
+                let has_xy = map.get("x").is_some_and(Value::is_number)
+                    && map.get("y").is_some_and(Value::is_number);
+                if has_xy {
+                    map.insert("x".into(), json!(x));
+                    map.insert("y".into(), json!(y));
+                }
+            }
+            Element::Raw(_) => {}
+            _ => {
+                let base = self.base_mut().expect("typed element");
+                base.x = x;
+                base.y = y;
+            }
+        }
+    }
+
+    pub fn set_deleted(&mut self, deleted: bool) {
+        match self {
+            Element::Raw(Value::Object(map)) => {
+                map.insert("isDeleted".into(), json!(deleted));
+            }
+            Element::Raw(_) => {}
+            _ => self.base_mut().expect("typed element").is_deleted = deleted,
+        }
+    }
+
+    /// Removes every `boundElements` entry whose `id` is `id`; the array stays, possibly
+    /// empty. A no-op when there is no array to remove from.
+    pub fn remove_bound_element(&mut self, id: &str) {
+        if let Some(Value::Array(entries)) = self.field_mut("boundElements") {
+            entries.retain(|entry| entry.get("id").and_then(Value::as_str) != Some(id));
+        }
+    }
+
+    /// Sets `startBinding` or `endBinding` to `null`, even when the key is currently absent
+    /// (`mutateElement`'s result). Only typed line/arrow elements carry these keys in
+    /// `extra`; a no-op on every other element, `Raw` included (spec §5.2's restricted
+    /// `Raw` mutation surface has no binding fields).
+    pub fn clear_binding(&mut self, end: LinearEnd) {
+        if let Some(extra) = self.extra_mut() {
+            extra.insert(binding_key(end).into(), Value::Null);
+        }
+    }
+
+    /// Sets a text element's `containerId` to `null`. A no-op for every other element.
+    pub fn clear_container_id(&mut self) {
+        if let Element::Text(t) = self {
+            t.container_id = Slot::Null;
+        }
+    }
+
+    /// Sets `frameId` to `null`, even when the key is currently absent.
+    pub fn clear_frame_id(&mut self) {
+        match self {
+            Element::Raw(Value::Object(map)) => {
+                map.insert("frameId".into(), Value::Null);
+            }
+            Element::Raw(_) => {}
+            _ => {
+                if let Some(extra) = self.extra_mut() {
+                    extra.insert("frameId".into(), Value::Null);
+                }
+            }
+        }
+    }
+
+    /// A key that lives in the typed element structs' `extra` map (`Raw`'s own JSON object
+    /// for `Raw`), such as `locked`, `boundElements`, `startBinding` or `endBinding`.
+    fn field(&self, key: &str) -> Option<&Value> {
+        match self {
+            Element::Raw(v) => v.get(key),
+            _ => self.extra().and_then(|e| e.get(key)),
+        }
+    }
+
+    /// The typed element structs' `extra` map, mutably. `None` for `Raw`, which has no
+    /// separate extra map.
+    fn extra_mut(&mut self) -> Option<&mut Map<String, Value>> {
+        match self {
+            Element::Rectangle(e) | Element::Diamond(e) | Element::Ellipse(e) => Some(&mut e.extra),
+            Element::Line(e) | Element::Arrow(e) => Some(&mut e.extra),
+            Element::Text(e) => Some(&mut e.extra),
+            Element::Freedraw(e) => Some(&mut e.extra),
+            Element::Raw(_) => None,
+        }
+    }
+
+    /// Mutable counterpart of [`Element::field`].
+    fn field_mut(&mut self, key: &str) -> Option<&mut Value> {
+        match self {
+            Element::Raw(v) => v.get_mut(key),
+            _ => self.extra_mut().and_then(|e| e.get_mut(key)),
+        }
+    }
+}
+
+/// The `extra`/JSON key `startBinding`/`endBinding` mutation and lookup goes through.
+fn binding_key(end: LinearEnd) -> &'static str {
+    match end {
+        LinearEnd::Start => "startBinding",
+        LinearEnd::End => "endBinding",
+    }
 }
 
 impl Serialize for Element {
@@ -472,5 +653,101 @@ mod tests {
         assert_eq!(bare.frame_id(), None);
         assert_eq!(bare.opacity(), 100.0);
         assert_eq!(bare.version(), 0.0);
+    }
+
+    #[test]
+    fn reads_editing_attributes_from_typed_and_raw_elements() {
+        let mut value = rectangle();
+        value["locked"] = json!(true);
+        value["groupIds"] = json!(["inner", "outer"]);
+        value["boundElements"] =
+            json!([{"id": "t1", "type": "text"}, {"id": "a1", "type": "arrow"}]);
+        let element = Element::from_value(value);
+        assert!(matches!(element, Element::Rectangle(_)));
+        assert!(element.is_locked());
+        assert_eq!(element.group_ids(), vec!["inner", "outer"]);
+        assert_eq!(
+            element.bound_elements(),
+            vec![("t1", "text"), ("a1", "arrow")]
+        );
+        assert_eq!(element.version_nonce(), 4.0);
+        assert_eq!(element.container_id(), None);
+
+        let image = Element::from_value(json!({
+            "id": "i", "type": "image", "x": 1, "y": 2, "groupIds": ["g"], "locked": false,
+            "boundElements": [{"id": "a", "type": "arrow"}], "versionNonce": 7
+        }));
+        assert!(!image.is_locked());
+        assert_eq!(image.group_ids(), vec!["g"]);
+        assert_eq!(image.bound_elements(), vec![("a", "arrow")]);
+        assert_eq!(image.version_nonce(), 7.0);
+    }
+
+    #[test]
+    fn reads_bindings_and_containers() {
+        let arrow = Element::from_value(crate::sample::with(
+            crate::sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [10.0, 0.0]]),
+            json!({"startBinding": {"elementId": "r", "fixedPoint": [0.5, 0.5], "mode": "orbit"}}),
+        ));
+        assert!(matches!(arrow, Element::Arrow(_)));
+        assert_eq!(arrow.binding_target(LinearEnd::Start), Some("r"));
+        assert_eq!(arrow.binding_target(LinearEnd::End), None);
+        let text = Element::from_value(crate::sample::text(
+            "t",
+            [0.0, 0.0, 10.0, 10.0],
+            "hi",
+            Some("r"),
+        ));
+        assert_eq!(text.container_id(), Some("r"));
+    }
+
+    #[test]
+    fn setters_write_through_typed_and_raw_paths() {
+        let mut rect = Element::from_value(crate::sample::with(
+            rectangle(),
+            json!({"boundElements": [{"id": "t", "type": "text"}, {"id": "a", "type": "arrow"}], "frameId": "f"}),
+        ));
+        rect.set_position(7.0, 8.0);
+        rect.remove_bound_element("a");
+        rect.clear_frame_id();
+        rect.set_deleted(true);
+        let value = rect.to_value();
+        assert_eq!(
+            (value["x"].clone(), value["y"].clone()),
+            (json!(7.0), json!(8.0))
+        );
+        assert_eq!(value["boundElements"], json!([{"id": "t", "type": "text"}]));
+        assert_eq!(value["frameId"], Value::Null);
+        assert_eq!(value["isDeleted"], json!(true));
+
+        let mut arrow = Element::from_value(crate::sample::with(
+            crate::sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [10.0, 0.0]]),
+            json!({"endBinding": {"elementId": "r", "fixedPoint": [0.5, 0.5], "mode": "orbit"}}),
+        ));
+        arrow.clear_binding(LinearEnd::End);
+        assert_eq!(arrow.to_value()["endBinding"], Value::Null);
+        assert_eq!(arrow.binding_target(LinearEnd::End), None);
+
+        let mut text = Element::from_value(crate::sample::text(
+            "t",
+            [0.0, 0.0, 10.0, 10.0],
+            "hi",
+            Some("r"),
+        ));
+        text.clear_container_id();
+        assert_eq!(text.to_value()["containerId"], Value::Null);
+
+        let mut image = Element::from_value(json!({"id": "i", "type": "image", "x": 1, "y": 2,
+            "frameId": "f", "boundElements": [{"id": "a", "type": "arrow"}]}));
+        image.set_position(3.0, 4.0);
+        image.remove_bound_element("a");
+        image.clear_frame_id();
+        assert_eq!(
+            image.to_value(),
+            json!({"id": "i", "type": "image", "x": 3.0, "y": 4.0, "frameId": null, "boundElements": []})
+        );
+        let mut bare = Element::from_value(json!({"id": "b", "type": "magic"}));
+        bare.set_position(1.0, 1.0);
+        assert_eq!(bare.to_value(), json!({"id": "b", "type": "magic"}));
     }
 }

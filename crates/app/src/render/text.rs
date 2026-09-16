@@ -242,7 +242,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::sample;
+    use scene::sample;
 
     fn text_element(overrides: serde_json::Value) -> scene::element::TextElement {
         match Element::from_value(sample::with(

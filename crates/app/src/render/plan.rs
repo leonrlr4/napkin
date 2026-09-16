@@ -402,7 +402,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::sample;
+    use scene::sample;
 
     fn view() -> View {
         View {
