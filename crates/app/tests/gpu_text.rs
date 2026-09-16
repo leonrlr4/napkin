@@ -1,6 +1,7 @@
 mod support;
 
 use app::camera::Camera;
+use app::render::gpu::{CanvasFrame, CanvasRenderer};
 use app::sample;
 use serde_json::json;
 
@@ -9,6 +10,37 @@ fn white_pixels(image: &support::Image, x0: u32, x1: u32, y0: u32, y1: u32) -> u
         .flat_map(|y| (x0..x1).map(move |x| (x, y)))
         .filter(|&(x, y)| image.pixel(x, y)[0] > 200)
         .count()
+}
+
+fn black_bg(w: f64, h: f64) -> serde_json::Value {
+    sample::with(
+        sample::generic("rectangle", "bg", [0.0, 0.0, w, h]),
+        json!({ "roughness": 0, "strokeColor": "#000000", "backgroundColor": "#000000", "fillStyle": "solid" }),
+    )
+}
+
+fn rotated(id: &str, rect: [f64; 4], text: &str) -> serde_json::Value {
+    sample::with(
+        sample::text(id, rect, text, None),
+        json!({ "strokeColor": "#ffffff", "fontSize": 32, "fontFamily": 6, "angle": 0.000001 }),
+    )
+}
+
+/// Runs `CanvasRenderer::prepare` (and submits what it returns) without a paint pass, for tests
+/// that only care whether `prepare` panics.
+fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixels_per_point: f32) {
+    let (device, queue) = support::gpu();
+    let mut renderer = CanvasRenderer::new(&device, &queue, support::FORMAT);
+    let frame = CanvasFrame {
+        file: std::sync::Arc::new(file),
+        camera,
+        size_px,
+        pixels_per_point,
+        dark: false,
+    };
+    let prepared = renderer.prepare(&device, &queue, &frame);
+    queue.submit(prepared);
+    device.poll(wgpu::PollType::wait_indefinitely()).ok();
 }
 
 #[test]
@@ -120,4 +152,145 @@ fn text_color_is_not_darkened_by_srgb_conversion() {
         (0x78..=0x88).contains(&brightest_red),
         "brightest red channel in text region: {brightest_red:#x}"
     );
+}
+
+#[test]
+fn two_rotated_texts_in_one_frame_each_render_their_own_content() {
+    // Each `ensure_rotated_texture` call used to leave its command buffer unsubmitted, so the
+    // second rotated text's `prepare`/`render` overwrote the shared glyphon renderer and
+    // viewport before the first text's draw ever reached the GPU: rendering "a" with "b" in
+    // the same frame used to make "a"'s texture show "b"'s glyphs instead.
+    let alone = support::render(
+        sample::file(vec![
+            black_bg(400.0, 200.0),
+            rotated("a", [20.0, 20.0, 160.0, 40.0], "MMMMMMMM"),
+        ]),
+        Camera::default(),
+        400,
+        200,
+        false,
+    );
+    let with_b = support::render(
+        sample::file(vec![
+            black_bg(400.0, 200.0),
+            rotated("a", [20.0, 20.0, 160.0, 40.0], "MMMMMMMM"),
+            rotated("b", [220.0, 120.0, 160.0, 40.0], "iiiiiiii"),
+        ]),
+        Camera::default(),
+        400,
+        200,
+        false,
+    );
+    let region_a_alone = white_pixels(&alone, 20, 180, 20, 60);
+    let region_a_with_b = white_pixels(&with_b, 20, 180, 20, 60);
+    let region_b_with_a = white_pixels(&with_b, 220, 380, 120, 160);
+    assert!(
+        region_a_with_b > 500,
+        "first rotated text lost its glyphs: {region_a_with_b}"
+    );
+    assert!(
+        region_b_with_a > 0,
+        "second rotated text was not drawn at all"
+    );
+    // "a" ("MMMMMMMM", wide capitals) lights roughly the same pixel count whether or not a
+    // later rotated text shares the frame; before the fix it lit far fewer (it showed "b"'s
+    // glyphs, or a mix, instead of its own).
+    let diff = region_a_with_b.abs_diff(region_a_alone);
+    assert!(
+        diff <= region_a_alone / 10 + 5,
+        "first text's content changed when a later rotated text shared the frame: alone \
+         {region_a_alone}, with a following text {region_a_with_b}"
+    );
+}
+
+#[test]
+fn a_later_long_rotated_text_does_not_destroy_an_earlier_texture() {
+    let a = sample::with(
+        sample::text("a", [0.0, 0.0, 40.0, 20.0], "i", None),
+        json!({ "strokeColor": "#ffffff", "fontSize": 8, "fontFamily": 6, "angle": 0.000001 }),
+    );
+    // More than glyphon's default 4096-byte vertex buffer can hold (~146 glyphs): before the
+    // fix, shaping this line grew and replaced that shared buffer while "a"'s still-unsubmitted
+    // command buffer referenced the old one, and submitting it later panicked wgpu with
+    // "Buffer with 'glyphon vertices' label has been destroyed".
+    let long: String = "M".repeat(220);
+    let b = sample::with(
+        sample::text("b", [0.0, 30.0, 2000.0, 20.0], &long, None),
+        json!({ "strokeColor": "#ffffff", "fontSize": 8, "fontFamily": 6, "angle": 0.000001 }),
+    );
+    support::render(sample::file(vec![a, b]), Camera::default(), 100, 100, false);
+}
+
+#[test]
+fn latin_text_at_extreme_zoom_hidpi_still_draws_glyphs() {
+    // fontSize 36 * zoom 30 * pixels_per_point 2 = a 2160px physical em size: before the fix,
+    // glyphon's prepare returned `AtlasFull` and the `.expect` on it panicked.
+    let line = "The quick brown fox jumps over the lazy dog, 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let text = sample::with(
+        sample::text("t", [0.0, 0.0, 1800.0, 45.0], line, None),
+        json!({ "fontSize": 36, "strokeColor": "#ffffff" }),
+    );
+    let camera = Camera {
+        scroll_x: 0.0,
+        scroll_y: 0.0,
+        zoom: 30.0,
+    };
+    let image = support::render_with_ppp(
+        sample::file(vec![black_bg(2560.0, 1600.0), text]),
+        camera,
+        2560,
+        1600,
+        2.0,
+        false,
+    );
+    let lit = white_pixels(&image, 0, 2560, 0, 1600);
+    assert!(lit > 0, "no glyph pixels drawn at extreme zoom");
+}
+
+#[test]
+fn cjk_text_at_extreme_zoom_hidpi_still_draws_glyphs() {
+    // fontSize 20 * zoom 30 * pixels_per_point 2 = a 1200px physical em size: also past the
+    // atlas's capacity before the fix.
+    let line = "天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收冬藏閏餘成歲律呂調陽雲騰致雨露結為霜金生麗水玉出崑岡劍號巨闕珠稱夜光果珍李柰菜重芥薑海鹹河淡鱗潛羽翔龍師火帝鳥官人皇始制文字乃服衣裳推位讓國有虞陶唐";
+    let text = sample::with(
+        sample::text("t", [0.0, 0.0, 1800.0, 25.0], line, None),
+        json!({ "fontSize": 20, "strokeColor": "#ffffff", "fontFamily": 8 }),
+    );
+    let camera = Camera {
+        scroll_x: 0.0,
+        scroll_y: 0.0,
+        zoom: 30.0,
+    };
+    let image = support::render_with_ppp(
+        sample::file(vec![black_bg(2560.0, 1600.0), text]),
+        camera,
+        2560,
+        1600,
+        2.0,
+        false,
+    );
+    let lit = white_pixels(&image, 0, 2560, 0, 1600);
+    assert!(lit > 0, "no glyph pixels drawn at extreme zoom");
+}
+
+#[test]
+fn wide_rotated_text_past_the_texture_limit_does_not_overshoot_by_one_pixel() {
+    // `width * raster_scale` rounds to just over the device's max_texture_dimension_2d for
+    // this particular width: before the fix `create_texture` was asked for 8193px and wgpu's
+    // validation error panicked (`support::gpu`'s device panics on any uncaptured error).
+    let text = sample::with(
+        sample::text(
+            "t",
+            [0.0, 0.0, 508.6256466330513, 25.0],
+            "wide rotated",
+            None,
+        ),
+        json!({ "angle": 0.3 }),
+    );
+    let camera = Camera {
+        scroll_x: -250.0,
+        scroll_y: -10.0,
+        zoom: 30.0,
+    };
+    prepare_only(sample::file(vec![text]), camera, [1920, 1080], 1.0);
 }

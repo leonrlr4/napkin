@@ -304,7 +304,11 @@ impl eframe::App for Viewer {
                         ui.label(format_ms("cpu p99", self.stats.cpu_p99()));
                         ui.label(format!("drawn elements {}", render_stats.drawn_elements));
                         ui.label(format!("cached meshes {}", render_stats.cached_meshes));
-                        ui.label(format!("buffer vertices {}", render_stats.buffer_vertices));
+                        ui.label(format!(
+                            "buffer vertices {}/{}",
+                            render_stats.buffer_vertices_used,
+                            render_stats.buffer_vertices_capacity
+                        ));
                     });
                 });
         }

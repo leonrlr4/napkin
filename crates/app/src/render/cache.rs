@@ -158,3 +158,120 @@ impl Default for SceneCache {
         SceneCache::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sample;
+
+    fn rect() -> scene::Element {
+        scene::Element::from_value(sample::generic("rectangle", "a", [0.0, 0.0, 10.0, 10.0]))
+    }
+
+    fn key(element: &scene::Element) -> MeshKey {
+        MeshKey {
+            id: element.id().unwrap_or_default().to_owned(),
+            version_bits: element.version().to_bits(),
+            dark: false,
+            alpha_bits: 1.0f32.to_bits(),
+            bucket: 0,
+        }
+    }
+
+    #[test]
+    fn cache_hit_reuses_the_same_mesh_arc_and_keeps_the_segment() {
+        let mut cache = SceneCache::new();
+        let element = rect();
+        let k = key(&element);
+
+        let first_mesh = cache.mesh(&element, &k, "#ffffff").mesh.clone();
+        cache.mesh(&element, &k, "#ffffff").segment = Some(Segment {
+            vertex_start: 3,
+            index_start: 5,
+            index_count: 6,
+        });
+
+        let second = cache.mesh(&element, &k, "#ffffff");
+        assert!(
+            Arc::ptr_eq(&first_mesh, &second.mesh),
+            "cache miss re-tessellated"
+        );
+        assert_eq!(
+            second.segment,
+            Some(Segment {
+                vertex_start: 3,
+                index_start: 5,
+                index_count: 6
+            })
+        );
+    }
+
+    #[test]
+    fn forget_segments_clears_segments_but_keeps_meshes() {
+        let mut cache = SceneCache::new();
+        let element = rect();
+        let k = key(&element);
+
+        let first_mesh = cache.mesh(&element, &k, "#ffffff").mesh.clone();
+        cache.mesh(&element, &k, "#ffffff").segment = Some(Segment {
+            vertex_start: 1,
+            index_start: 2,
+            index_count: 3,
+        });
+
+        cache.forget_segments();
+
+        let entry = cache.mesh(&element, &k, "#ffffff");
+        assert_eq!(entry.segment, None, "forget_segments left a stale segment");
+        assert!(
+            Arc::ptr_eq(&first_mesh, &entry.mesh),
+            "forget_segments should not re-tessellate"
+        );
+    }
+
+    #[test]
+    fn evict_drops_meshes_unused_past_the_window() {
+        let mut cache = SceneCache::new();
+        let element = rect();
+        let k = key(&element);
+
+        cache.begin_frame();
+        cache.mesh(&element, &k, "#ffffff");
+        assert_eq!(cache.mesh_count(), 1);
+
+        for _ in 0..5 {
+            cache.begin_frame();
+        }
+        cache.evict(3);
+        assert_eq!(cache.mesh_count(), 0, "stale mesh survived eviction");
+    }
+
+    #[test]
+    fn evict_keeps_meshes_touched_within_the_window() {
+        let mut cache = SceneCache::new();
+        let element = rect();
+        let k = key(&element);
+
+        cache.begin_frame();
+        cache.mesh(&element, &k, "#ffffff");
+        cache.begin_frame();
+        cache.mesh(&element, &k, "#ffffff"); // touched again: refreshes last_used_frame
+
+        cache.evict(3);
+        assert_eq!(cache.mesh_count(), 1, "recently used mesh was evicted");
+    }
+
+    #[test]
+    fn clear_drops_shapes_and_meshes() {
+        let mut cache = SceneCache::new();
+        let element = rect();
+        let k = key(&element);
+
+        cache.mesh(&element, &k, "#ffffff");
+        assert_eq!(cache.mesh_count(), 1);
+
+        cache.clear();
+        assert_eq!(cache.mesh_count(), 0);
+        assert!(cache.shapes.is_empty());
+    }
+}

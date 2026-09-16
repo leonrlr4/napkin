@@ -6,13 +6,13 @@
 //! where they live in the shared buffers) must already be resolved by the time `paint` runs.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::camera::Camera;
-use crate::render::buffers::{Segment, SegmentAllocator};
+use crate::render::buffers::{self, Segment, SegmentAllocator};
 use crate::render::cache::SceneCache;
 use crate::render::color::render_color;
-use crate::render::plan::{DrawItem, ElementDraw, TextDraw, View, plan_frame};
+use crate::render::plan::{self, DrawItem, ElementDraw, TextDraw, View, plan_frame};
 use crate::render::tessellate::{Mesh, Vertex, local_center};
 use crate::render::text;
 
@@ -34,8 +34,9 @@ const INITIAL_HOLE_QUADS: u32 = 64;
 /// rotated text is rare, and it regrows on demand.
 const INITIAL_ROTATED_QUADS: u32 = 16;
 
-/// The offscreen texture a rotated text element is shaped into before `paint` draws it as a
-/// rotated quad (Task 7); chosen independently of the canvas's own target format so a single
+/// The offscreen texture a rotated (or too-large-for-the-in-pass-atlas, see
+/// [`crate::render::plan::MAX_TEXT_EM_PX`]) text element is shaped into before `paint` draws it
+/// as a quad; chosen independently of the canvas's own target format so a single
 /// `glyphon::TextAtlas` (tied to one format) can serve every such texture regardless of what
 /// format the canvas itself renders to.
 const ROTATED_TEXT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -160,9 +161,13 @@ pub struct CanvasFrame {
 pub struct RenderStats {
     pub drawn_elements: usize,
     pub cached_meshes: usize,
-    pub buffer_vertices: u32,
-    /// How long the `prepare` call that produced these stats took, from entry to return
-    /// (Task 8's frame-time panel adds this into the CPU sample it records for the *previous*
+    /// The shared mesh vertex buffer's current allocation, in vertices (`used`, `capacity`):
+    /// `used` tracks live GPU memory pressure, `capacity` shows when the buffer last grew or
+    /// was compacted.
+    pub buffer_vertices_used: u32,
+    pub buffer_vertices_capacity: u32,
+    /// How long the `prepare` call that produced these stats took, from entry to return (the
+    /// viewer's frame-time panel adds this into the CPU sample it records for the *previous*
     /// frame, since `prepare` for the current frame has not run yet when the viewer reads
     /// this).
     pub prepare_time: std::time::Duration,
@@ -193,14 +198,19 @@ enum PreparedItem {
     },
 }
 
-/// A rotated text element's cached offscreen render: `id` + `version_bits`, the render scale,
-/// dark mode and alpha, matching `MeshKey`'s field set (a mesh's appearance depends on the same
-/// five things; text's `scale` plays the role `MeshKey::bucket` plays for a mesh's tessellation
-/// tolerance). Any entry not requested during a `prepare` call is evicted at the end of it (see
-/// `CanvasRenderer::build_prepared`), so a changing `scale_bits` from continuous zooming does not
-/// accumulate textures across frames.
+/// A text element's cached offscreen render (used for rotated text, and for unrotated text too
+/// large for the in-pass atlas): file `index` + `id` + `version_bits`, the raster scale
+/// actually used, dark mode and alpha, matching `MeshKey`'s field set (a mesh's appearance
+/// depends on the same things; text's `scale_bits` plays the role `MeshKey::bucket` plays for a
+/// mesh's tessellation tolerance, and `index` disambiguates a duplicate id exactly like
+/// `MeshKey::index`). `scale_bits` is the *clamped* raster scale (see `raster_scale_for`), not
+/// the raw requested scale, so continuing
+/// to zoom past the clamp reuses the same texture instead of re-rasterizing every frame. Any
+/// entry not requested during a `prepare` call is evicted at the end of it (see
+/// `CanvasRenderer::build_prepared`).
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RotatedTextKey {
+    index: usize,
     id: String,
     version_bits: u64,
     scale_bits: u32,
@@ -419,10 +429,11 @@ pub struct CanvasRenderer {
     /// One `glyphon::TextRenderer` per `Text` batch position in the current (or a past, larger)
     /// frame; `prepare` grows this pool but never shrinks it.
     text_renderers: Vec<glyphon::TextRenderer>,
-    /// Shaped lines, keyed by the source element's `id` + `version_bits`: independent of
-    /// rotation, so a `RotatedText` element's lines are shaped once and reused for every zoom
-    /// level's offscreen texture.
-    text_lines: HashMap<(String, u64), Vec<text::ShapedLine>>,
+    /// Shaped lines, keyed by the source element's file `index` + `id` + `version_bits` (the
+    /// `index` disambiguates a duplicate id): independent of rotation or scale, so a
+    /// `RotatedText` element's lines are shaped once and reused for
+    /// every zoom level's offscreen texture.
+    text_lines: HashMap<(usize, String, u64), Vec<text::ShapedLine>>,
 
     /// Rotated text: its own atlas (a fixed offscreen format, sample count 1, no stencil) and
     /// a single renderer reused sequentially, since each rotated element's texture is rendered
@@ -436,6 +447,13 @@ pub struct CanvasRenderer {
 
     prepared: Vec<PreparedItem>,
     stats: RenderStats,
+
+    /// Glyphon `prepare`/`render` error messages already logged to stderr, so a persistent
+    /// condition (e.g. a line that keeps overflowing the atlas every frame) logs once instead
+    /// of every frame. A `Mutex` (not a `RefCell`) because
+    /// `paint` only has `&self` but `CanvasRenderer` still needs to be `Sync` to live in
+    /// egui_wgpu's `CallbackResources` type map.
+    logged_glyphon_errors: Mutex<HashSet<String>>,
 }
 
 impl CanvasRenderer {
@@ -694,6 +712,24 @@ impl CanvasRenderer {
             rotated_text_cache: HashMap::new(),
             prepared: Vec::new(),
             stats: RenderStats::default(),
+            logged_glyphon_errors: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Logs `error` to stderr the first time this particular message is seen, then remembers it
+    /// so later occurrences (e.g. every frame while a line stays too large for the atlas) are
+    /// silent.
+    fn log_glyphon_error_once(&self, error: &dyn std::fmt::Display) {
+        let message = error.to_string();
+        let mut logged = self
+            .logged_glyphon_errors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if logged.insert(message.clone()) {
+            eprintln!(
+                "napkin: {message}; skipping affected text this frame (further occurrences of \
+                 this message are not logged)"
+            );
         }
     }
 
@@ -708,8 +744,11 @@ impl CanvasRenderer {
         self.stats = RenderStats::default();
     }
 
-    /// Plans the frame and uploads what it needs. The returned buffers (rotated text's offscreen
-    /// renders) must be submitted before the pass that calls `paint`.
+    /// Plans the frame and uploads what it needs, including rendering any offscreen (rotated or
+    /// oversized, see [`plan::MAX_TEXT_EM_PX`]) text textures synchronously. Always returns an
+    /// empty list: `egui_wgpu::CallbackTrait::prepare` must return `Vec<wgpu::CommandBuffer>`,
+    /// but this renderer has nothing left to hand back once `prepare` itself submits everything
+    /// it created.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -721,10 +760,14 @@ impl CanvasRenderer {
             f64::from(frame.size_px[0]) / f64::from(frame.pixels_per_point),
             f64::from(frame.size_px[1]) / f64::from(frame.pixels_per_point),
         ];
+        // Matches `zoom_px` in the vertex shader's `Uniforms` exactly, so text and geometry
+        // agree on where a scene point lands in physical pixels.
+        let scale = frame.camera.zoom as f32 * frame.pixels_per_point;
         let view = View {
             visible: frame.camera.visible_rect(view_size),
             dark: frame.dark,
             bucket: frame.camera.bucket(f64::from(frame.pixels_per_point)),
+            pixel_scale: scale,
         };
         let items = plan_frame(&frame.file, &mut self.cache, &view);
         let background = frame.file.view_background_color();
@@ -738,13 +781,13 @@ impl CanvasRenderer {
                 height: frame.size_px[1],
             },
         );
-        let (prepared, drawn_elements, rotated_text_commands) =
-            self.build_prepared(device, queue, frame, background, &items);
+        let (prepared, drawn_elements) =
+            self.build_prepared(device, queue, frame, scale, background, &items);
         self.text_atlas.trim();
 
         let uniforms = Uniforms {
             scroll: [frame.camera.scroll_x as f32, frame.camera.scroll_y as f32],
-            zoom_px: frame.camera.zoom as f32 * frame.pixels_per_point,
+            zoom_px: scale,
             _pad0: 0.0,
             viewport_px: [frame.size_px[0] as f32, frame.size_px[1] as f32],
             _pad1: [0.0, 0.0],
@@ -755,7 +798,8 @@ impl CanvasRenderer {
         self.stats = RenderStats {
             drawn_elements,
             cached_meshes: self.cache.mesh_count(),
-            buffer_vertices: self.allocator.used().0,
+            buffer_vertices_used: self.allocator.used().0,
+            buffer_vertices_capacity: self.vertex_capacity,
             prepare_time: std::time::Duration::ZERO,
         };
         self.cache.evict(600);
@@ -763,7 +807,7 @@ impl CanvasRenderer {
         // including the eviction pass above.
         self.stats.prepare_time = started.elapsed();
 
-        rotated_text_commands
+        Vec::new()
     }
 
     /// Draws the prepared frame into a pass with a 4x MSAA color target and a Stencil8
@@ -832,9 +876,17 @@ impl CanvasRenderer {
                     pass.draw(0..6, 0..1);
                 }
                 PreparedItem::Text { renderer_index } => {
-                    self.text_renderers[*renderer_index]
-                        .render(&self.text_atlas, &self.text_viewport, pass)
-                        .expect("glyphon render for in-pass text");
+                    if let Err(error) = self.text_renderers[*renderer_index].render(
+                        &self.text_atlas,
+                        &self.text_viewport,
+                        pass,
+                    ) {
+                        // A glyph this batch needed was evicted from the atlas by a later
+                        // `prepare` batch sharing the same atlas, or the viewport resolution
+                        // changed since this batch's own `prepare` call; either way, skip
+                        // drawing it this frame instead of taking down the whole renderer.
+                        self.log_glyphon_error_once(&error);
+                    }
                     // glyphon's render() leaves its own pipeline, bind group 0 and vertex
                     // buffer bound; restore ours so the next item (which, unless it is
                     // `Isolated` with a hole, does not rebind these itself) finds them intact.
@@ -898,8 +950,9 @@ impl CanvasRenderer {
                 .checked_add(need_indices)
                 .is_some_and(|i| i <= self.index_capacity);
         if !fits {
-            // The buffers are recreated, so every mesh currently visible needs a fresh segment,
-            // not just the ones that were missing one before.
+            // Every mesh currently visible needs a fresh segment after this, not just the ones
+            // that were missing one before: either the buffers are compacted (segments reset to
+            // the start) or recreated (a fresh, empty allocator).
             let mut total_vertices = 0u32;
             let mut total_indices = 0u32;
             for draw in draws {
@@ -909,12 +962,44 @@ impl CanvasRenderer {
                 total_vertices += cached.mesh.vertices.len() as u32;
                 total_indices += cached.mesh.indices.len() as u32;
             }
-            let new_vertex_capacity = (self.vertex_capacity * 2).max(total_vertices);
-            let new_index_capacity = (self.index_capacity * 2).max(total_indices);
-            self.grow_mesh_buffers(device, new_vertex_capacity, new_index_capacity);
-            self.cache.forget_segments();
+            if total_vertices <= self.vertex_capacity && total_indices <= self.index_capacity {
+                // This frame's visible meshes fit the current capacity; the shortfall above is
+                // only because meshes the cache evicted, or meshes from an off-screen zoom
+                // bucket, still hold ranges the bump allocator never reclaims on its own.
+                // Compact instead of growing: rewind the allocator and re-upload everything
+                // visible below.
+                self.allocator
+                    .reset(self.vertex_capacity, self.index_capacity);
+                self.cache.forget_segments();
+            } else {
+                let max_vertex_capacity =
+                    buffers::max_buffer_elements(&device.limits(), VERTEX_SIZE);
+                let max_index_capacity = buffers::max_buffer_elements(&device.limits(), INDEX_SIZE);
+                let new_vertex_capacity = self
+                    .vertex_capacity
+                    .saturating_mul(2)
+                    .max(total_vertices)
+                    .min(max_vertex_capacity);
+                let new_index_capacity = self
+                    .index_capacity
+                    .saturating_mul(2)
+                    .max(total_indices)
+                    .min(max_index_capacity);
+                if new_vertex_capacity > self.vertex_capacity
+                    || new_index_capacity > self.index_capacity
+                {
+                    self.grow_mesh_buffers(device, new_vertex_capacity, new_index_capacity);
+                } else {
+                    // Already at the device's max_buffer_size; nothing left to grow into, so
+                    // compact what fits and let the allocation loop below skip the rest.
+                    self.allocator
+                        .reset(self.vertex_capacity, self.index_capacity);
+                }
+                self.cache.forget_segments();
+            }
         }
 
+        let mut skipped = 0usize;
         for draw in draws {
             let cached = self
                 .cache
@@ -924,10 +1009,12 @@ impl CanvasRenderer {
             }
             let vertex_count = cached.mesh.vertices.len() as u32;
             let index_count = cached.mesh.indices.len() as u32;
-            let segment = self
-                .allocator
-                .allocate(vertex_count, index_count)
-                .expect("buffers were sized to fit every mesh visible this frame");
+            let Some(segment) = self.allocator.allocate(vertex_count, index_count) else {
+                // Even the device's max_buffer_size cannot fit every mesh visible this frame;
+                // drop this one and let `build_prepared` skip drawing it.
+                skipped += 1;
+                continue;
+            };
             queue.write_buffer(
                 &self.vertex_buffer,
                 u64::from(segment.vertex_start) * VERTEX_SIZE,
@@ -939,6 +1026,12 @@ impl CanvasRenderer {
                 bytemuck::cast_slice(&cached.mesh.indices),
             );
             cached.segment = Some(segment);
+        }
+        if skipped > 0 {
+            eprintln!(
+                "napkin: {skipped} element mesh(es) did not fit the shared GPU buffers at the \
+                 device's max_buffer_size and were not drawn this frame"
+            );
         }
     }
 
@@ -1024,6 +1117,7 @@ impl CanvasRenderer {
     fn ensure_shaped(&mut self, file: &scene::SceneFile, index: usize, label: bool) {
         let element = &file.elements[index];
         let key = (
+            index,
             element.id().unwrap_or_default().to_owned(),
             element.version().to_bits(),
         );
@@ -1087,10 +1181,12 @@ impl CanvasRenderer {
         }
     }
 
-    /// Renders `draw`'s element into its cached offscreen texture at `scale`, unless a cache
-    /// entry for this `id` + `version` + `scale` + `dark` + `draw.alpha` already exists. Returns
-    /// the command buffer the render was submitted through, when this was a cache miss (`None`
-    /// on a hit means there is nothing new to submit).
+    /// Renders `draw`'s element into its cached offscreen texture, unless a cache entry for its
+    /// current [`RotatedTextKey`] already exists (nothing to do on a hit). On a glyphon error
+    /// (the glyph atlas is full), logs once and returns without inserting a cache entry,
+    /// leaving this text undrawn for the frame; the caller (which reads
+    /// back through `rotated_text_key`/`rotated_text_cache`) sees that as a miss it cannot fill
+    /// and skips the quad.
     fn ensure_rotated_texture(
         &mut self,
         device: &wgpu::Device,
@@ -1099,37 +1195,30 @@ impl CanvasRenderer {
         draw: &TextDraw,
         scale: f32,
         dark: bool,
-    ) -> Option<wgpu::CommandBuffer> {
+    ) {
         let element = &file.elements[draw.element];
-        let key = rotated_text_key(file, draw, scale, dark);
+        let key = rotated_text_key(device, file, draw, scale, dark);
         if self.rotated_text_cache.contains_key(&key) {
-            return None;
+            return;
         }
         self.ensure_shaped(file, draw.element, false);
         let placement = element
             .placement()
             .expect("RotatedText only wraps a Text element, which always has a placement");
 
-        // A device has a maximum 2D texture dimension; a large text at extreme zoom could ask
-        // for more than that. Lower the raster scale (never raise it) just enough that both
-        // dimensions fit, so the quad -- sized from `width_px` / `raster_scale` below, not from
-        // the requested `scale` -- keeps its correct scene-space size and only loses sharpness.
+        let raster_scale = f32::from_bits(key.scale_bits);
         let max_dimension = device.limits().max_texture_dimension_2d;
         let padding_px = 2 * ROTATED_TEXT_PADDING_PX;
-        let max_raster_scale_for = |extent: f64| {
-            if extent > 0.0 {
-                (max_dimension.saturating_sub(padding_px).max(1)) as f32 / extent as f32
-            } else {
-                scale
-            }
-        };
-        let raster_scale = scale
-            .min(max_raster_scale_for(placement.width))
-            .min(max_raster_scale_for(placement.height));
-
-        let width_px = ((placement.width as f32 * raster_scale).ceil() as u32 + padding_px).max(1);
-        let height_px =
-            ((placement.height as f32 * raster_scale).ceil() as u32 + padding_px).max(1);
+        // `raster_scale` (see `raster_scale_for`) already keeps `extent * raster_scale` at or
+        // below `max_dimension - padding_px`, but only up to `f32` rounding; clamp the pixel
+        // count itself too so a boundary case that rounds up past the limit cannot reach
+        // `create_texture` and trip a wgpu validation error.
+        let width_px = (((placement.width as f32 * raster_scale).ceil() as u32 + padding_px)
+            .max(1))
+        .min(max_dimension);
+        let height_px = (((placement.height as f32 * raster_scale).ceil() as u32 + padding_px)
+            .max(1))
+        .min(max_dimension);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("napkin canvas rotated text"),
@@ -1162,7 +1251,7 @@ impl CanvasRenderer {
         };
         let color = text_draw_color(file, draw, dark);
         let origin = ROTATED_TEXT_PADDING_PX as f32;
-        let shaped = shaped_lines_for(&self.text_lines, element);
+        let shaped = shaped_lines_for(&self.text_lines, draw.element, element);
         let areas: Vec<glyphon::TextArea> = shaped
             .iter()
             .map(|line| glyphon::TextArea {
@@ -1180,42 +1269,53 @@ impl CanvasRenderer {
                 custom_glyphs: &[],
             })
             .collect();
-        self.rotated_renderer
-            .prepare(
-                device,
-                queue,
-                &mut self.text_font_system,
-                &mut self.rotated_atlas,
-                &self.rotated_viewport,
-                areas,
-                &mut self.text_swash_cache,
-            )
-            .expect("glyphon prepare for rotated text");
+        if let Err(error) = self.rotated_renderer.prepare(
+            device,
+            queue,
+            &mut self.text_font_system,
+            &mut self.rotated_atlas,
+            &self.rotated_viewport,
+            areas,
+            &mut self.text_swash_cache,
+        ) {
+            // The shared glyph atlas is full; leave this text undrawn for the frame rather
+            // than panicking.
+            self.log_glyphon_error_once(&error);
+            return;
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("napkin canvas rotated text"),
         });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("napkin canvas rotated text"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("napkin canvas rotated text"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let rendered =
             self.rotated_renderer
-                .render(&self.rotated_atlas, &self.rotated_viewport, &mut pass)
-                .expect("glyphon render for rotated text");
+                .render(&self.rotated_atlas, &self.rotated_viewport, &mut pass);
+        drop(pass);
+        if let Err(error) = rendered {
+            self.log_glyphon_error_once(&error);
+            return;
         }
+        // Submitted here, before the next `RotatedText` item reuses `rotated_renderer`,
+        // `rotated_viewport` and their buffers: returning this encoder for a later, batched
+        // submit would let the next text's `prepare` overwrite that shared state before the
+        // GPU had consumed this one's.
+        queue.submit(std::iter::once(encoder.finish()));
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("napkin canvas rotated text"),
@@ -1241,26 +1341,26 @@ impl CanvasRenderer {
                 raster_scale,
             },
         );
-        Some(encoder.finish())
     }
 
     /// Resolves `items` into `PreparedItem`s, uploading this frame's stencil-hole quads and
-    /// rotated-text quads (every element mesh must already have a segment, via
-    /// `ensure_mesh_segments`) and shaping/rendering whatever text those items need. Returns the
-    /// prepared list, the number of elements drawn, and the command buffers rotated text's
-    /// offscreen renders were submitted through (the caller must submit these before `paint`).
+    /// rotated/oversized-text quads (every element mesh must already have a segment, via
+    /// `ensure_mesh_segments`, though `ensure_mesh_segments` may have skipped one that did not
+    /// fit the shared buffers) and shaping/rendering whatever text
+    /// those items need. `scale` is `camera.zoom * pixels_per_point`, computed once by the
+    /// caller. Returns the prepared list and the number of elements actually drawn (an element
+    /// whose mesh did not fit the buffers, or whose text hit a glyphon error, is skipped and
+    /// not counted).
     fn build_prepared(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: &CanvasFrame,
+        scale: f32,
         background: &str,
         items: &[DrawItem],
-    ) -> (Vec<PreparedItem>, usize, Vec<wgpu::CommandBuffer>) {
+    ) -> (Vec<PreparedItem>, usize) {
         let file = &frame.file;
-        // Matches `zoom_px` in the vertex shader's `Uniforms` exactly, so text and geometry
-        // agree on where a scene point lands in physical pixels.
-        let scale = frame.camera.zoom as f32 * frame.pixels_per_point;
         let scroll = [frame.camera.scroll_x as f32, frame.camera.scroll_y as f32];
 
         let holes: Vec<[[f64; 2]; 4]> = items
@@ -1293,36 +1393,40 @@ impl CanvasRenderer {
             );
         }
 
-        // Rotated text: render (or reuse) each element's offscreen texture and compute its
-        // on-canvas quad, in `items` order, before the main loop below hands out matching
-        // indices into the buffer this uploads to. Any cache entry not touched here (a text
-        // whose key -- id, version, scale, dark or alpha -- no longer matches anything on
+        // Rotated/oversized text: render (or reuse) each element's offscreen texture and
+        // compute its on-canvas quad, in `items` order, before the main loop below hands out
+        // matching indices into the buffer this uploads to. `rotated_quad_slots` has one entry
+        // per `RotatedText` item in `items`, `Some(slot)` into `rotated_quads` on success or
+        // `None` when `ensure_rotated_texture` hit a glyphon error and logged it: the *count*
+        // of `RotatedText` items must stay in lock-step with `items`
+        // even when a texture is skipped, so the final loop below can still match each item to
+        // its own slot (or lack of one) by position. Any cache entry not touched here (a text
+        // whose key -- index, id, version, scale, dark or alpha -- no longer matches anything on
         // screen this frame) is evicted right after, so a continuously changing `scale` from
         // zooming never accumulates textures across frames.
-        let mut rotated_text_commands = Vec::new();
         let mut rotated_quads: Vec<([TexVertex; 4], Arc<wgpu::BindGroup>)> = Vec::new();
+        let mut rotated_quad_slots: Vec<Option<u32>> = Vec::new();
         let mut used_rotated_text_keys = HashSet::new();
         for item in items {
             if let DrawItem::RotatedText(draw) = item {
-                if let Some(command) =
-                    self.ensure_rotated_texture(device, queue, file, draw, scale, frame.dark)
-                {
-                    rotated_text_commands.push(command);
-                }
+                self.ensure_rotated_texture(device, queue, file, draw, scale, frame.dark);
                 let element = &file.elements[draw.element];
-                let key = rotated_text_key(file, draw, scale, frame.dark);
-                let entry = self
-                    .rotated_text_cache
-                    .get(&key)
-                    .expect("ensure_rotated_texture populated this entry");
-                let vertices = rotated_quad_vertices(
-                    element,
-                    entry.width_px,
-                    entry.height_px,
-                    entry.raster_scale,
-                );
-                rotated_quads.push((vertices, entry.bind_group.clone()));
-                used_rotated_text_keys.insert(key);
+                let key = rotated_text_key(device, file, draw, scale, frame.dark);
+                match self.rotated_text_cache.get(&key) {
+                    Some(entry) => {
+                        let vertices = rotated_quad_vertices(
+                            element,
+                            entry.width_px,
+                            entry.height_px,
+                            entry.raster_scale,
+                        );
+                        let slot = rotated_quads.len() as u32;
+                        rotated_quads.push((vertices, entry.bind_group.clone()));
+                        rotated_quad_slots.push(Some(slot));
+                        used_rotated_text_keys.insert(key);
+                    }
+                    None => rotated_quad_slots.push(None),
+                }
             }
         }
         self.rotated_text_cache
@@ -1367,13 +1471,18 @@ impl CanvasRenderer {
                         let cached =
                             self.cache
                                 .mesh(&file.elements[draw.element], &draw.key, background);
-                        let segment = cached
-                            .segment
-                            .expect("ensure_mesh_segments uploaded every visible mesh");
+                        // `None` here means `ensure_mesh_segments` could not fit this mesh even
+                        // at the device's max_buffer_size and already logged it; skip drawing
+                        // it instead of panicking.
+                        let Some(segment) = cached.segment else {
+                            continue;
+                        };
                         meshes.push((cached.mesh.clone(), segment));
                     }
                     drawn_elements += meshes.len();
-                    prepared.push(PreparedItem::Meshes(meshes));
+                    if !meshes.is_empty() {
+                        prepared.push(PreparedItem::Meshes(meshes));
+                    }
                 }
                 DrawItem::Isolated {
                     draw,
@@ -1383,9 +1492,9 @@ impl CanvasRenderer {
                     let cached =
                         self.cache
                             .mesh(&file.elements[draw.element], &draw.key, background);
-                    let segment = cached
-                        .segment
-                        .expect("ensure_mesh_segments uploaded every visible mesh");
+                    // The hole buffer's slots were assigned by item position above,
+                    // independent of whether this item's own mesh got a segment, so advance
+                    // `next_hole` regardless of the `continue` below.
                     let hole_segment = hole.is_some().then(|| {
                         let segment = Segment {
                             vertex_start: next_hole * 4,
@@ -1395,6 +1504,9 @@ impl CanvasRenderer {
                         next_hole += 1;
                         segment
                     });
+                    let Some(segment) = cached.segment else {
+                        continue;
+                    };
                     drawn_elements += 1;
                     prepared.push(PreparedItem::Isolated {
                         mesh: cached.mesh.clone(),
@@ -1420,28 +1532,40 @@ impl CanvasRenderer {
                         canvas_bounds,
                         frame.dark,
                     );
-                    self.text_renderers[renderer_index]
-                        .prepare(
-                            device,
-                            queue,
-                            &mut self.text_font_system,
-                            &mut self.text_atlas,
-                            &self.text_viewport,
-                            areas,
-                            &mut self.text_swash_cache,
-                        )
-                        .expect("glyphon prepare for in-pass text");
-                    drawn_elements += draws.len();
-                    prepared.push(PreparedItem::Text { renderer_index });
+                    match self.text_renderers[renderer_index].prepare(
+                        device,
+                        queue,
+                        &mut self.text_font_system,
+                        &mut self.text_atlas,
+                        &self.text_viewport,
+                        areas,
+                        &mut self.text_swash_cache,
+                    ) {
+                        Ok(()) => {
+                            drawn_elements += draws.len();
+                            prepared.push(PreparedItem::Text { renderer_index });
+                        }
+                        Err(error) => {
+                            // The in-pass glyph atlas is full: skip this batch for the frame
+                            // rather than panicking. The renderer slot
+                            // at `renderer_index` stays allocated, empty, for reuse next frame.
+                            self.log_glyphon_error_once(&error);
+                        }
+                    }
                 }
                 DrawItem::RotatedText(_) => {
-                    let (_, bind_group) = &rotated_quads[next_rotated_quad as usize];
+                    let slot = rotated_quad_slots[next_rotated_quad as usize];
+                    next_rotated_quad += 1;
+                    let Some(slot) = slot else {
+                        // `ensure_rotated_texture` already logged why.
+                        continue;
+                    };
+                    let (_, bind_group) = &rotated_quads[slot as usize];
                     let quad = Segment {
-                        vertex_start: next_rotated_quad * 4,
-                        index_start: next_rotated_quad * 6,
+                        vertex_start: slot * 4,
+                        index_start: slot * 6,
                         index_count: 6,
                     };
-                    next_rotated_quad += 1;
                     drawn_elements += 1;
                     prepared.push(PreparedItem::RotatedText {
                         bind_group: bind_group.clone(),
@@ -1450,25 +1574,70 @@ impl CanvasRenderer {
                 }
             }
         }
-        (prepared, drawn_elements, rotated_text_commands)
+        (prepared, drawn_elements)
     }
 }
 
-/// `draw`'s rotated-text cache key at the current `scale` and `dark` mode.
+/// `draw`'s offscreen-text cache key at the current `dark` mode, keyed by the *clamped* raster
+/// scale (see `raster_scale_for`) rather than the raw requested `scale`, so continuing to zoom
+/// past that clamp reuses the same texture instead of re-rasterizing every frame.
 fn rotated_text_key(
+    device: &wgpu::Device,
     file: &scene::SceneFile,
     draw: &TextDraw,
     scale: f32,
     dark: bool,
 ) -> RotatedTextKey {
     let element = &file.elements[draw.element];
+    let placement = element
+        .placement()
+        .expect("RotatedText only wraps a Text element, which always has a placement");
+    let font_size = match element {
+        scene::Element::Text(text) => text.font_size,
+        _ => 0.0,
+    };
+    let raster_scale = raster_scale_for(device, &placement, font_size, scale);
     RotatedTextKey {
+        index: draw.element,
         id: element.id().unwrap_or_default().to_owned(),
         version_bits: element.version().to_bits(),
-        scale_bits: scale.to_bits(),
+        scale_bits: raster_scale.to_bits(),
         dark,
         alpha_bits: draw.alpha.to_bits(),
     }
+}
+
+/// The scale actually used to rasterize an offscreen text element's texture: clamped below
+/// `requested_scale` (never raised) so its physical em size never exceeds
+/// [`plan::MAX_TEXT_EM_PX`] (bounding how much of the shared glyph atlas one texture can use)
+/// and its texture dimensions never exceed the device's `max_texture_dimension_2d`. The quad
+/// this scale sizes keeps the
+/// element's correct scene-space size either way (see `rotated_quad_vertices`); only sharpness
+/// is lost.
+fn raster_scale_for(
+    device: &wgpu::Device,
+    placement: &scene::Placement,
+    font_size: f64,
+    requested_scale: f32,
+) -> f32 {
+    let max_dimension = device.limits().max_texture_dimension_2d;
+    let padding_px = 2 * ROTATED_TEXT_PADDING_PX;
+    let max_raster_scale_for_extent = |extent: f64| {
+        if extent > 0.0 {
+            (max_dimension.saturating_sub(padding_px).max(1)) as f32 / extent as f32
+        } else {
+            requested_scale
+        }
+    };
+    let em_cap = if font_size > 0.0 {
+        plan::MAX_TEXT_EM_PX / font_size as f32
+    } else {
+        requested_scale
+    };
+    requested_scale
+        .min(max_raster_scale_for_extent(placement.width))
+        .min(max_raster_scale_for_extent(placement.height))
+        .min(em_cap)
 }
 
 /// The color a `TextDraw`'s glyphs render in: the element's own `strokeColor` (dark-mode
@@ -1490,12 +1659,15 @@ fn text_draw_color(file: &scene::SceneFile, draw: &TextDraw, dark: bool) -> glyp
     glyphon::Color::rgba(channel(r), channel(g), channel(b), channel(a))
 }
 
-/// `element`'s cached shaped lines; panics if `ensure_shaped` was not called for it first.
+/// `element`'s (at file position `index`) cached shaped lines; panics if `ensure_shaped` was not
+/// called for it first.
 fn shaped_lines_for<'a>(
-    lines: &'a HashMap<(String, u64), Vec<text::ShapedLine>>,
+    lines: &'a HashMap<(usize, String, u64), Vec<text::ShapedLine>>,
+    index: usize,
     element: &scene::Element,
 ) -> &'a [text::ShapedLine] {
     let key = (
+        index,
         element.id().unwrap_or_default().to_owned(),
         element.version().to_bits(),
     );
@@ -1509,7 +1681,7 @@ fn shaped_lines_for<'a>(
 /// i's baseline lands at physical pixel `(element origin + scroll) * scale`, offset down by that
 /// line's own `baseline`; a placeholder label is additionally offset 4 scene units right.
 fn build_text_areas<'a>(
-    lines: &'a HashMap<(String, u64), Vec<text::ShapedLine>>,
+    lines: &'a HashMap<(usize, String, u64), Vec<text::ShapedLine>>,
     file: &scene::SceneFile,
     draws: &[TextDraw],
     scroll: [f32; 2],
@@ -1527,7 +1699,7 @@ fn build_text_areas<'a>(
         let origin_y = (placement.y as f32 + scroll[1]) * scale;
         let left_local = if draw.label { 4.0 } else { 0.0 };
         let color = text_draw_color(file, draw, dark);
-        let shaped = shaped_lines_for(lines, element);
+        let shaped = shaped_lines_for(lines, draw.element, element);
         areas.extend(shaped.iter().map(move |line| glyphon::TextArea {
             buffer: &line.buffer,
             left: origin_x + left_local * scale,

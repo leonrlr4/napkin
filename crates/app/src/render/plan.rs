@@ -21,6 +21,21 @@ pub const COARSE_MARGIN: f64 = 64.0;
 /// matching Excalidraw's `clearRect` padding for bound text (`bin/canvas.js`).
 pub const BOUND_TEXT_PADDING: f64 = 5.0;
 
+/// Physical em size (device pixels: `fontSize * zoom * pixels_per_point`) above which an
+/// unrotated text element routes through the same offscreen-texture path rotated text uses,
+/// instead of glyphon's in-pass renderer. Continuous zoom times `fontSize` is otherwise
+/// unbounded, and a single very large line can ask the shared glyph
+/// atlas (capped at the device's `max_texture_dimension_2d`, typically 8192px) for more space
+/// than it has; an 8192px atlas holds roughly 1000 glyphs at this size, comfortably more than
+/// one frame's visible glyphs ever need.
+pub const MAX_TEXT_EM_PX: f32 = 256.0;
+
+/// Whether a text element should render through the offscreen-texture path: any rotation, or a
+/// physical em size past [`MAX_TEXT_EM_PX`].
+fn needs_offscreen_text(font_size: f64, angle: f64, pixel_scale: f32) -> bool {
+    angle != 0.0 || (font_size as f32 * pixel_scale) > MAX_TEXT_EM_PX
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementDraw {
     pub element: usize,
@@ -58,6 +73,10 @@ pub struct View {
     pub visible: SceneRect,
     pub dark: bool,
     pub bucket: i32,
+    /// Physical pixels per scene unit at the current zoom (`camera.zoom * pixels_per_point`):
+    /// how large a text element's glyphs actually rasterize at, used to route very large text
+    /// through the offscreen path instead of glyphon's in-pass renderer.
+    pub pixel_scale: f32,
 }
 
 /// A batch of consecutive same-kind draws waiting to be flushed into a single `DrawItem`, so
@@ -217,25 +236,32 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
         if element.is_deleted() {
             continue;
         }
-        let Some(coarse) = coarse_bounds(element) else {
-            continue;
-        };
-        if !coarse.intersects(&view.visible) {
-            continue;
-        }
 
         if let Element::Text(text) = element {
+            let Some(coarse) = coarse_bounds(element) else {
+                continue;
+            };
+            if !coarse.intersects(&view.visible) {
+                continue;
+            }
             let draw = TextDraw {
                 element: index,
                 label: false,
                 alpha: element_alpha(element, &frame_opacity),
             };
-            if text.base.angle == 0.0 {
-                pending.push_text(&mut items, draw);
-            } else {
+            if needs_offscreen_text(text.font_size, text.base.angle, view.pixel_scale) {
                 pending.flush(&mut items);
                 items.push(DrawItem::RotatedText(draw));
+            } else {
+                pending.push_text(&mut items, draw);
             }
+            continue;
+        }
+
+        let Some(coarse) = coarse_bounds(element) else {
+            continue;
+        };
+        if !coarse.intersects(&view.visible) {
             continue;
         }
 
@@ -348,6 +374,7 @@ mod tests {
             },
             dark: false,
             bucket: 0,
+            pixel_scale: 1.0,
         }
     }
 
@@ -438,6 +465,21 @@ mod tests {
             panic!("isolated")
         };
         assert_eq!(draw.key.alpha_bits, 0.25f32.to_bits());
+    }
+
+    #[test]
+    fn oversized_text_routes_through_the_offscreen_path() {
+        let mut view = view();
+        // fontSize 20 * pixel_scale 20 = 400px, past MAX_TEXT_EM_PX (256), with no rotation.
+        view.pixel_scale = 20.0;
+        let file = sample::file(vec![sample::text(
+            "t",
+            [0.0, 0.0, 200.0, 25.0],
+            "big",
+            None,
+        )]);
+        let items = plan_frame(&file, &mut SceneCache::new(), &view);
+        assert_eq!(kinds(&items), ["rotated"]);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod support;
 
 use app::camera::Camera;
+use app::render::gpu::{CanvasFrame, CanvasRenderer};
 use app::sample;
 use serde_json::json;
 
@@ -97,6 +98,48 @@ fn camera_moves_content_and_culls() {
     };
     let empty = support::render(sample::file(vec![rect]), away, 50, 50, false);
     assert!(empty.rgba.chunks(4).all(|p| p[0] == 0xff));
+}
+
+#[test]
+fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
+    // Regression for the mesh buffer's bump allocator never reclaiming evicted or off-bucket
+    // segments: before the fix, capacity roughly doubled at every bucket change even when this
+    // frame's own visible meshes would have fit in what was already allocated, eventually
+    // asking wgpu for a buffer past `max_buffer_size` and panicking (`support::gpu`'s device
+    // panics on any uncaptured validation error). The view stays small so the sweep is fast;
+    // the bug is in how capacity *grows*, not in how much is visible at once.
+    let (device, queue) = support::gpu();
+    let mut renderer = CanvasRenderer::new(&device, &queue, support::FORMAT);
+    let file = std::sync::Arc::new(app::fixture::generate(1, 1000));
+    let max_buffer_size = device.limits().max_buffer_size;
+    let vertex_size = std::mem::size_of::<app::render::tessellate::Vertex>() as u64;
+
+    for bucket in -3..=6 {
+        let zoom = 2f64.powi(bucket);
+        let frame = CanvasFrame {
+            file: file.clone(),
+            camera: Camera {
+                scroll_x: 2000.0,
+                scroll_y: 1500.0,
+                zoom,
+            },
+            size_px: [320, 240],
+            pixels_per_point: 1.0,
+            dark: false,
+        };
+        let prepared = renderer.prepare(&device, &queue, &frame);
+        queue.submit(prepared);
+        device.poll(wgpu::PollType::wait_indefinitely()).ok();
+
+        let stats = renderer.stats();
+        let capacity_bytes = u64::from(stats.buffer_vertices_capacity) * vertex_size;
+        assert!(
+            capacity_bytes <= max_buffer_size,
+            "bucket {bucket}: vertex buffer capacity {capacity_bytes} bytes exceeds \
+             max_buffer_size {max_buffer_size}"
+        );
+        assert!(stats.buffer_vertices_used <= stats.buffer_vertices_capacity);
+    }
 }
 
 #[test]

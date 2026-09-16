@@ -41,6 +41,19 @@ pub fn render(
     height: u32,
     dark: bool,
 ) -> Image {
+    render_with_ppp(file, camera, width, height, 1.0, dark)
+}
+
+/// Like [`render`], but at an explicit `pixels_per_point` (`width`/`height` are still the
+/// physical-pixel size of the output image).
+pub fn render_with_ppp(
+    file: scene::SceneFile,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    pixels_per_point: f32,
+    dark: bool,
+) -> Image {
     let (device, queue) = gpu();
     let background = app::render::color::render_color(file.view_background_color(), dark);
     let mut renderer = CanvasRenderer::new(&device, &queue, FORMAT);
@@ -48,7 +61,7 @@ pub fn render(
         file: std::sync::Arc::new(file),
         camera,
         size_px: [width, height],
-        pixels_per_point: 1.0,
+        pixels_per_point,
         dark,
     };
     let prepared = renderer.prepare(&device, &queue, &frame);
