@@ -150,6 +150,12 @@ fn exact<T: DeserializeOwned + Serialize>(value: &Value) -> Option<T> {
 }
 
 impl Element {
+    /// A `value` missing a field `ElementBase` requires (no `#[serde(default)]`), such as
+    /// `groupIds` or `strokeStyle` in a file saved by an older Excalidraw version, fails
+    /// `exact` here and falls back to `Element::Raw`: it round-trips through save/load
+    /// unchanged, but napkin draws it as the dashed placeholder box (spec §1.2) instead of
+    /// its rectangle/diamond/.../freedraw sketch, same as any other type this crate has no
+    /// typed struct for.
     pub fn from_value(value: Value) -> Element {
         let typed = match value.get("type").and_then(Value::as_str) {
             Some("rectangle") => exact(&value).map(Element::Rectangle),

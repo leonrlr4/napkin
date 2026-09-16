@@ -392,9 +392,9 @@ const ATAN2_EDGES = [
   [NaN, 1], [1, NaN], [NaN, NaN], [NaN, Infinity],
   [5, 1], [1, 1], [2, 1], // atan2(y,1): the `x === 1.0` fast path
   [1e-320, 1e-320], [1e308, 1e308], [1e-320, -1e-320], [1e308, -1e308],
-  // Task 11 fix-round-1 finding 2's repro (laser-pointer corner angle, constant stroke
-  // [[0,0],[-2,-5]], strokeWidth 2, streamline 0.5): V8 and glibc `atan2` disagree in the
-  // last bit here, which used to change an outline point count.
+  // The laser-pointer corner angle for the constant stroke [[0,0],[-2,-5]], strokeWidth 2,
+  // streamline 0.5: V8 and glibc `atan2` disagree in the last bit here, which can change an
+  // outline's point count.
   [-2.5, -1],
 ];
 
@@ -404,8 +404,9 @@ const HYPOT_EDGES = [
   [Infinity, 5], [5, Infinity], [-Infinity, 5], [5, -Infinity], [Infinity, NaN], [NaN, Infinity],
   [NaN, 5], [5, NaN], [NaN, NaN], [-Infinity, -Infinity],
   [1e300, 1e300], [1e-300, 1e-300], [1e308, 1e308], [5e-324, 5e-324],
-  // perfect-freehand's `dist` (Task 11 fix-round-1 finding 2's repro): points
-  // [0,0], [0,0], [-0.1547364747990101,-2.9960067795929257], streamline 1, width 0.5.
+  // perfect-freehand's `dist` for the points [0,0], [0,0],
+  // [-0.1547364747990101,-2.9960067795929257], streamline 1, width 0.5: V8 and glibc
+  // `hypot` disagree in the last bit here too.
   [-0.1547364747990101, -2.9960067795929257],
 ];
 

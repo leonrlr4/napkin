@@ -21,6 +21,11 @@ fn are_same_points(p1: Point, p2: Point) -> bool {
 }
 
 /// `bin/hachure.js` `rotatePoints`: rotates `points` in place around `center` by `degrees`.
+///
+/// `cos`/`sin` are `f64`'s own, not ported (see `js.rs`'s module docs for why and the
+/// measured divergence rate). The rotated polygon feeds the scanline intersection that
+/// decides how many hachure lines get drawn, so a last-bit difference here can change a
+/// hachure fill's line count, not just a coordinate.
 fn rotate_points(points: &mut [Point], center: Point, degrees: f64) {
     if points.is_empty() {
         return;

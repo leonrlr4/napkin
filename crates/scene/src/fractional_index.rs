@@ -58,7 +58,12 @@ fn all_zero_integer() -> String {
 
 // --- packages/fractional-indexing/src/index.ts ---
 
-/// `midpoint`. `a` may be empty; `b` is `None` or non-empty (checked by callers).
+/// `midpoint`. `a` may be empty; `b` is `None` or non-empty (checked by callers). Recurses
+/// once per digit `a` and `b` share as a common prefix (the `n > 0` branch below builds
+/// that prefix and recurses on the rest), so its stack depth grows with the length of that
+/// shared run: two indices that agree on a very long run of trailing digits (a pathological
+/// `index`, not one this module generates) would recurse that deep and could overflow the
+/// stack.
 fn midpoint(a: &str, b: Option<&str>) -> Result<String, IndexError> {
     if let Some(b) = b
         && utf16_cmp(a, b) != Ordering::Less
@@ -584,6 +589,12 @@ pub fn sync_moved_indices(elements: &mut [Element], moved: &HashSet<String>, env
 /// a `generateIndices` failure is a bug reachable only from already-invalid data, and JS
 /// lets it propagate as an uncaught exception, so this panics rather than returning
 /// `Result` (napkin's `sync_invalid_indices` has no error case in its public signature).
+/// `generate_indices` fails only when a group's lower-bound index is not strictly less than
+/// its upper-bound index (`midpoint`'s `>=` check, propagated through
+/// `generate_n_keys_between`); `get_invalid_indices_groups` always picks that pair from the
+/// valid indices surrounding a run of invalid ones, which keeps them correctly ordered for
+/// any input seen so far, but two elements at a group's boundary sharing the exact same
+/// `index` string would trip this.
 pub fn sync_invalid_indices(elements: &mut [Element], env: &mut impl Env) {
     let groups = get_invalid_indices_groups(elements);
     let updates =

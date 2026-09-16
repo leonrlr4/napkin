@@ -8,9 +8,7 @@
 //! those branches cannot be reached by construction. `keepHead` is never set by
 //! `createLaserPointer` either (always `false`), and by the same reasoning [`Options`] has
 //! no `keep_head` field: `getStrokeOutline`'s two `if (this.options.keepHead) { ... }`
-//! branches are unreachable and not ported (Task 11 fix-round-1 finding 1 — an earlier
-//! version of this port ported them anyway, on the reasoning that they cost nothing extra;
-//! removed since nothing here ever sets `keepHead`).
+//! branches are unreachable and not ported.
 
 /// `[x, y, r]`; `r` carries whatever `sizeMapping` reads (pressure, pinned to `1` by
 /// `getConstantWidthFreedrawOutline`).
@@ -44,8 +42,10 @@ fn norm(p: Point) -> Point {
 /// bit (node's V8 build here uses `third_party/glibc`'s large-table implementation, not the
 /// portable fdlibm one `js::atan2` is ported from — see that function's doc comment and
 /// `crates/rough/src/js.rs`'s module docs); not ported, since porting it means porting that
-/// table-heavy glibc code. Unlike `js::atan2`/`js::hypot`, a divergence here only nudges a
-/// rotated point by ~1 ULP, not a loop bound.
+/// table-heavy glibc code. A divergence here is not always a harmless ~1-ULP nudge to a
+/// rotated point: `norm_angle`'s `c_angle`/`t_angle` (below) feed `get_stroke_outline`'s
+/// `theta <= t_angle` corner loops, and a last-bit difference there can add or drop an
+/// iteration, the same class of bug the `atan2`/`hypot` port fixed.
 fn rot(p: Point, rad: f64) -> Point {
     let (s, c) = (rad.sin(), rad.cos());
     [c * p[0] - s * p[1], s * p[0] + c * p[1], p[2]]
@@ -59,7 +59,8 @@ fn angle(p: Point, p1: Point, p2: Point) -> f64 {
     rough::js::atan2(p2[1] - p[1], p2[0] - p[0]) - rough::js::atan2(p1[1] - p[1], p1[0] - p[0])
 }
 
-/// `sin`/`cos` are `f64`'s own (see [`rot`]'s doc comment); `js::atan2` is V8-exact.
+/// `sin`/`cos` are `f64`'s own (see [`rot`]'s doc comment: a divergence here can change a
+/// loop bound, not just nudge a point); `js::atan2` is V8-exact.
 fn norm_angle(a: f64) -> f64 {
     rough::js::atan2(a.sin(), a.cos())
 }
@@ -100,9 +101,10 @@ pub(crate) struct Options {
     pub size_mapping: fn(f64) -> f64,
 }
 
-/// `LaserPointer`. `originalPoints`/`getStrokeOutline`'s `sizeOverride` parameter and
-/// `close()` are dropped: `shape.ts` never reads the former and never calls the latter, and
-/// always calls `getStrokeOutline()` with no argument.
+/// `LaserPointer`. `getStrokeOutline`'s `sizeOverride` parameter and `close()` are dropped:
+/// `shape.ts` never passes the former and never calls the latter, always calling
+/// `getStrokeOutline()` with no argument. `originalPoints` is kept (`original_points`
+/// below): `add_point` reads its last entry to drop a repeated point before appending.
 pub(crate) struct LaserPointer {
     options: Options,
     original_points: Vec<Point>,
@@ -417,13 +419,13 @@ impl LaserPointer {
 mod tests {
     use super::*;
 
-    /// Task 11 fix-round-1 finding 3's repro: `addPoint`'s `streamline` transform (`plerp`)
-    /// computes `sub(point, lastPoint)` (`B - A`), which overflows to infinity for two
-    /// points this far apart; `infinity * 0.0` (the `1 - streamline` scale factor here) is
-    /// `NaN`, which propagates into `p_angle`, and both of `getStrokeOutline`'s `len == 2`
-    /// loops (guarded by `theta <= ... + p_angle`) then run zero times. The source's
-    /// `ps.push(ps[0])` still succeeds on the resulting empty `ps` (pushing `undefined`);
-    /// this must not panic on the equivalent `ps[0]` indexing.
+    /// `addPoint`'s `streamline` transform (`plerp`) computes `sub(point, lastPoint)`
+    /// (`B - A`), which overflows to infinity for two points this far apart; `infinity *
+    /// 0.0` (the `1 - streamline` scale factor here) is `NaN`, which propagates into
+    /// `p_angle`, and both of `getStrokeOutline`'s `len == 2` loops (guarded by
+    /// `theta <= ... + p_angle`) then run zero times. The source's `ps.push(ps[0])` still
+    /// succeeds on the resulting empty `ps` (pushing `undefined`); this must not panic on
+    /// the equivalent `ps[0]` indexing.
     #[test]
     fn get_stroke_outline_does_not_panic_on_nan_p_angle() {
         let mut pointer = LaserPointer::new(Options {

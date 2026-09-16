@@ -1,6 +1,25 @@
 //! JavaScript number semantics the port depends on. Rust's own operators differ from these
 //! in ways that change output (rounding direction, integer wrap-around), so every call site
 //! that mirrors one of these JS operations uses the helper, never the Rust look-alike.
+//!
+//! ## sin/cos
+//!
+//! `Math.sin`/`Math.cos` in node's V8 build come from `third_party/glibc`'s table-driven
+//! implementation, not a portable algorithm, so they are not ported here; call sites use
+//! `f64::sin`/`f64::cos` (glibc on this machine too) and document the residual gap instead,
+//! pointing back to this paragraph. A last-bit difference is not always harmless: it can
+//! flip a loop's continue/stop condition (a `dist_sq > min_distance` filter, an angle
+//! comparison, a scanline intersection), changing how many points or lines a shape has, not
+//! only where they sit — the same class of bug the `atan2`/`hypot` port above fixed.
+//!
+//! Measured 2026-09-16 on node 26.7.0 (V8 14.6.202.34-node.28): 2000 mouse-like freedraw
+//! strokes (1000 constant-width, 1000 variable-width with simulated pressure) run through
+//! JS's `getFreedrawOutlinePoints` and `scene`'s `freedraw_outline_points`, after the
+//! `atan2`/`hypot` port — 0 of 2000 differ, in outline point count or in any coordinate by
+//! more than 1e-9. A direct, non-outline check of 200,000 random `f64::sin`/`Math.sin`
+//! pairs still disagrees in the last bit on about 3.4% of inputs, so this corpus's
+//! zero-divergence rate reflects that those 1-ULP gaps rarely land on a loop boundary, not
+//! that sin/cos agree.
 
 /// ECMAScript `ToInt32`, as applied by `Math.imul` and bitwise operators.
 pub fn to_int32(x: f64) -> i32 {

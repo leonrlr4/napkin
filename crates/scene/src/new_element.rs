@@ -205,9 +205,10 @@ pub fn bump_version(element: &mut Element, env: &mut impl Env) {
 mod tests {
     use super::*;
 
-    /// Random bytes all `0x11`, clock advancing by one each call: distinct from
-    /// `new_base`'s output (`versionNonce: 0`, `updated` from a fixed timestamp) so a
-    /// `bump_version` regression can't hide behind matching defaults.
+    /// Random bytes all `0x11`, clock advancing by one on every call (unlike
+    /// `tests/baseline.rs`'s `FixedEnv`, whose clock is pinned at 1ms): every value this
+    /// produces is distinct, so a `bump_version` regression can't hide behind matching
+    /// defaults.
     struct TestEnv {
         now: f64,
     }

@@ -28,9 +28,9 @@ pub(super) fn dash_array_dotted(stroke_width: f64) -> Vec<f64> {
     vec![1.5, 6.0 + stroke_width]
 }
 
-/// `applyDarkModeFilter(color, enable)`: napkin's `apply_dark_mode_filter` always filters
-/// (it has no "theme already dark" state to skip re-filtering, unlike the editor's call
-/// site), so the `enable` flag lives here instead.
+/// `applyDarkModeFilter(color, enable)`: JS's version takes the `enable` flag itself and
+/// returns `color` unmodified when it is false. `crate::color::apply_dark_mode_filter` has
+/// no such parameter (it always filters), so this wrapper does the `enable` check instead.
 pub(crate) fn dark(color: &str, dark_mode: bool) -> String {
     if dark_mode {
         apply_dark_mode_filter(color)
@@ -87,8 +87,11 @@ fn adjust_roughness(base: &ElementBase) -> f64 {
     (roughness / if max_size < 10.0 { 3.0 } else { 2.0 }).min(2.5)
 }
 
-/// `generateRoughOptions`. Returns `None` for element types rough.js never draws (the JS
-/// throws `Unimplemented type ${element.type}` there instead).
+/// `generateRoughOptions`. Returns `None` when `element` is `Element::Raw` (`element.base()`
+/// is `None`); the JS instead throws `Unimplemented type ${element.type}` for an
+/// unsupported element type there. napkin only ever calls this with a drawable typed
+/// element, so `Raw`, not an unsupported `type` string, is what actually drives this
+/// branch.
 pub fn generate_rough_options(
     element: &Element,
     continuous_path: bool,

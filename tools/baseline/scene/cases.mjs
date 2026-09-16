@@ -216,16 +216,16 @@ export const shapeElements = [
 ];
 
 /**
- * Extra `freedraw_outline` cases that are not also `shapes_freedraw`/`rough_options` cases
- * (Task 12 owns `shapes_freedraw`, and adding these to `shapeElements` would also shift
- * every `elN` id assigned after them, changing unrelated baselines). `generate.mjs` appends
- * these to the `shapeElements`-derived list only for `getFreedrawOutlinePoints`.
+ * Extra `freedraw_outline` cases that are not also `shapes_freedraw`/`rough_options` cases:
+ * adding these to `shapeElements` would shift every `elN` id assigned after them, changing
+ * unrelated baselines. `generate.mjs` appends these to the `shapeElements`-derived list only
+ * for `getFreedrawOutlinePoints`.
  */
 export const freedrawOutlineExtras = [
-  // Task 11 fix-round-1 finding 2's repro: V8's `Math.atan2(-2.5, -1)` (the laser-pointer
-  // corner angle for this two-point stroke) and glibc's `atan2` disagree in the last bit,
-  // which used to flip which branch of `getStrokeOutline`'s `theta <= Math.PI + pAngle`
-  // loops ran an extra step and change the outline's point count.
+  // V8's `Math.atan2(-2.5, -1)` (the laser-pointer corner angle for this two-point stroke)
+  // and glibc's `atan2` disagree in the last bit, which can flip which branch of
+  // `getStrokeOutline`'s `theta <= Math.PI + pAngle` loops runs an extra step and change
+  // the outline's point count.
   { label: "freedraw/constant/atan2LastBit", element: freedraw([[0, 0], [-2, -5]], { strokeOptions: { variability: "constant", streamline: 0.5 } }) },
 ];
 

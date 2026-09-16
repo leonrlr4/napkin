@@ -68,6 +68,10 @@ impl SceneFile {
         }
     }
 
+    /// `serde_json` rejects a lone UTF-16 surrogate escape such as `"\ud83d"` (a `\uXXXX`
+    /// escape in the `0xD800..=0xDFFF` range with no matching low/high surrogate next to
+    /// it) that `JSON.parse` accepts and `JSON.stringify` can itself write back out. Such a
+    /// file fails to load here with a loud `LoadError::Json`, not a silent data loss.
     pub fn from_json_str(text: &str) -> Result<SceneFile, LoadError> {
         let value: Value = serde_json::from_str(text).map_err(LoadError::Json)?;
         let Value::Object(mut root) = value else {

@@ -1,9 +1,11 @@
 //! Port of the freedraw outline functions in `packages/element/src/shape.ts`
 //! (`getFreedrawOutlinePoints`, `getVariableWidthFreedrawOutline`,
 //! `getConstantWidthFreedrawOutline`, `createLaserPointer`, `getFreedrawStreamline`,
-//! `VARIABLE_WIDTH_FREEDRAW`, `CONSTANT_WIDTH_FREEDRAW`) at commit
-//! `afa3a653fc5d2b742adcbd5a6063187b056d2419`. `getFreedrawStrokeCenterPoints` (bucket-fill
-//! boundary helper) has no napkin caller yet and is not ported.
+//! `getFreeDrawSvgPath`, `getSvgPathFromStroke`, `med`, `TO_FIXED_PRECISION`,
+//! `VARIABLE_WIDTH_FREEDRAW`, `CONSTANT_WIDTH_FREEDRAW`, and `_generateElementShape`'s
+//! `"freedraw"` case) at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
+//! `getFreedrawStrokeCenterPoints` (bucket-fill boundary helper) has no napkin caller yet
+//! and is not ported.
 
 use rough::{RoughGenerator, points_on_curve};
 

@@ -26,10 +26,11 @@ use rough::js::{math_round, to_int32};
 // JS string/number primitives the parser depends on
 // ---------------------------------------------------------------------------
 
-/// JS regex `\s`: not Unicode `White_Space` (`regex`'s own `\s` is, and lacks `\u{85}`
-/// while including it, and both differ on `\u{FEFF}`, which JS's `\s` includes and Unicode
-/// `White_Space` does not). Used verbatim inside the character classes below, and to
-/// mirror tinycolor2's `trimLeft`/`trimRight` and `parseFloat`'s leading-whitespace skip.
+/// JS regex `\s`: not the same set as `regex`'s own `\s` (Unicode `White_Space`). They
+/// differ on two code points: `regex`'s `\s` includes `\u{85}` (NEL), which JS's `\s` does
+/// not, and JS's `\s` includes `\u{FEFF}` (BOM), which `regex`'s `\s` does not. Used
+/// verbatim inside the character classes below, and to mirror tinycolor2's
+/// `trimLeft`/`trimRight` and `parseFloat`'s leading-whitespace skip.
 const JS_WS_CLASS: &str = r"\t\n\x0B\x0C\r \u{A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}";
 
 fn is_js_whitespace(c: char) -> bool {
@@ -873,8 +874,8 @@ mod tests {
 
     #[test]
     fn is_js_whitespace_matches_the_js_regex_class_not_unicode_white_space() {
-        // `﻿` (BOM) is JS `\s` but not Unicode `White_Space`, which `regex`'s own
-        // `\s` uses; `` (NEL) is the opposite case.
+        // `\u{FEFF}` (BOM) is JS `\s` but not Unicode `White_Space`, which `regex`'s own
+        // `\s` uses; `\u{85}` (NEL) is the opposite case.
         assert!(is_js_whitespace('\u{FEFF}'));
         assert!(!is_js_whitespace('\u{85}'));
         assert_eq!(js_trim("\u{FEFF} #fff \u{FEFF}"), "#fff");

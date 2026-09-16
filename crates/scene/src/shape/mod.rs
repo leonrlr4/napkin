@@ -1,6 +1,5 @@
 //! Turning an [`Element`](crate::element::Element) into rough.js drawables and freedraw
-//! outlines (`packages/element/src/shape.ts` at the pinned commit). Task 8 ports
-//! `generateRoughOptions`; the generators that build the shapes themselves are Tasks 9-12.
+//! outlines (`packages/element/src/shape.ts` at the pinned commit).
 
 mod arrowhead;
 mod freedraw;
@@ -27,7 +26,7 @@ pub enum PathOp {
 
 /// Rendering inputs `generateRoughOptions` and the shape generators need beyond the element
 /// itself: the app's dark-mode state and the canvas background color (used for arrowhead
-/// outline fills, ported in a later task).
+/// outline fills).
 pub struct ShapeContext<'a> {
     pub dark_mode: bool,
     pub canvas_background_color: &'a str,
@@ -46,7 +45,7 @@ pub enum ElementShape {
         stroke: Vec<PathOp>,
     },
     /// napkin cannot generate this element's shape: its geometry falls outside
-    /// [`GEOMETRY_BOUND`], or rough.js rejected the generated path. The renderer draws it as
+    /// `GEOMETRY_BOUND`, or rough.js rejected the generated path. The renderer draws it as
     /// the dashed placeholder box used for [`Element::Raw`] (spec §1.2); the element's data
     /// is left untouched, so it round-trips through save/load and can draw normally again if
     /// the geometry later changes.
@@ -135,7 +134,10 @@ pub fn generate_element_shape(element: &Element, ctx: &ShapeContext) -> ElementS
         Element::Freedraw(f) => freedraw::shape(&generator, element, f, ctx.dark_mode),
         // `stickynote`/`frame`/`magicframe`/`text`/`image` all return `null` in the JS;
         // napkin has no typed stickynote/frame/magicframe/image element, so those load as
-        // `Element::Raw` and land here too.
+        // `Element::Raw` and land here too. `iframe`/`embeddable` also load as `Raw` here,
+        // but JS draws a rough rectangle for them, not `null`: napkin instead draws the
+        // dashed placeholder box spec §1.2 uses for every `Raw` element, so on screen they
+        // look different from excalidraw.com by design (spec §1.2's table).
         Element::Text(_) | Element::Raw(_) => ElementShape::None,
     }
 }
