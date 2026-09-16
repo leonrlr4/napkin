@@ -1,11 +1,14 @@
-//! The eframe [`App`](eframe::App) that hosts the canvas: theme, document title, the camera
-//! and the load-error banner. Tessellation and the GPU canvas are added by later M3 tasks.
+//! The eframe [`App`](eframe::App) that hosts the canvas: theme, document title, the camera,
+//! the load-error banner and the GPU canvas itself.
 
 use eframe::egui;
 
 use crate::camera::{Camera, SceneRect, normalized_zoom};
 use crate::document::Document;
 use crate::input::{self, CanvasInput};
+use crate::render::callback::{self, CanvasCallback};
+use crate::render::color::render_color;
+use crate::render::gpu::CanvasFrame;
 use crate::theme::{self, Theme};
 
 pub struct Viewer {
@@ -26,11 +29,14 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn new(
-        _cc: &eframe::CreationContext<'_>,
+        cc: &eframe::CreationContext<'_>,
         document: Document,
         load_error: Option<String>,
         bench: bool,
     ) -> Viewer {
+        if let Some(render_state) = &cc.wgpu_render_state {
+            callback::install(render_state);
+        }
         Viewer {
             document,
             load_error,
@@ -139,18 +145,35 @@ impl eframe::App for Viewer {
                 // `request_repaint` call is needed here.
                 input::apply(camera, &CanvasInput::from_egui(ui, &response));
 
-                // TODO(task 6): remove this placeholder readout once the canvas renders the
-                // scene itself.
-                ui.painter().text(
-                    response.rect.left_top(),
-                    egui::Align2::LEFT_TOP,
-                    format!(
-                        "zoom {:.3}  scroll {:.1}, {:.1}",
-                        camera.zoom, camera.scroll_x, camera.scroll_y
+                let background =
+                    render_color(self.document.file.view_background_color(), self.theme.dark);
+                ui.painter().rect_filled(
+                    response.rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(
+                        (background[0] * 255.0).round() as u8,
+                        (background[1] * 255.0).round() as u8,
+                        (background[2] * 255.0).round() as u8,
+                        (background[3] * 255.0).round() as u8,
                     ),
-                    egui::FontId::monospace(12.0),
-                    self.theme.foreground,
                 );
+
+                let pixels_per_point = ui.ctx().pixels_per_point();
+                let size_px = [
+                    (response.rect.width() * pixels_per_point).round() as u32,
+                    (response.rect.height() * pixels_per_point).round() as u32,
+                ];
+                let frame = CanvasFrame {
+                    file: self.document.file.clone(),
+                    camera: *camera,
+                    size_px,
+                    pixels_per_point,
+                    dark: self.theme.dark,
+                };
+                ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                    response.rect,
+                    CanvasCallback { frame },
+                ));
             });
 
         egui::Area::new(egui::Id::new("napkin-document-name"))

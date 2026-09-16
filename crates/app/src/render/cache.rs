@@ -146,6 +146,11 @@ impl SceneCache {
         self.meshes
             .retain(|_, entry| current.saturating_sub(entry.last_used_frame) < frames);
     }
+
+    /// The number of meshes currently cached, for [`crate::render::gpu::RenderStats`].
+    pub(crate) fn mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
 }
 
 impl Default for SceneCache {
