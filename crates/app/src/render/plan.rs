@@ -30,6 +30,31 @@ pub const BOUND_TEXT_PADDING: f64 = 5.0;
 /// one frame's visible glyphs ever need.
 pub const MAX_TEXT_EM_PX: f32 = 256.0;
 
+/// Geometry this far from the origin is already excluded from every other shape (matches
+/// `scene::shape::GEOMETRY_BOUND`, which is private to that crate); text uses the same bound
+/// since nothing upstream clips a `TextElement`'s own placement.
+const GEOMETRY_BOUND: f64 = 1e6;
+
+fn in_bounds(v: f64) -> bool {
+    v.is_finite() && v.abs() <= GEOMETRY_BOUND
+}
+
+/// False for a text element whose font metrics or geometry would panic or hang glyphon's
+/// shaper: a non-finite or non-positive `fontSize` or effective line height
+/// (`fontSize * lineHeight`), or a placement coordinate outside [`GEOMETRY_BOUND`].
+fn text_is_drawable(text: &scene::element::TextElement) -> bool {
+    let line_height = text.line_height.unwrap_or(1.25);
+    let line_height_px = text.font_size * line_height;
+    text.font_size.is_finite()
+        && text.font_size > 0.0
+        && line_height_px.is_finite()
+        && line_height_px > 0.0
+        && in_bounds(text.base.x)
+        && in_bounds(text.base.y)
+        && in_bounds(text.base.width)
+        && in_bounds(text.base.height)
+}
+
 /// Whether a text element should render through the offscreen-texture path: any rotation, or a
 /// physical em size past [`MAX_TEXT_EM_PX`].
 fn needs_offscreen_text(font_size: f64, angle: f64, pixel_scale: f32) -> bool {
@@ -238,6 +263,10 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
         }
 
         if let Element::Text(text) = element {
+            if !text_is_drawable(text) {
+                cache.log_invalid_text_once(&text.base.id);
+                continue;
+            }
             let Some(coarse) = coarse_bounds(element) else {
                 continue;
             };
@@ -272,7 +301,14 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
             true
         } else {
             matches!(
-                *cache.shape(element, id, version_bits, view.dark, canvas_background),
+                *cache.shape(
+                    element,
+                    index,
+                    id,
+                    version_bits,
+                    view.dark,
+                    canvas_background
+                ),
                 ElementShape::Placeholder
             )
         };
@@ -284,6 +320,7 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
         };
 
         let key = MeshKey {
+            index,
             id: id.to_owned(),
             version_bits,
             dark: view.dark,
@@ -465,6 +502,34 @@ mod tests {
             panic!("isolated")
         };
         assert_eq!(draw.key.alpha_bits, 0.25f32.to_bits());
+    }
+
+    #[test]
+    fn invalid_text_metrics_are_skipped_not_drawn() {
+        let zero_font_size = sample::with(
+            sample::text("a", [0.0, 0.0, 100.0, 25.0], "zero", None),
+            json!({ "fontSize": 0 }),
+        );
+        let negative_font_size = sample::with(
+            sample::text("b", [0.0, 30.0, 100.0, 25.0], "neg", None),
+            json!({ "fontSize": -20 }),
+        );
+        let zero_line_height = sample::with(
+            sample::text("c", [0.0, 60.0, 100.0, 25.0], "zero-lh", None),
+            json!({ "lineHeight": 0 }),
+        );
+        let huge_x = sample::with(
+            sample::text("d", [1e308, 0.0, 100.0, 25.0], "far", None),
+            json!({}),
+        );
+        let file = sample::file(vec![
+            zero_font_size,
+            negative_font_size,
+            zero_line_height,
+            huge_x,
+        ]);
+        let items = plan_frame(&file, &mut SceneCache::new(), &view());
+        assert_eq!(items, Vec::new(), "an invalid text element was still drawn");
     }
 
     #[test]

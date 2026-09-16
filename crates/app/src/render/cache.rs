@@ -3,7 +3,7 @@
 //! tessellated [`Mesh`] also depends on opacity (baked into vertex alpha) and the zoom bucket
 //! (tessellation tolerance).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use scene::shape::{ElementShape, ShapeContext, generate_element_shape};
@@ -17,6 +17,10 @@ use crate::render::tessellate::{Mesh, Style, tessellate, tolerance_for_bucket};
 /// `Eq`/`Hash`) and the zoom bucket's tessellation tolerance.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct MeshKey {
+    /// The element's position in `SceneFile::elements`. Excalidraw renames a duplicate id when
+    /// it loads a file (`restore.ts`); napkin does not rewrite files, so two elements can share
+    /// every other field here, and only the file index tells them apart.
+    pub index: usize,
     pub id: String,
     pub version_bits: u64,
     pub dark: bool,
@@ -31,9 +35,11 @@ pub struct CachedMesh {
     pub segment: Option<Segment>,
 }
 
-/// A shape depends on the element's data and dark mode only, not on opacity or zoom.
+/// A shape depends on the element's data and dark mode only, not on opacity or zoom. `index`
+/// disambiguates a duplicate id exactly like [`MeshKey::index`].
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ShapeKey {
+    index: usize,
     id: String,
     version_bits: u64,
     dark: bool,
@@ -49,6 +55,9 @@ pub struct SceneCache {
     shapes: HashMap<ShapeKey, Arc<ElementShape>>,
     meshes: HashMap<MeshKey, MeshEntry>,
     frame: u64,
+    /// Ids `plan_frame` already logged a "text element skipped" warning for, so a malformed
+    /// element sitting on screen does not spam a line every frame.
+    logged_invalid_text: HashSet<String>,
 }
 
 impl SceneCache {
@@ -57,6 +66,7 @@ impl SceneCache {
             shapes: HashMap::new(),
             meshes: HashMap::new(),
             frame: 0,
+            logged_invalid_text: HashSet::new(),
         }
     }
 
@@ -65,6 +75,18 @@ impl SceneCache {
         self.shapes.clear();
         self.meshes.clear();
         self.frame = 0;
+        self.logged_invalid_text.clear();
+    }
+
+    /// Logs (to stderr, once per `id`) that a text element is being skipped because its font
+    /// metrics or geometry are unusable.
+    pub(crate) fn log_invalid_text_once(&mut self, id: &str) {
+        if self.logged_invalid_text.insert(id.to_owned()) {
+            eprintln!(
+                "napkin: text element {id:?} has a non-finite or out-of-range font size, line \
+                 height or position and will not be drawn"
+            );
+        }
     }
 
     pub fn begin_frame(&mut self) {
@@ -78,12 +100,14 @@ impl SceneCache {
     pub(crate) fn shape(
         &mut self,
         element: &scene::Element,
+        index: usize,
         id: &str,
         version_bits: u64,
         dark: bool,
         canvas_background: &str,
     ) -> Arc<ElementShape> {
         let key = ShapeKey {
+            index,
             id: id.to_owned(),
             version_bits,
             dark,
@@ -108,6 +132,7 @@ impl SceneCache {
     ) -> &mut CachedMesh {
         let shape = self.shape(
             element,
+            key.index,
             &key.id,
             key.version_bits,
             key.dark,
@@ -168,8 +193,9 @@ mod tests {
         scene::Element::from_value(sample::generic("rectangle", "a", [0.0, 0.0, 10.0, 10.0]))
     }
 
-    fn key(element: &scene::Element) -> MeshKey {
+    fn key(element: &scene::Element, index: usize) -> MeshKey {
         MeshKey {
+            index,
             id: element.id().unwrap_or_default().to_owned(),
             version_bits: element.version().to_bits(),
             dark: false,
@@ -182,7 +208,7 @@ mod tests {
     fn cache_hit_reuses_the_same_mesh_arc_and_keeps_the_segment() {
         let mut cache = SceneCache::new();
         let element = rect();
-        let k = key(&element);
+        let k = key(&element, 0);
 
         let first_mesh = cache.mesh(&element, &k, "#ffffff").mesh.clone();
         cache.mesh(&element, &k, "#ffffff").segment = Some(Segment {
@@ -210,7 +236,7 @@ mod tests {
     fn forget_segments_clears_segments_but_keeps_meshes() {
         let mut cache = SceneCache::new();
         let element = rect();
-        let k = key(&element);
+        let k = key(&element, 0);
 
         let first_mesh = cache.mesh(&element, &k, "#ffffff").mesh.clone();
         cache.mesh(&element, &k, "#ffffff").segment = Some(Segment {
@@ -233,7 +259,7 @@ mod tests {
     fn evict_drops_meshes_unused_past_the_window() {
         let mut cache = SceneCache::new();
         let element = rect();
-        let k = key(&element);
+        let k = key(&element, 0);
 
         cache.begin_frame();
         cache.mesh(&element, &k, "#ffffff");
@@ -250,7 +276,7 @@ mod tests {
     fn evict_keeps_meshes_touched_within_the_window() {
         let mut cache = SceneCache::new();
         let element = rect();
-        let k = key(&element);
+        let k = key(&element, 0);
 
         cache.begin_frame();
         cache.mesh(&element, &k, "#ffffff");
@@ -265,7 +291,7 @@ mod tests {
     fn clear_drops_shapes_and_meshes() {
         let mut cache = SceneCache::new();
         let element = rect();
-        let k = key(&element);
+        let k = key(&element, 0);
 
         cache.mesh(&element, &k, "#ffffff");
         assert_eq!(cache.mesh_count(), 1);
@@ -273,5 +299,23 @@ mod tests {
         cache.clear();
         assert_eq!(cache.mesh_count(), 0);
         assert!(cache.shapes.is_empty());
+    }
+
+    #[test]
+    fn duplicate_ids_at_different_indices_cache_independently() {
+        let mut cache = SceneCache::new();
+        let a = rect();
+        let b = rect(); // same id "a", same version: only the index differs
+        let key_a = key(&a, 0);
+        let key_b = key(&b, 1);
+        assert_ne!(key_a, key_b);
+
+        cache.mesh(&a, &key_a, "#ffffff");
+        cache.mesh(&b, &key_b, "#ffffff");
+        assert_eq!(
+            cache.mesh_count(),
+            2,
+            "duplicate ids collapsed into one cache entry"
+        );
     }
 }

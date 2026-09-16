@@ -101,6 +101,29 @@ fn camera_moves_content_and_culls() {
 }
 
 #[test]
+fn duplicate_ids_render_their_own_fill_color() {
+    let a = sample::with(
+        sample::generic("rectangle", "dup", [0.0, 0.0, 100.0, 100.0]),
+        json!({ "roughness": 0, "backgroundColor": "#e03131", "fillStyle": "solid" }),
+    );
+    let b = sample::with(
+        sample::generic("rectangle", "dup", [100.0, 0.0, 100.0, 100.0]),
+        json!({ "roughness": 0, "backgroundColor": "#1971c2", "fillStyle": "solid" }),
+    );
+    let image = support::render(sample::file(vec![a, b]), Camera::default(), 200, 100, false);
+    assert!(
+        close(image.pixel(50, 50), [0xe0, 0x31, 0x31], 2),
+        "first duplicate-id rectangle: {:?}",
+        image.pixel(50, 50)
+    );
+    assert!(
+        close(image.pixel(150, 50), [0x19, 0x71, 0xc2], 2),
+        "second duplicate-id rectangle: {:?}",
+        image.pixel(150, 50)
+    );
+}
+
+#[test]
 fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
     // Regression for the mesh buffer's bump allocator never reclaiming evicted or off-bucket
     // segments: before the fix, capacity roughly doubled at every bucket change even when this

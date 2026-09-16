@@ -43,6 +43,22 @@ fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixel
     device.poll(wgpu::PollType::wait_indefinitely()).ok();
 }
 
+/// Runs `body` on a background thread and fails the test if it does not finish within
+/// `timeout`: a regression that reintroduces cosmic-text's infinite shaping loop (a negative
+/// line height) hangs forever rather than panicking, so an ordinary `#[test]` would hang the
+/// whole suite instead of failing it.
+fn assert_finishes_within(timeout: std::time::Duration, body: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        body();
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(timeout).is_ok(),
+        "did not finish within {timeout:?} (deadlocked or looping forever)"
+    );
+}
+
 #[test]
 fn text_interleaves_with_shapes() {
     let solid = |id: &str, rect: [f64; 4], color: &str| {
@@ -293,4 +309,56 @@ fn wide_rotated_text_past_the_texture_limit_does_not_overshoot_by_one_pixel() {
         zoom: 30.0,
     };
     prepare_only(sample::file(vec![text]), camera, [1920, 1080], 1.0);
+}
+
+#[test]
+fn invalid_text_metrics_do_not_panic_or_hang() {
+    let cases: [(&str, serde_json::Value); 4] = [
+        ("fontSize 0", json!({ "fontSize": 0 })),
+        ("fontSize -20", json!({ "fontSize": -20 })),
+        ("lineHeight 0", json!({ "lineHeight": 0 })),
+        ("x = 1e308", json!({ "x": 1e308 })),
+    ];
+    for (label, overrides) in cases {
+        let text = sample::with(
+            sample::text("t", [0.0, 0.0, 100.0, 25.0], "text", None),
+            overrides,
+        );
+        let file = sample::file(vec![text]);
+        assert_finishes_within(std::time::Duration::from_secs(5), move || {
+            prepare_only(file, Camera::default(), [200, 100], 1.0);
+        });
+        // Each case above uses its own thread and file; `label` documents which one a failure
+        // came from when `cargo test` reports which closure's assertion tripped.
+        let _ = label;
+    }
+}
+
+#[test]
+fn duplicate_ids_render_their_own_text_content() {
+    let a = sample::with(
+        sample::text("dup", [0.0, 0.0, 160.0, 40.0], "MMMMMMMM", None),
+        json!({ "strokeColor": "#ffffff", "fontSize": 32, "fontFamily": 6 }),
+    );
+    let b = sample::with(
+        sample::text("dup", [0.0, 100.0, 160.0, 40.0], ".", None),
+        json!({ "strokeColor": "#ffffff", "fontSize": 32, "fontFamily": 6 }),
+    );
+    let image = support::render(
+        sample::file(vec![black_bg(200.0, 200.0), a, b]),
+        Camera::default(),
+        200,
+        200,
+        false,
+    );
+    let top = white_pixels(&image, 0, 200, 0, 50); // "MMMMMMMM": many lit pixels.
+    let bottom = white_pixels(&image, 0, 200, 100, 150); // ".": very few.
+    assert!(
+        top > 200,
+        "the first duplicate-id text was not drawn: {top}"
+    );
+    assert!(
+        bottom < top / 10,
+        "the second duplicate-id text rendered the first one's content: top {top}, bottom {bottom}"
+    );
 }
