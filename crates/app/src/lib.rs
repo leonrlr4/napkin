@@ -5,5 +5,7 @@ pub mod camera;
 pub mod cli;
 pub mod document;
 pub mod input;
+pub mod render;
+pub mod sample;
 pub mod theme;
 pub mod viewer;
