@@ -266,6 +266,9 @@ fn shape_value(element: &Element, shape: &ElementShape) -> Value {
             items.push(json!({ "svgPath": stroke.iter().map(path_op_value).collect::<Vec<_>>() }));
             Value::Array(items)
         }
+        ElementShape::Placeholder => {
+            unreachable!("no baseline element's geometry exceeds GEOMETRY_BOUND")
+        }
     }
 }
 

@@ -11,15 +11,12 @@ use rough::{Drawable, RoughGenerator};
 use crate::element::{Element, LinearElement};
 use crate::json::Slot;
 
+use super::GEOMETRY_BOUND;
 use super::arrowhead::{self, Position};
 use super::options::generate_rough_options;
 
 /// `generateElbowArrowShape`'s `radius` argument at its one call site.
 const ELBOW_ARROW_RADIUS: f64 = 16.0;
-
-/// Beyond this, `_generateElementShape` draws nothing for an elbow arrow (a temporary fix
-/// in the source for extremely large elbow arrow shapes).
-const ELBOW_ARROW_EXTREME_COORDINATE: f64 = 1e6;
 
 /// `isElbowArrow`: `isArrowElement(element) && element.elbowed`. `isArrowElement` is
 /// implied by matching `Element::Arrow` before calling this.
@@ -150,11 +147,14 @@ pub(super) fn shape(
     };
 
     let mut result: Vec<Drawable> = if is_elbow_arrow(l) {
-        // NOTE (mtolmacs): Temporary fix for extremely big arrow shapes
-        if points.iter().any(|p| {
-            p[0].abs() > ELBOW_ARROW_EXTREME_COORDINATE
-                || p[1].abs() > ELBOW_ARROW_EXTREME_COORDINATE
-        }) {
+        // NOTE (mtolmacs): Temporary fix for extremely big arrow shapes. Elbow arrows are
+        // exempt from `generate_element_shape`'s upfront `GEOMETRY_BOUND` check (a
+        // legitimate elbow arrow can be this large), so this is the only guard standing
+        // between a huge coordinate and rough.js for them.
+        if points
+            .iter()
+            .any(|p| p[0].abs() > GEOMETRY_BOUND || p[1].abs() > GEOMETRY_BOUND)
+        {
             Vec::new()
         } else {
             let d = elbow_arrow_path(&points, ELBOW_ARROW_RADIUS);

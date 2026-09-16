@@ -65,13 +65,17 @@ fn diamond_points(width: f64, height: f64) -> [f64; 8] {
     ]
 }
 
-/// `_generateElementShape`'s `"rectangle"` case.
+/// `_generateElementShape`'s `"rectangle"` case. `None` means rough rejected the generated
+/// corner-radius path (the caller falls back to [`super::ElementShape::Placeholder`]); the
+/// upfront geometry bound in `generate_element_shape` keeps this from happening for any
+/// baseline or realistic file, but rough's path parser can still reject a path built from
+/// finite numbers that are merely large.
 pub(super) fn rectangle(
     generator: &RoughGenerator,
     element: &Element,
     g: &GenericElement,
     dark_mode: bool,
-) -> Drawable {
+) -> Option<Drawable> {
     let base = &g.base;
     let w = base.width;
     let h = base.height;
@@ -84,22 +88,21 @@ pub(super) fn rectangle(
              L {r} {h} Q 0 {h}, 0 {h_r} L 0 {r} Q 0 0, {r} 0"
         );
         let options = generate_rough_options(element, true, dark_mode).expect("rectangle draws");
-        generator
-            .path(&d, &options)
-            .expect("a rectangle's corner-radius path is well-formed for finite element geometry")
+        generator.path(&d, &options).ok()
     } else {
         let options = generate_rough_options(element, false, dark_mode).expect("rectangle draws");
-        generator.rectangle(0.0, 0.0, w, h, &options)
+        Some(generator.rectangle(0.0, 0.0, w, h, &options))
     }
 }
 
-/// `_generateElementShape`'s `"diamond"` case.
+/// `_generateElementShape`'s `"diamond"` case. `None` means rough rejected the generated
+/// corner-radius path; see [`rectangle`]'s doc comment.
 pub(super) fn diamond(
     generator: &RoughGenerator,
     element: &Element,
     g: &GenericElement,
     dark_mode: bool,
-) -> Drawable {
+) -> Option<Drawable> {
     let base = &g.base;
     let [
         top_x,
@@ -137,12 +140,10 @@ pub(super) fn diamond(
              C {top_x} {top_y}, {top_x} {top_y}, {a} {b}"
         );
         let options = generate_rough_options(element, true, dark_mode).expect("diamond draws");
-        generator
-            .path(&d, &options)
-            .expect("a diamond's corner-radius path is well-formed for finite element geometry")
+        generator.path(&d, &options).ok()
     } else {
         let options = generate_rough_options(element, false, dark_mode).expect("diamond draws");
-        generator.polygon(
+        Some(generator.polygon(
             &[
                 [top_x, top_y],
                 [right_x, right_y],
@@ -150,7 +151,7 @@ pub(super) fn diamond(
                 [left_x, left_y],
             ],
             &options,
-        )
+        ))
     }
 }
 
