@@ -5,7 +5,7 @@
 //! `CanvasRenderer::paint` only issues draw calls, so every decision (which meshes are visible,
 //! where they live in the shared buffers) must already be resolved by the time `paint` runs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::camera::Camera;
@@ -188,14 +188,19 @@ enum PreparedItem {
     },
 }
 
-/// A rotated text element's cached offscreen render: `id` + `version_bits` + the zoom bucket's
-/// scale, matching `MeshKey`'s reasoning (regenerate only when the content or the on-screen
-/// resolution changes).
+/// A rotated text element's cached offscreen render: `id` + `version_bits`, the render scale,
+/// dark mode and alpha, matching `MeshKey`'s field set (a mesh's appearance depends on the same
+/// five things; text's `scale` plays the role `MeshKey::bucket` plays for a mesh's tessellation
+/// tolerance). Any entry not requested during a `prepare` call is evicted at the end of it (see
+/// `CanvasRenderer::build_prepared`), so a changing `scale_bits` from continuous zooming does not
+/// accumulate textures across frames.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RotatedTextKey {
     id: String,
     version_bits: u64,
     scale_bits: u32,
+    dark: bool,
+    alpha_bits: u32,
 }
 
 /// A rotated text element's rendered texture, kept alive for as long as its bind group is
@@ -206,6 +211,11 @@ struct RotatedTextEntry {
     bind_group: Arc<wgpu::BindGroup>,
     width_px: u32,
     height_px: u32,
+    /// The scale actually used to rasterize this texture, clamped below `scale_bits`' value
+    /// when the requested scale would have exceeded `device.limits().max_texture_dimension_2d`;
+    /// `rotated_quad_vertices` sizes the on-canvas quad against this, not the requested scale,
+    /// so an extreme zoom only softens the text instead of shrinking it.
+    raster_scale: f32,
 }
 
 struct PipelineSpec<'a> {
@@ -613,11 +623,28 @@ impl CanvasRenderer {
             ..Default::default()
         });
 
+        // `ColorMode::Web`: `Accurate` (the default) treats the glyph atlas as sRGB and linearizes
+        // vertex colors in the shader, which is correct for a target that itself gets an sRGB ->
+        // linear conversion on write. Our targets (the canvas's own `target_format`, and the
+        // rotated-text offscreen `Rgba8Unorm`) don't get that conversion -- they're blended in
+        // gamma space like a browser canvas, same as every other pipeline in this file (`plain`,
+        // `isolated`, ...) -- so `Accurate` would silently darken every non-white glyph.
         let text_gpu_cache = glyphon::Cache::new(device);
-        let text_atlas = glyphon::TextAtlas::new(device, queue, &text_gpu_cache, target_format);
+        let text_atlas = glyphon::TextAtlas::with_color_mode(
+            device,
+            queue,
+            &text_gpu_cache,
+            target_format,
+            glyphon::ColorMode::Web,
+        );
         let text_viewport = glyphon::Viewport::new(device, &text_gpu_cache);
-        let mut rotated_atlas =
-            glyphon::TextAtlas::new(device, queue, &text_gpu_cache, ROTATED_TEXT_FORMAT);
+        let mut rotated_atlas = glyphon::TextAtlas::with_color_mode(
+            device,
+            queue,
+            &text_gpu_cache,
+            ROTATED_TEXT_FORMAT,
+            glyphon::ColorMode::Web,
+        );
         let rotated_viewport = glyphon::Viewport::new(device, &text_gpu_cache);
         let rotated_renderer = glyphon::TextRenderer::new(
             &mut rotated_atlas,
@@ -1051,9 +1078,9 @@ impl CanvasRenderer {
     }
 
     /// Renders `draw`'s element into its cached offscreen texture at `scale`, unless a cache
-    /// entry for this `id` + `version` + `scale` already exists. Returns the command buffer the
-    /// render was submitted through, when this was a cache miss (`None` on a hit means there is
-    /// nothing new to submit).
+    /// entry for this `id` + `version` + `scale` + `dark` + `draw.alpha` already exists. Returns
+    /// the command buffer the render was submitted through, when this was a cache miss (`None`
+    /// on a hit means there is nothing new to submit).
     fn ensure_rotated_texture(
         &mut self,
         device: &wgpu::Device,
@@ -1064,11 +1091,7 @@ impl CanvasRenderer {
         dark: bool,
     ) -> Option<wgpu::CommandBuffer> {
         let element = &file.elements[draw.element];
-        let key = RotatedTextKey {
-            id: element.id().unwrap_or_default().to_owned(),
-            version_bits: element.version().to_bits(),
-            scale_bits: scale.to_bits(),
-        };
+        let key = rotated_text_key(file, draw, scale, dark);
         if self.rotated_text_cache.contains_key(&key) {
             return None;
         }
@@ -1076,10 +1099,27 @@ impl CanvasRenderer {
         let placement = element
             .placement()
             .expect("RotatedText only wraps a Text element, which always has a placement");
-        let width_px =
-            ((placement.width as f32 * scale).ceil() as u32 + 2 * ROTATED_TEXT_PADDING_PX).max(1);
+
+        // A device has a maximum 2D texture dimension; a large text at extreme zoom could ask
+        // for more than that. Lower the raster scale (never raise it) just enough that both
+        // dimensions fit, so the quad -- sized from `width_px` / `raster_scale` below, not from
+        // the requested `scale` -- keeps its correct scene-space size and only loses sharpness.
+        let max_dimension = device.limits().max_texture_dimension_2d;
+        let padding_px = 2 * ROTATED_TEXT_PADDING_PX;
+        let max_raster_scale_for = |extent: f64| {
+            if extent > 0.0 {
+                (max_dimension.saturating_sub(padding_px).max(1)) as f32 / extent as f32
+            } else {
+                scale
+            }
+        };
+        let raster_scale = scale
+            .min(max_raster_scale_for(placement.width))
+            .min(max_raster_scale_for(placement.height));
+
+        let width_px = ((placement.width as f32 * raster_scale).ceil() as u32 + padding_px).max(1);
         let height_px =
-            ((placement.height as f32 * scale).ceil() as u32 + 2 * ROTATED_TEXT_PADDING_PX).max(1);
+            ((placement.height as f32 * raster_scale).ceil() as u32 + padding_px).max(1);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("napkin canvas rotated text"),
@@ -1118,8 +1158,13 @@ impl CanvasRenderer {
             .map(|line| glyphon::TextArea {
                 buffer: &line.buffer,
                 left: origin,
-                top: origin + line.baseline as f32 * scale - line.baseline_in_buffer * scale,
-                scale,
+                top: text::text_area_top(
+                    origin,
+                    line.baseline,
+                    line.baseline_in_buffer,
+                    raster_scale,
+                ),
+                scale: raster_scale,
                 bounds,
                 default_color: color,
                 custom_glyphs: &[],
@@ -1183,6 +1228,7 @@ impl CanvasRenderer {
                 bind_group: Arc::new(bind_group),
                 width_px,
                 height_px,
+                raster_scale,
             },
         );
         Some(encoder.finish())
@@ -1239,9 +1285,13 @@ impl CanvasRenderer {
 
         // Rotated text: render (or reuse) each element's offscreen texture and compute its
         // on-canvas quad, in `items` order, before the main loop below hands out matching
-        // indices into the buffer this uploads to.
+        // indices into the buffer this uploads to. Any cache entry not touched here (a text
+        // whose key -- id, version, scale, dark or alpha -- no longer matches anything on
+        // screen this frame) is evicted right after, so a continuously changing `scale` from
+        // zooming never accumulates textures across frames.
         let mut rotated_text_commands = Vec::new();
         let mut rotated_quads: Vec<([TexVertex; 4], Arc<wgpu::BindGroup>)> = Vec::new();
+        let mut used_rotated_text_keys = HashSet::new();
         for item in items {
             if let DrawItem::RotatedText(draw) = item {
                 if let Some(command) =
@@ -1250,20 +1300,23 @@ impl CanvasRenderer {
                     rotated_text_commands.push(command);
                 }
                 let element = &file.elements[draw.element];
-                let key = RotatedTextKey {
-                    id: element.id().unwrap_or_default().to_owned(),
-                    version_bits: element.version().to_bits(),
-                    scale_bits: scale.to_bits(),
-                };
+                let key = rotated_text_key(file, draw, scale, frame.dark);
                 let entry = self
                     .rotated_text_cache
                     .get(&key)
                     .expect("ensure_rotated_texture populated this entry");
-                let vertices =
-                    rotated_quad_vertices(element, entry.width_px, entry.height_px, scale);
+                let vertices = rotated_quad_vertices(
+                    element,
+                    entry.width_px,
+                    entry.height_px,
+                    entry.raster_scale,
+                );
                 rotated_quads.push((vertices, entry.bind_group.clone()));
+                used_rotated_text_keys.insert(key);
             }
         }
+        self.rotated_text_cache
+            .retain(|key, _| used_rotated_text_keys.contains(key));
         self.ensure_rotated_quad_capacity(device, rotated_quads.len() as u32);
         for (index, (vertices, _)) in rotated_quads.iter().enumerate() {
             let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
@@ -1391,6 +1444,23 @@ impl CanvasRenderer {
     }
 }
 
+/// `draw`'s rotated-text cache key at the current `scale` and `dark` mode.
+fn rotated_text_key(
+    file: &scene::SceneFile,
+    draw: &TextDraw,
+    scale: f32,
+    dark: bool,
+) -> RotatedTextKey {
+    let element = &file.elements[draw.element];
+    RotatedTextKey {
+        id: element.id().unwrap_or_default().to_owned(),
+        version_bits: element.version().to_bits(),
+        scale_bits: scale.to_bits(),
+        dark,
+        alpha_bits: draw.alpha.to_bits(),
+    }
+}
+
 /// The color a `TextDraw`'s glyphs render in: the element's own `strokeColor` (dark-mode
 /// filtered) for real text, `#868e96` (matching the placeholder's dashed box) for a type label,
 /// alpha multiplied by `draw.alpha`.
@@ -1451,7 +1521,7 @@ fn build_text_areas<'a>(
         areas.extend(shaped.iter().map(move |line| glyphon::TextArea {
             buffer: &line.buffer,
             left: origin_x + left_local * scale,
-            top: origin_y + line.baseline as f32 * scale - line.baseline_in_buffer * scale,
+            top: text::text_area_top(origin_y, line.baseline, line.baseline_in_buffer, scale),
             scale,
             bounds,
             default_color: color,

@@ -226,6 +226,16 @@ pub fn shape_lines(
         .collect()
 }
 
+/// `render/gpu.rs`'s `glyphon::TextArea::top` for one line: chosen so that, however cosmic-text
+/// places this particular font's `baseline_in_buffer` (which does not always match Excalidraw's
+/// own `getVerticalOffset`; see `shaped_baselines_match_excalidraw_for_all_bundled_fonts`), the
+/// line's baseline renders at physical pixel `origin_px + baseline * scale`: glyphon draws a run
+/// at `top + run.line_y * scale`, and `baseline_in_buffer` is exactly that `line_y`, so
+/// subtracting it here and re-adding it at render time cancels out.
+pub fn text_area_top(origin_px: f32, baseline: f64, baseline_in_buffer: f32, scale: f32) -> f32 {
+    origin_px + baseline as f32 * scale - baseline_in_buffer * scale
+}
+
 #[cfg(test)]
 mod tests {
     use scene::Element;
@@ -281,34 +291,53 @@ mod tests {
         // usWinAscent/usWinDescent (1077/300) instead of the sTypoAscender/Descender
         // (1011/-353) that matches Excalidraw's own table, so its `line_y` for a 20px line is
         // 20.26 instead of 19.08. That divergence is harmless: `render/gpu.rs` never trusts
-        // `line_y` as an absolute position, only as the anchor
-        // `top = origin + baseline * scale - baseline_in_buffer * scale` resolves against, so
-        // the rendered baseline always lands at `origin + baseline * scale` regardless of which
-        // metrics cosmic-text used internally. This asserts that formula instead of asserting
-        // `baseline_in_buffer` itself, at two different (origin, scale) pairs so the check
-        // exercises the whole expression, not just its identity case.
+        // `line_y` as an absolute position, only as the anchor `text_area_top` resolves against,
+        // so the rendered baseline always lands at `origin + baseline * scale` regardless of
+        // which metrics cosmic-text used internally.
+        //
+        // This checks two independent facts instead of just asserting `text_area_top`'s own
+        // algebra (which would hold for any `baseline_in_buffer`, wrong or not):
+        // (a) `shape_lines` records the same `baseline_in_buffer` a fresh, independently shaped
+        //     `Buffer` (not going through `shape_lines`) measures as its `line_y` -- so a bug
+        //     that read the wrong run, or a stale/default value, would be caught here even
+        //     though it wouldn't be caught by (b) alone.
+        // (b) feeding that independently measured `line_y` through `text_area_top` places the
+        //     baseline at `origin + baseline * scale`, at two different (origin, scale) pairs.
         let mut font_system = font_system();
         for font_family in [5.0, 6.0, 8.0] {
             let text = text_element(json!({
                 "text": "Hamburg", "fontFamily": font_family, "fontSize": 20, "lineHeight": 1.25
             }));
             let lines = layout_lines(&text);
-            let shaped = shape_lines(
-                &mut font_system,
-                &lines,
-                bundled_family(font_family),
-                20.0,
-                25.0,
-                100.0,
-                None,
+            let family = bundled_family(font_family);
+            let shaped = shape_lines(&mut font_system, &lines, family, 20.0, 25.0, 100.0, None);
+
+            let attrs = glyphon::Attrs::new().family(glyphon::Family::Name(family));
+            let mut independent =
+                glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(20.0, 25.0));
+            independent.set_wrap(glyphon::Wrap::None);
+            independent.set_size(Some(100.0), None);
+            independent.set_text(&lines[0].text, &attrs, glyphon::Shaping::Advanced, None);
+            independent.shape_until_scroll(&mut font_system, false);
+            let independent_line_y = independent.layout_runs().next().expect("one line").line_y;
+
+            // (a)
+            assert!(
+                (shaped[0].baseline_in_buffer - independent_line_y).abs() < 1e-4,
+                "family {font_family}: shape_lines recorded {} but an independently shaped \
+                 Buffer measures {independent_line_y}",
+                shaped[0].baseline_in_buffer,
             );
+
+            // (b)
             for (origin, scale) in [(0.0f32, 1.0f32), (100.0, 2.0)] {
-                let top = origin + shaped[0].baseline as f32 * scale
-                    - shaped[0].baseline_in_buffer * scale;
-                let rendered_baseline = top + shaped[0].baseline_in_buffer * scale;
+                let top = text_area_top(origin, lines[0].baseline, independent_line_y, scale);
+                let rendered_baseline = top + independent_line_y * scale;
+                let expected = origin + lines[0].baseline as f32 * scale;
                 assert!(
-                    (rendered_baseline - (origin + shaped[0].baseline as f32 * scale)).abs() < 1e-3,
-                    "family {font_family}, origin {origin}, scale {scale}: {rendered_baseline}"
+                    (rendered_baseline - expected).abs() < 1e-3,
+                    "family {font_family}, origin {origin}, scale {scale}: {rendered_baseline} \
+                     vs {expected}"
                 );
             }
         }

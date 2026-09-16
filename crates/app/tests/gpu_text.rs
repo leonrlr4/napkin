@@ -79,3 +79,45 @@ fn rotated_text_is_drawn_rotated() {
         "glyphs left in the unrotated position"
     );
 }
+
+#[test]
+fn rotated_text_wider_than_the_device_texture_limit_still_renders() {
+    // `width * scale` here comfortably exceeds any real GPU's `max_texture_dimension_2d`
+    // (8192 on this machine's Arc B390, and WebGPU guarantees only that much); without the
+    // raster-scale clamp in `ensure_rotated_texture`, creating the offscreen texture would fail
+    // a wgpu validation error and `support::gpu`'s device would panic.
+    let text = sample::with(
+        sample::text("t", [0.0, 0.0, 100_000.0, 100.0], "wide", None),
+        json!({ "strokeColor": "#ffffff", "fontSize": 32, "fontFamily": 6, "angle": 0.3 }),
+    );
+    support::render(sample::file(vec![text]), Camera::default(), 50, 50, false);
+}
+
+#[test]
+fn text_color_is_not_darkened_by_srgb_conversion() {
+    // glyphon's default `ColorMode::Accurate` linearizes vertex colors before writing them into
+    // a target that (unlike a real sRGB framebuffer) never converts back, darkening every
+    // non-white glyph; `#808080` over black makes that error easy to catch in the red channel.
+    let background = sample::with(
+        sample::generic("rectangle", "bg", [0.0, 0.0, 300.0, 150.0]),
+        json!({
+            "roughness": 0, "strokeColor": "#000000", "backgroundColor": "#000000", "fillStyle": "solid"
+        }),
+    );
+    let text = sample::with(
+        sample::text("t", [10.0, 10.0, 280.0, 90.0], "MMMM", None),
+        json!({ "strokeColor": "#808080", "fontSize": 64, "fontFamily": 6 }),
+    );
+    let image = support::render(
+        sample::file(vec![background, text]),
+        Camera::default(),
+        300,
+        150,
+        false,
+    );
+    let brightest_red = image.rgba.chunks(4).map(|p| p[0]).max().expect("pixels");
+    assert!(
+        (0x78..=0x88).contains(&brightest_red),
+        "brightest red channel in text region: {brightest_red:#x}"
+    );
+}
