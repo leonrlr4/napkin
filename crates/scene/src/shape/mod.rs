@@ -45,10 +45,10 @@ pub enum ElementShape {
         stroke: Vec<PathOp>,
     },
     /// napkin cannot generate this element's shape: its geometry falls outside
-    /// `GEOMETRY_BOUND`, or rough.js rejected the generated path. The renderer draws it as
-    /// the dashed placeholder box used for [`Element::Raw`] (spec §1.2); the element's data
-    /// is left untouched, so it round-trips through save/load and can draw normally again if
-    /// the geometry later changes.
+    /// `GEOMETRY_BOUND`, its `roughness` is negative, or rough.js rejected the generated
+    /// path. The renderer draws it as the dashed placeholder box used for [`Element::Raw`]
+    /// (spec §1.2); the element's data is left untouched, so it round-trips through
+    /// save/load and can draw normally again if the geometry later changes.
     Placeholder,
 }
 
@@ -64,11 +64,17 @@ fn exceeds_geometry_bound(x: f64) -> bool {
     !x.is_finite() || x.abs() > GEOMETRY_BOUND
 }
 
-/// Whether `base`'s own fields (shared by every drawable element type) exceed
-/// [`GEOMETRY_BOUND`]; `points` are checked separately, per element type, by the caller.
+/// Whether `base`'s `roughness`, `strokeWidth` or `roundness.value` (when present) exceed
+/// [`GEOMETRY_BOUND`], or `roughness` is negative. Excalidraw's own UI only ever writes `0`,
+/// `1` or `2` for `roughness`; a negative value makes rough's path/curve simplification
+/// distance `(1.0 + roughness) / 2.0` negative too, and `simplify_points`'s `epsilon` guard
+/// (`points_on_curve.rs`) then never terminates its recursion (JS throws a `RangeError` for
+/// the same input; Rust aborts the process instead, which no `Result`/`Option` can catch).
+/// Applies to every drawable element type, elbow arrows included: `width`/`height` and
+/// point coordinates are checked separately by [`geometry_exceeds_bound`], and only for
+/// non-elbow shapes.
 fn base_exceeds_geometry_bound(base: &ElementBase) -> bool {
-    exceeds_geometry_bound(base.width)
-        || exceeds_geometry_bound(base.height)
+    base.roughness < 0.0
         || exceeds_geometry_bound(base.roughness)
         || exceeds_geometry_bound(base.stroke_width)
         || base
@@ -79,22 +85,37 @@ fn base_exceeds_geometry_bound(base: &ElementBase) -> bool {
 }
 
 /// Whether `element`'s geometry keeps `generate_element_shape` from calling into rough.js:
-/// `width`, `height`, `roughness`, `strokeWidth`, `roundness.value` (when present) for every
-/// drawable element type, plus every point coordinate for line/arrow/freedraw.
+/// [`base_exceeds_geometry_bound`] for every drawable element type, plus `width`, `height`
+/// and every point coordinate for line/arrow/freedraw, except elbow arrows.
 fn geometry_exceeds_bound(element: &Element) -> bool {
-    let (base, points): (&ElementBase, &[[f64; 2]]) = match element {
-        Element::Rectangle(g) | Element::Diamond(g) | Element::Ellipse(g) => (&g.base, &[]),
+    let base = match element {
+        Element::Rectangle(g) | Element::Diamond(g) | Element::Ellipse(g) => &g.base,
+        Element::Line(l) | Element::Arrow(l) => &l.base,
+        Element::Freedraw(f) => &f.base,
+        Element::Text(_) | Element::Raw(_) => return false,
+    };
+    if base_exceeds_geometry_bound(base) {
+        return true;
+    }
+
+    let points: &[[f64; 2]] = match element {
         // Elbow arrows carry their own bound (`linear.rs`, ported from Excalidraw's
         // `generateElbowArrowShape`): once a point exceeds `GEOMETRY_BOUND` the arrow draws
         // as an empty (but valid) list of drawables, without ever handing the huge
         // coordinate to rough.js, and legitimate elbow arrows can be this large (see the
-        // `arrow/elbow/extreme` baseline case). So elbow arrows are exempt here.
+        // `arrow/elbow/extreme` baseline case). So elbow arrows are exempt from the
+        // width/height/point-coordinate bound below, though not from
+        // `base_exceeds_geometry_bound` above: `roughness`/`strokeWidth`/`roundness.value`
+        // are not the "big coordinate" that exemption is for, and a negative `roughness`
+        // aborts an elbow arrow's path the same way it does every other shape.
         Element::Arrow(l) if l.elbowed == Some(true) => return false,
-        Element::Line(l) | Element::Arrow(l) => (&l.base, &l.points),
-        Element::Freedraw(f) => (&f.base, &f.points),
-        Element::Text(_) | Element::Raw(_) => return false,
+        Element::Line(l) | Element::Arrow(l) => &l.points,
+        Element::Freedraw(f) => &f.points,
+        _ => &[],
     };
-    base_exceeds_geometry_bound(base)
+
+    exceeds_geometry_bound(base.width)
+        || exceeds_geometry_bound(base.height)
         || points
             .iter()
             .any(|p| exceeds_geometry_bound(p[0]) || exceeds_geometry_bound(p[1]))
@@ -233,11 +254,55 @@ mod tests {
     }
 
     #[test]
+    fn negative_roughness_rounded_rectangle_is_placeholder() {
+        let value = json!({
+            "id": "r4", "type": "rectangle", "x": 0, "y": 0, "width": 200, "height": 100,
+            "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": -2,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0",
+            "roundness": {"type": 3}, "seed": 1, "version": 1, "versionNonce": 1,
+            "isDeleted": false, "boundElements": null, "updated": 1, "link": null,
+            "locked": false
+        });
+        assert_placeholder(Element::from_value(value));
+    }
+
+    #[test]
+    fn negative_roughness_diamond_is_placeholder() {
+        let value = json!({
+            "id": "d2", "type": "diamond", "x": 0, "y": 0, "width": 200, "height": 100,
+            "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": -2,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0",
+            "roundness": {"type": 2}, "seed": 1, "version": 1, "versionNonce": 1,
+            "isDeleted": false, "boundElements": null, "updated": 1, "link": null,
+            "locked": false
+        });
+        assert_placeholder(Element::from_value(value));
+    }
+
+    #[test]
+    fn negative_roughness_elbow_arrow_is_placeholder() {
+        let value = json!({
+            "id": "a1", "type": "arrow", "x": 0, "y": 0, "width": 200, "height": 100,
+            "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": -2,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0",
+            "roundness": null, "seed": 1, "version": 1, "versionNonce": 1,
+            "isDeleted": false, "boundElements": null, "updated": 1, "link": null,
+            "locked": false,
+            "points": [[0, 0], [100, 0], [100, 100], [200, 100]],
+            "startArrowhead": null, "endArrowhead": null, "elbowed": true
+        });
+        assert_placeholder(Element::from_value(value));
+    }
+
+    #[test]
     fn rounded_rectangle_at_bound_still_draws() {
         let value = json!({
             "id": "r3", "type": "rectangle", "x": 0, "y": 0, "width": 1e6, "height": 100,
             "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent",
-            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 0,
             "opacity": 100, "groupIds": [], "frameId": null, "index": "a0",
             "roundness": {"type": 2}, "seed": 1, "version": 1, "versionNonce": 1,
             "isDeleted": false, "boundElements": null, "updated": 1, "link": null,
