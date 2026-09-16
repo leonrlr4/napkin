@@ -48,6 +48,10 @@ pub enum DrawItem {
 pub struct TextDraw {
     pub element: usize,
     pub label: bool,
+    /// The element's own opacity times its frame's opacity (0-1), exactly like a mesh's alpha;
+    /// 1.0 for a placeholder's type label, which (like its dashed box) is napkin's own hint and
+    /// always opaque.
+    pub alpha: f32,
 }
 
 pub struct View {
@@ -158,6 +162,19 @@ fn label_hole(label: &scene::Placement) -> [[f64; 2]; 4] {
     ]
 }
 
+/// `element`'s own opacity times its containing frame's opacity (each 0-100, so the product is
+/// divided by 10000), matching Excalidraw's compounded rendering alpha.
+fn element_alpha(element: &Element, frame_opacity: &HashMap<&str, f64>) -> f32 {
+    let own = element.opacity() / 100.0;
+    let frame = element
+        .frame_id()
+        .and_then(|frame_id| frame_opacity.get(frame_id))
+        .copied()
+        .unwrap_or(100.0)
+        / 100.0;
+    (own * frame) as f32
+}
+
 /// Every non-deleted `frame` element's `id` -> its own `opacity` (0-100), which multiplies
 /// into its children's alpha.
 fn frame_opacities(elements: &[Element]) -> HashMap<&str, f64> {
@@ -211,6 +228,7 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
             let draw = TextDraw {
                 element: index,
                 label: false,
+                alpha: element_alpha(element, &frame_opacity),
             };
             if text.base.angle == 0.0 {
                 pending.push_text(&mut items, draw);
@@ -236,14 +254,7 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
         let alpha: f32 = if is_placeholder {
             1.0
         } else {
-            let own = element.opacity() / 100.0;
-            let frame = element
-                .frame_id()
-                .and_then(|frame_id| frame_opacity.get(frame_id))
-                .copied()
-                .unwrap_or(100.0)
-                / 100.0;
-            (own * frame) as f32
+            element_alpha(element, &frame_opacity)
         };
 
         let key = MeshKey {
@@ -274,6 +285,7 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
                 TextDraw {
                     element: index,
                     label: true,
+                    alpha: 1.0,
                 },
             );
             continue;

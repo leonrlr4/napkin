@@ -5,13 +5,16 @@
 //! `CanvasRenderer::paint` only issues draw calls, so every decision (which meshes are visible,
 //! where they live in the shared buffers) must already be resolved by the time `paint` runs.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::camera::Camera;
 use crate::render::buffers::{Segment, SegmentAllocator};
 use crate::render::cache::SceneCache;
-use crate::render::plan::{DrawItem, ElementDraw, View, plan_frame};
-use crate::render::tessellate::{Mesh, Vertex};
+use crate::render::color::render_color;
+use crate::render::plan::{DrawItem, ElementDraw, TextDraw, View, plan_frame};
+use crate::render::tessellate::{Mesh, Vertex, local_center};
+use crate::render::text;
 
 pub const SAMPLE_COUNT: u32 = 4;
 pub const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
@@ -27,8 +30,25 @@ const INITIAL_INDEX_CAPACITY: u32 = 3_000_000;
 /// The per-frame hole buffer starts small: arrow labels are rare, and it regrows on demand.
 const INITIAL_HOLE_QUADS: u32 = 64;
 
+/// The per-frame rotated-text quad buffer starts small for the same reason as the hole buffer:
+/// rotated text is rare, and it regrows on demand.
+const INITIAL_ROTATED_QUADS: u32 = 16;
+
+/// The offscreen texture a rotated text element is shaped into before `paint` draws it as a
+/// rotated quad (Task 7); chosen independently of the canvas's own target format so a single
+/// `glyphon::TextAtlas` (tied to one format) can serve every such texture regardless of what
+/// format the canvas itself renders to.
+const ROTATED_TEXT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// Padding added on every side of a rotated-text texture, in physical pixels: room for glyph
+/// antialiasing to bleed past the tight text bounds without being clipped.
+const ROTATED_TEXT_PADDING_PX: u32 = 1;
+
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+
+const TEX_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 const SHADER: &str = r#"
 struct Uniforms {
@@ -77,6 +97,33 @@ fn vs_reset(@builtin(vertex_index) index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return in.color;
 }
+
+// The rotated-text quad: same camera transform as vs_main, carrying a UV instead of a color.
+struct TexVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_textured(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> TexVertexOutput {
+    let clip = ((position + uniforms.scroll) * uniforms.zoom_px / uniforms.viewport_px)
+        * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    var out: TexVertexOutput;
+    out.position = vec4<f32>(clip, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@group(1) @binding(0) var rotated_text_texture: texture_2d<f32>;
+@group(1) @binding(1) var rotated_text_sampler: sampler;
+
+// The texture already holds premultiplied alpha (glyphon drew straight-alpha glyphs over a
+// transparent background with ALPHA_BLENDING, and that combination premultiplies the result),
+// so this is sampled as-is; the `textured` pipeline blends it with PREMULTIPLIED_ALPHA_BLENDING.
+@fragment
+fn fs_textured(in: TexVertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(rotated_text_texture, rotated_text_sampler, in.uv);
+}
 "#;
 
 #[repr(C)]
@@ -88,6 +135,16 @@ struct Uniforms {
     viewport_px: [f32; 2],
     _pad1: [f32; 2],
 }
+
+/// One corner of a rotated-text quad: `position` in scene units, `uv` into that text's texture.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TexVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+}
+
+const TEX_VERTEX_SIZE: u64 = std::mem::size_of::<TexVertex>() as u64;
 
 #[derive(Clone)]
 pub struct CanvasFrame {
@@ -118,6 +175,37 @@ enum PreparedItem {
         hole: Option<Segment>,
     },
     StencilReset,
+    /// One batch of unrotated text; `renderer_index` selects which pooled `glyphon::TextRenderer`
+    /// already has this batch's glyphs from `prepare`.
+    Text {
+        renderer_index: usize,
+    },
+    /// A rotated text element's offscreen texture, drawn as a quad in the (per-frame) rotated
+    /// quad buffer.
+    RotatedText {
+        bind_group: Arc<wgpu::BindGroup>,
+        quad: Segment,
+    },
+}
+
+/// A rotated text element's cached offscreen render: `id` + `version_bits` + the zoom bucket's
+/// scale, matching `MeshKey`'s reasoning (regenerate only when the content or the on-screen
+/// resolution changes).
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct RotatedTextKey {
+    id: String,
+    version_bits: u64,
+    scale_bits: u32,
+}
+
+/// A rotated text element's rendered texture, kept alive for as long as its bind group is
+/// referenced by a `PreparedItem` (the texture itself is never read back, only sampled).
+struct RotatedTextEntry {
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    bind_group: Arc<wgpu::BindGroup>,
+    width_px: u32,
+    height_px: u32,
 }
 
 struct PipelineSpec<'a> {
@@ -138,6 +226,31 @@ fn stencil_face(
         depth_fail_op: wgpu::StencilOperation::Keep,
         pass_op,
     }
+}
+
+fn depth_stencil_state(face: wgpu::StencilFaceState) -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: STENCIL_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState {
+            front: face,
+            back: face,
+            read_mask: 0xff,
+            write_mask: 0xff,
+        },
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// The depth/stencil state `plain` (and every in-pass `glyphon::TextRenderer`) uses: the
+/// stencil buffer is neither tested nor written, only along for the ride because the pass has a
+/// stencil attachment.
+fn plain_depth_stencil() -> wgpu::DepthStencilState {
+    depth_stencil_state(stencil_face(
+        wgpu::CompareFunction::Always,
+        wgpu::StencilOperation::Keep,
+    ))
 }
 
 fn make_pipeline(
@@ -181,18 +294,52 @@ fn make_pipeline(
             cull_mode: None,
             ..Default::default()
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: STENCIL_FORMAT,
-            depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Always),
-            stencil: wgpu::StencilState {
-                front: spec.face,
-                back: spec.face,
-                read_mask: 0xff,
-                write_mask: 0xff,
-            },
-            bias: wgpu::DepthBiasState::default(),
+        depth_stencil: Some(depth_stencil_state(spec.face)),
+        multisample: wgpu::MultisampleState {
+            count: SAMPLE_COUNT,
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The rotated-text quad pipeline: samples a premultiplied-alpha texture instead of taking a
+/// vertex color, and blends accordingly (spec §6.3's rotated-text step).
+fn make_textured_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    target_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("napkin canvas textured"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_textured"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: TEX_VERTEX_SIZE,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &TEX_VERTEX_ATTRIBUTES,
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_textured"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target_format,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(plain_depth_stencil()),
         multisample: wgpu::MultisampleState {
             count: SAMPLE_COUNT,
             ..Default::default()
@@ -203,7 +350,8 @@ fn make_pipeline(
 }
 
 /// Every `ElementDraw` a frame's plan references, in the order `paint` will need them (`Text`
-/// and `RotatedText` carry no mesh and are skipped; Task 7 draws them).
+/// and `RotatedText` carry no mesh and are skipped here; `build_prepared` handles them through
+/// `glyphon` instead of the shared mesh buffers).
 fn element_draws(items: &[DrawItem]) -> Vec<&ElementDraw> {
     let mut draws = Vec::new();
     for item in items {
@@ -221,6 +369,7 @@ pub struct CanvasRenderer {
     isolated: wgpu::RenderPipeline,
     mask: wgpu::RenderPipeline,
     reset: wgpu::RenderPipeline,
+    textured: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 
@@ -237,7 +386,39 @@ pub struct CanvasRenderer {
     hole_vertex_capacity: u32,
     hole_index_capacity: u32,
 
+    /// Rebuilt from scratch every frame, one quad per `RotatedText` item, for the same reason
+    /// as the hole buffer.
+    rotated_quad_vertex_buffer: wgpu::Buffer,
+    rotated_quad_index_buffer: wgpu::Buffer,
+    rotated_quad_vertex_capacity: u32,
+    rotated_quad_index_capacity: u32,
+
     cache: SceneCache,
+
+    text_font_system: glyphon::FontSystem,
+    text_swash_cache: glyphon::SwashCache,
+    /// In-pass text: shares the canvas's own target format, sample count and stencil state so
+    /// it draws directly into the same MSAA + stencil pass as everything else.
+    text_atlas: glyphon::TextAtlas,
+    text_viewport: glyphon::Viewport,
+    /// One `glyphon::TextRenderer` per `Text` batch position in the current (or a past, larger)
+    /// frame; `prepare` grows this pool but never shrinks it.
+    text_renderers: Vec<glyphon::TextRenderer>,
+    /// Shaped lines, keyed by the source element's `id` + `version_bits`: independent of
+    /// rotation, so a `RotatedText` element's lines are shaped once and reused for every zoom
+    /// level's offscreen texture.
+    text_lines: HashMap<(String, u64), Vec<text::ShapedLine>>,
+
+    /// Rotated text: its own atlas (a fixed offscreen format, sample count 1, no stencil) and
+    /// a single renderer reused sequentially, since each rotated element's texture is rendered
+    /// and submitted to completion before the next one starts.
+    rotated_atlas: glyphon::TextAtlas,
+    rotated_viewport: glyphon::Viewport,
+    rotated_renderer: glyphon::TextRenderer,
+    rotated_texture_bind_group_layout: wgpu::BindGroupLayout,
+    rotated_texture_sampler: wgpu::Sampler,
+    rotated_text_cache: HashMap<RotatedTextKey, RotatedTextEntry>,
+
     prepared: Vec<PreparedItem>,
     stats: RenderStats,
 }
@@ -245,7 +426,7 @@ pub struct CanvasRenderer {
 impl CanvasRenderer {
     pub fn new(
         device: &wgpu::Device,
-        _queue: &wgpu::Queue,
+        queue: &wgpu::Queue,
         target_format: wgpu::TextureFormat,
     ) -> CanvasRenderer {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -375,11 +556,82 @@ impl CanvasRenderer {
             wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         );
 
+        let rotated_quad_vertex_capacity = INITIAL_ROTATED_QUADS * 4;
+        let rotated_quad_index_capacity = INITIAL_ROTATED_QUADS * 6;
+        let rotated_quad_vertex_buffer = create_buffer(
+            device,
+            "napkin canvas rotated text vertices",
+            u64::from(rotated_quad_vertex_capacity) * TEX_VERTEX_SIZE,
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        );
+        let rotated_quad_index_buffer = create_buffer(
+            device,
+            "napkin canvas rotated text indices",
+            u64::from(rotated_quad_index_capacity) * INDEX_SIZE,
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        );
+
+        let rotated_texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("napkin canvas rotated text texture"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let textured_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("napkin canvas textured"),
+                bind_group_layouts: &[
+                    Some(&bind_group_layout),
+                    Some(&rotated_texture_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+        let textured =
+            make_textured_pipeline(device, &textured_pipeline_layout, &shader, target_format);
+        let rotated_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("napkin canvas rotated text sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let text_gpu_cache = glyphon::Cache::new(device);
+        let text_atlas = glyphon::TextAtlas::new(device, queue, &text_gpu_cache, target_format);
+        let text_viewport = glyphon::Viewport::new(device, &text_gpu_cache);
+        let mut rotated_atlas =
+            glyphon::TextAtlas::new(device, queue, &text_gpu_cache, ROTATED_TEXT_FORMAT);
+        let rotated_viewport = glyphon::Viewport::new(device, &text_gpu_cache);
+        let rotated_renderer = glyphon::TextRenderer::new(
+            &mut rotated_atlas,
+            device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+
         CanvasRenderer {
             plain,
             isolated,
             mask,
             reset,
+            textured,
             uniform_buffer,
             bind_group,
             vertex_buffer,
@@ -391,7 +643,23 @@ impl CanvasRenderer {
             hole_index_buffer,
             hole_vertex_capacity,
             hole_index_capacity,
+            rotated_quad_vertex_buffer,
+            rotated_quad_index_buffer,
+            rotated_quad_vertex_capacity,
+            rotated_quad_index_capacity,
             cache: SceneCache::new(),
+            text_font_system: text::font_system(),
+            text_swash_cache: glyphon::SwashCache::new(),
+            text_atlas,
+            text_viewport,
+            text_renderers: Vec::new(),
+            text_lines: HashMap::new(),
+            rotated_atlas,
+            rotated_viewport,
+            rotated_renderer,
+            rotated_texture_bind_group_layout,
+            rotated_texture_sampler,
+            rotated_text_cache: HashMap::new(),
             prepared: Vec::new(),
             stats: RenderStats::default(),
         }
@@ -402,12 +670,14 @@ impl CanvasRenderer {
         self.cache.clear();
         self.allocator
             .reset(self.vertex_capacity, self.index_capacity);
+        self.text_lines.clear();
+        self.rotated_text_cache.clear();
         self.prepared.clear();
         self.stats = RenderStats::default();
     }
 
-    /// Plans the frame and uploads what it needs. The returned buffers (offscreen text in
-    /// Task 7) must be submitted before the pass that calls `paint`.
+    /// Plans the frame and uploads what it needs. The returned buffers (rotated text's offscreen
+    /// renders) must be submitted before the pass that calls `paint`.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -428,8 +698,16 @@ impl CanvasRenderer {
         let draws = element_draws(&items);
 
         self.ensure_mesh_segments(device, queue, &frame.file, background, &draws);
-        let (prepared, drawn_elements) =
-            self.build_prepared(device, queue, &frame.file, background, &items);
+        self.text_viewport.update(
+            queue,
+            glyphon::Resolution {
+                width: frame.size_px[0],
+                height: frame.size_px[1],
+            },
+        );
+        let (prepared, drawn_elements, rotated_text_commands) =
+            self.build_prepared(device, queue, frame, background, &items);
+        self.text_atlas.trim();
 
         let uniforms = Uniforms {
             scroll: [frame.camera.scroll_x as f32, frame.camera.scroll_y as f32],
@@ -448,7 +726,7 @@ impl CanvasRenderer {
         };
         self.cache.evict(600);
 
-        Vec::new()
+        rotated_text_commands
     }
 
     /// Draws the prepared frame into a pass with a 4x MSAA color target and a Stencil8
@@ -515,6 +793,34 @@ impl CanvasRenderer {
                     pass.set_pipeline(&self.reset);
                     pass.set_stencil_reference(0);
                     pass.draw(0..6, 0..1);
+                }
+                PreparedItem::Text { renderer_index } => {
+                    self.text_renderers[*renderer_index]
+                        .render(&self.text_atlas, &self.text_viewport, pass)
+                        .expect("glyphon render for in-pass text");
+                    // glyphon's render() leaves its own pipeline, bind group 0 and vertex
+                    // buffer bound; restore ours so the next item (which, unless it is
+                    // `Isolated` with a hole, does not rebind these itself) finds them intact.
+                    pass.set_bind_group(0, &self.bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                    pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                }
+                PreparedItem::RotatedText { bind_group, quad } => {
+                    pass.set_pipeline(&self.textured);
+                    pass.set_bind_group(0, &self.bind_group, &[]);
+                    pass.set_bind_group(1, bind_group.as_ref(), &[]);
+                    pass.set_vertex_buffer(0, self.rotated_quad_vertex_buffer.slice(..));
+                    pass.set_index_buffer(
+                        self.rotated_quad_index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(
+                        quad.index_start..quad.index_start + quad.index_count,
+                        quad.vertex_start as i32,
+                        0..1,
+                    );
+                    pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                    pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 }
             }
         }
@@ -647,17 +953,260 @@ impl CanvasRenderer {
         self.hole_index_capacity = index_capacity;
     }
 
-    /// Resolves `items` into `PreparedItem`s, uploading this frame's stencil-hole quads (every
-    /// element mesh must already have a segment, via `ensure_mesh_segments`). Returns the
-    /// prepared list and the number of elements drawn.
-    fn build_prepared(
+    /// Grows the rotated-text quad buffers, if needed, to fit `quad_count` quads.
+    fn ensure_rotated_quad_capacity(&mut self, device: &wgpu::Device, quad_count: u32) {
+        let need_vertices = quad_count * 4;
+        let need_indices = quad_count * 6;
+        if need_vertices <= self.rotated_quad_vertex_capacity
+            && need_indices <= self.rotated_quad_index_capacity
+        {
+            return;
+        }
+        let vertex_capacity = (self.rotated_quad_vertex_capacity * 2).max(need_vertices);
+        let index_capacity = (self.rotated_quad_index_capacity * 2).max(need_indices);
+        self.rotated_quad_vertex_buffer = create_buffer(
+            device,
+            "napkin canvas rotated text vertices",
+            u64::from(vertex_capacity) * TEX_VERTEX_SIZE,
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        );
+        self.rotated_quad_index_buffer = create_buffer(
+            device,
+            "napkin canvas rotated text indices",
+            u64::from(index_capacity) * INDEX_SIZE,
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        );
+        self.rotated_quad_vertex_capacity = vertex_capacity;
+        self.rotated_quad_index_capacity = index_capacity;
+    }
+
+    /// Shapes and caches `file.elements[index]`'s lines, unless a cache entry from an earlier
+    /// frame already covers this `id` + `version`. `label` draws `placeholder_label` in
+    /// napkin-sans 12 instead of the element's own text (used for a placeholder's type label,
+    /// which is not itself a `TextElement`).
+    fn ensure_shaped(&mut self, file: &scene::SceneFile, index: usize, label: bool) {
+        let element = &file.elements[index];
+        let key = (
+            element.id().unwrap_or_default().to_owned(),
+            element.version().to_bits(),
+        );
+        if self.text_lines.contains_key(&key) {
+            return;
+        }
+        let shaped = if label {
+            let lines = [text::placeholder_label(element.kind())];
+            text::shape_lines(
+                &mut self.text_font_system,
+                &lines,
+                "napkin-sans",
+                12.0,
+                12.0,
+                f32::MAX,
+                Some(glyphon::cosmic_text::Align::Left),
+            )
+        } else {
+            let scene::Element::Text(text_element) = element else {
+                debug_assert!(
+                    false,
+                    "plan_frame only emits label=false for a Text element"
+                );
+                return;
+            };
+            let lines = text::layout_lines(text_element);
+            let family = text::bundled_family(text_element.font_family);
+            let line_height = text_element.line_height.unwrap_or(1.25);
+            let line_height_px = (text_element.font_size * line_height) as f32;
+            let align = Some(match text_element.text_align.as_str() {
+                "center" => glyphon::cosmic_text::Align::Center,
+                "right" => glyphon::cosmic_text::Align::Right,
+                _ => glyphon::cosmic_text::Align::Left,
+            });
+            text::shape_lines(
+                &mut self.text_font_system,
+                &lines,
+                family,
+                text_element.font_size as f32,
+                line_height_px,
+                text_element.base.width as f32,
+                align,
+            )
+        };
+        self.text_lines.insert(key, shaped);
+    }
+
+    /// Grows the in-pass `TextRenderer` pool, if needed, so index `index` exists.
+    fn ensure_text_renderer(&mut self, device: &wgpu::Device, index: usize) {
+        while self.text_renderers.len() <= index {
+            let renderer = glyphon::TextRenderer::new(
+                &mut self.text_atlas,
+                device,
+                wgpu::MultisampleState {
+                    count: SAMPLE_COUNT,
+                    ..Default::default()
+                },
+                Some(plain_depth_stencil()),
+            );
+            self.text_renderers.push(renderer);
+        }
+    }
+
+    /// Renders `draw`'s element into its cached offscreen texture at `scale`, unless a cache
+    /// entry for this `id` + `version` + `scale` already exists. Returns the command buffer the
+    /// render was submitted through, when this was a cache miss (`None` on a hit means there is
+    /// nothing new to submit).
+    fn ensure_rotated_texture(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         file: &scene::SceneFile,
+        draw: &TextDraw,
+        scale: f32,
+        dark: bool,
+    ) -> Option<wgpu::CommandBuffer> {
+        let element = &file.elements[draw.element];
+        let key = RotatedTextKey {
+            id: element.id().unwrap_or_default().to_owned(),
+            version_bits: element.version().to_bits(),
+            scale_bits: scale.to_bits(),
+        };
+        if self.rotated_text_cache.contains_key(&key) {
+            return None;
+        }
+        self.ensure_shaped(file, draw.element, false);
+        let placement = element
+            .placement()
+            .expect("RotatedText only wraps a Text element, which always has a placement");
+        let width_px =
+            ((placement.width as f32 * scale).ceil() as u32 + 2 * ROTATED_TEXT_PADDING_PX).max(1);
+        let height_px =
+            ((placement.height as f32 * scale).ceil() as u32 + 2 * ROTATED_TEXT_PADDING_PX).max(1);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("napkin canvas rotated text"),
+            size: wgpu::Extent3d {
+                width: width_px,
+                height: height_px,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: ROTATED_TEXT_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.rotated_viewport.update(
+            queue,
+            glyphon::Resolution {
+                width: width_px,
+                height: height_px,
+            },
+        );
+        let bounds = glyphon::TextBounds {
+            left: 0,
+            top: 0,
+            right: width_px as i32,
+            bottom: height_px as i32,
+        };
+        let color = text_draw_color(file, draw, dark);
+        let origin = ROTATED_TEXT_PADDING_PX as f32;
+        let shaped = shaped_lines_for(&self.text_lines, element);
+        let areas: Vec<glyphon::TextArea> = shaped
+            .iter()
+            .map(|line| glyphon::TextArea {
+                buffer: &line.buffer,
+                left: origin,
+                top: origin + line.baseline as f32 * scale - line.baseline_in_buffer * scale,
+                scale,
+                bounds,
+                default_color: color,
+                custom_glyphs: &[],
+            })
+            .collect();
+        self.rotated_renderer
+            .prepare(
+                device,
+                queue,
+                &mut self.text_font_system,
+                &mut self.rotated_atlas,
+                &self.rotated_viewport,
+                areas,
+                &mut self.text_swash_cache,
+            )
+            .expect("glyphon prepare for rotated text");
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("napkin canvas rotated text"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("napkin canvas rotated text"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.rotated_renderer
+                .render(&self.rotated_atlas, &self.rotated_viewport, &mut pass)
+                .expect("glyphon render for rotated text");
+        }
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("napkin canvas rotated text"),
+            layout: &self.rotated_texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.rotated_texture_sampler),
+                },
+            ],
+        });
+        self.rotated_text_cache.insert(
+            key,
+            RotatedTextEntry {
+                texture,
+                bind_group: Arc::new(bind_group),
+                width_px,
+                height_px,
+            },
+        );
+        Some(encoder.finish())
+    }
+
+    /// Resolves `items` into `PreparedItem`s, uploading this frame's stencil-hole quads and
+    /// rotated-text quads (every element mesh must already have a segment, via
+    /// `ensure_mesh_segments`) and shaping/rendering whatever text those items need. Returns the
+    /// prepared list, the number of elements drawn, and the command buffers rotated text's
+    /// offscreen renders were submitted through (the caller must submit these before `paint`).
+    fn build_prepared(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &CanvasFrame,
         background: &str,
         items: &[DrawItem],
-    ) -> (Vec<PreparedItem>, usize) {
+    ) -> (Vec<PreparedItem>, usize, Vec<wgpu::CommandBuffer>) {
+        let file = &frame.file;
+        // Matches `zoom_px` in the vertex shader's `Uniforms` exactly, so text and geometry
+        // agree on where a scene point lands in physical pixels.
+        let scale = frame.camera.zoom as f32 * frame.pixels_per_point;
+        let scroll = [frame.camera.scroll_x as f32, frame.camera.scroll_y as f32];
+
         let holes: Vec<[[f64; 2]; 4]> = items
             .iter()
             .filter_map(|item| match item {
@@ -688,9 +1237,65 @@ impl CanvasRenderer {
             );
         }
 
+        // Rotated text: render (or reuse) each element's offscreen texture and compute its
+        // on-canvas quad, in `items` order, before the main loop below hands out matching
+        // indices into the buffer this uploads to.
+        let mut rotated_text_commands = Vec::new();
+        let mut rotated_quads: Vec<([TexVertex; 4], Arc<wgpu::BindGroup>)> = Vec::new();
+        for item in items {
+            if let DrawItem::RotatedText(draw) = item {
+                if let Some(command) =
+                    self.ensure_rotated_texture(device, queue, file, draw, scale, frame.dark)
+                {
+                    rotated_text_commands.push(command);
+                }
+                let element = &file.elements[draw.element];
+                let key = RotatedTextKey {
+                    id: element.id().unwrap_or_default().to_owned(),
+                    version_bits: element.version().to_bits(),
+                    scale_bits: scale.to_bits(),
+                };
+                let entry = self
+                    .rotated_text_cache
+                    .get(&key)
+                    .expect("ensure_rotated_texture populated this entry");
+                let vertices =
+                    rotated_quad_vertices(element, entry.width_px, entry.height_px, scale);
+                rotated_quads.push((vertices, entry.bind_group.clone()));
+            }
+        }
+        self.ensure_rotated_quad_capacity(device, rotated_quads.len() as u32);
+        for (index, (vertices, _)) in rotated_quads.iter().enumerate() {
+            let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+            let vertex_start = index as u32 * 4;
+            let index_start = index as u32 * 6;
+            queue.write_buffer(
+                &self.rotated_quad_vertex_buffer,
+                u64::from(vertex_start) * TEX_VERTEX_SIZE,
+                bytemuck::cast_slice(vertices),
+            );
+            queue.write_buffer(
+                &self.rotated_quad_index_buffer,
+                u64::from(index_start) * INDEX_SIZE,
+                bytemuck::cast_slice(&indices),
+            );
+        }
+        if !rotated_quads.is_empty() {
+            self.rotated_atlas.trim();
+        }
+
+        let canvas_bounds = glyphon::TextBounds {
+            left: 0,
+            top: 0,
+            right: frame.size_px[0] as i32,
+            bottom: frame.size_px[1] as i32,
+        };
+
         let mut prepared = Vec::with_capacity(items.len());
         let mut drawn_elements = 0usize;
         let mut next_hole = 0u32;
+        let mut next_text_renderer = 0usize;
+        let mut next_rotated_quad = 0u32;
         for item in items {
             match item {
                 DrawItem::Meshes(draws) => {
@@ -736,11 +1341,161 @@ impl CanvasRenderer {
                     });
                 }
                 DrawItem::StencilReset => prepared.push(PreparedItem::StencilReset),
-                DrawItem::Text(_) | DrawItem::RotatedText(_) => {}
+                DrawItem::Text(draws) => {
+                    for draw in draws {
+                        self.ensure_shaped(file, draw.element, draw.label);
+                    }
+                    let renderer_index = next_text_renderer;
+                    next_text_renderer += 1;
+                    self.ensure_text_renderer(device, renderer_index);
+                    let areas = build_text_areas(
+                        &self.text_lines,
+                        file,
+                        draws,
+                        scroll,
+                        scale,
+                        canvas_bounds,
+                        frame.dark,
+                    );
+                    self.text_renderers[renderer_index]
+                        .prepare(
+                            device,
+                            queue,
+                            &mut self.text_font_system,
+                            &mut self.text_atlas,
+                            &self.text_viewport,
+                            areas,
+                            &mut self.text_swash_cache,
+                        )
+                        .expect("glyphon prepare for in-pass text");
+                    drawn_elements += draws.len();
+                    prepared.push(PreparedItem::Text { renderer_index });
+                }
+                DrawItem::RotatedText(_) => {
+                    let (_, bind_group) = &rotated_quads[next_rotated_quad as usize];
+                    let quad = Segment {
+                        vertex_start: next_rotated_quad * 4,
+                        index_start: next_rotated_quad * 6,
+                        index_count: 6,
+                    };
+                    next_rotated_quad += 1;
+                    drawn_elements += 1;
+                    prepared.push(PreparedItem::RotatedText {
+                        bind_group: bind_group.clone(),
+                        quad,
+                    });
+                }
             }
         }
-        (prepared, drawn_elements)
+        (prepared, drawn_elements, rotated_text_commands)
     }
+}
+
+/// The color a `TextDraw`'s glyphs render in: the element's own `strokeColor` (dark-mode
+/// filtered) for real text, `#868e96` (matching the placeholder's dashed box) for a type label,
+/// alpha multiplied by `draw.alpha`.
+fn text_draw_color(file: &scene::SceneFile, draw: &TextDraw, dark: bool) -> glyphon::Color {
+    let element = &file.elements[draw.element];
+    let stroke = if draw.label {
+        "#868e96"
+    } else {
+        element
+            .base()
+            .map(|base| base.stroke_color.as_str())
+            .unwrap_or("#000000")
+    };
+    let [r, g, b, a] = render_color(stroke, dark);
+    let a = (a * draw.alpha).clamp(0.0, 1.0);
+    let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    glyphon::Color::rgba(channel(r), channel(g), channel(b), channel(a))
+}
+
+/// `element`'s cached shaped lines; panics if `ensure_shaped` was not called for it first.
+fn shaped_lines_for<'a>(
+    lines: &'a HashMap<(String, u64), Vec<text::ShapedLine>>,
+    element: &scene::Element,
+) -> &'a [text::ShapedLine] {
+    let key = (
+        element.id().unwrap_or_default().to_owned(),
+        element.version().to_bits(),
+    );
+    lines
+        .get(&key)
+        .expect("ensure_shaped populated this element's cache entry")
+        .as_slice()
+}
+
+/// The `glyphon::TextArea`s for one `Text` batch: every line of every draw, positioned so line
+/// i's baseline lands at physical pixel `(element origin + scroll) * scale`, offset down by that
+/// line's own `baseline`; a placeholder label is additionally offset 4 scene units right.
+fn build_text_areas<'a>(
+    lines: &'a HashMap<(String, u64), Vec<text::ShapedLine>>,
+    file: &scene::SceneFile,
+    draws: &[TextDraw],
+    scroll: [f32; 2],
+    scale: f32,
+    bounds: glyphon::TextBounds,
+    dark: bool,
+) -> Vec<glyphon::TextArea<'a>> {
+    let mut areas = Vec::new();
+    for draw in draws {
+        let element = &file.elements[draw.element];
+        let Some(placement) = element.placement() else {
+            continue;
+        };
+        let origin_x = (placement.x as f32 + scroll[0]) * scale;
+        let origin_y = (placement.y as f32 + scroll[1]) * scale;
+        let left_local = if draw.label { 4.0 } else { 0.0 };
+        let color = text_draw_color(file, draw, dark);
+        let shaped = shaped_lines_for(lines, element);
+        areas.extend(shaped.iter().map(move |line| glyphon::TextArea {
+            buffer: &line.buffer,
+            left: origin_x + left_local * scale,
+            top: origin_y + line.baseline as f32 * scale - line.baseline_in_buffer * scale,
+            scale,
+            bounds,
+            default_color: color,
+            custom_glyphs: &[],
+        }));
+    }
+    areas
+}
+
+/// The four corners (top-left, top-right, bottom-right, bottom-left, matching the hole quads'
+/// winding) of a rotated text element's on-canvas quad: sized so its texture maps one texel to
+/// one physical pixel at `scale`, centered and rotated exactly like a mesh vertex would be
+/// (`tessellate::transform`'s `[x, y] + center + R(angle)(local - center)`).
+fn rotated_quad_vertices(
+    element: &scene::Element,
+    width_px: u32,
+    height_px: u32,
+    scale: f32,
+) -> [TexVertex; 4] {
+    let placement = element
+        .placement()
+        .expect("RotatedText only wraps a Text element, which always has a placement");
+    let center = local_center(element).unwrap_or([placement.width / 2.0, placement.height / 2.0]);
+    let half_width = f64::from(width_px) / (2.0 * f64::from(scale));
+    let half_height = f64::from(height_px) / (2.0 * f64::from(scale));
+    let local_corners = [
+        [center[0] - half_width, center[1] - half_height],
+        [center[0] + half_width, center[1] - half_height],
+        [center[0] + half_width, center[1] + half_height],
+        [center[0] - half_width, center[1] + half_height],
+    ];
+    let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let (sin, cos) = placement.angle.sin_cos();
+    std::array::from_fn(|i| {
+        let [lx, ly] = local_corners[i];
+        let dx = lx - center[0];
+        let dy = ly - center[1];
+        let x = placement.x + center[0] + dx * cos - dy * sin;
+        let y = placement.y + center[1] + dx * sin + dy * cos;
+        TexVertex {
+            position: [x as f32, y as f32],
+            uv: uvs[i],
+        }
+    })
 }
 
 fn create_buffer(

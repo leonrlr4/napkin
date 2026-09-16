@@ -11,3 +11,4 @@ pub mod gpu;
 pub mod path;
 pub mod plan;
 pub mod tessellate;
+pub mod text;
