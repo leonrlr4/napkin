@@ -131,7 +131,7 @@ fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
     // asking wgpu for a buffer past `max_buffer_size` and panicking (`support::gpu`'s device
     // panics on any uncaptured validation error). The view stays small so the sweep is fast;
     // the bug is in how capacity *grows*, not in how much is visible at once.
-    let (device, queue) = support::gpu();
+    let (_gpu, device, queue) = support::gpu();
     let mut renderer = CanvasRenderer::new(&device, &queue, support::FORMAT);
     let file = std::sync::Arc::new(app::fixture::generate(1, 1000));
     let max_buffer_size = device.limits().max_buffer_size;

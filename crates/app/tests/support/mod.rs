@@ -19,7 +19,23 @@ impl Image {
     }
 }
 
-pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
+/// Serializes GPU setup and teardown across every test in this binary. Both the Vulkan loader
+/// (`vkEnumerateInstanceExtensionProperties`, entered while creating a `wgpu::Instance`) and
+/// wgpu-hal's EGL context teardown crash when several test threads create or drop GPU instances
+/// at once, so GPU tests run one at a time instead of in parallel.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquires the GPU lock and returns a fresh instance, adapter and device. Bind the guard first
+/// so it outlives the device and queue, e.g. `let (_gpu, device, queue) = support::gpu();`:
+/// binding it to `_` drops it immediately and defeats the lock.
+pub fn gpu() -> (
+    std::sync::MutexGuard<'static, ()>,
+    wgpu::Device,
+    wgpu::Queue,
+) {
+    let guard = GPU
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let instance = wgpu::Instance::default();
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
@@ -30,7 +46,7 @@ pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
     device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
         panic!("wgpu validation error: {error}")
     }));
-    (device, queue)
+    (guard, device, queue)
 }
 
 /// Renders `file` at pixels-per-point 1 over its own view background.
@@ -54,7 +70,7 @@ pub fn render_with_ppp(
     pixels_per_point: f32,
     dark: bool,
 ) -> Image {
-    let (device, queue) = gpu();
+    let (_gpu, device, queue) = gpu();
     let background = app::render::color::render_color(file.view_background_color(), dark);
     let mut renderer = CanvasRenderer::new(&device, &queue, FORMAT);
     let frame = CanvasFrame {

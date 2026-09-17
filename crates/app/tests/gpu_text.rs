@@ -29,7 +29,7 @@ fn rotated(id: &str, rect: [f64; 4], text: &str) -> serde_json::Value {
 /// Runs `CanvasRenderer::prepare` (and submits what it returns) without a paint pass, for tests
 /// that only care whether `prepare` panics.
 fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixels_per_point: f32) {
-    let (device, queue) = support::gpu();
+    let (_gpu, device, queue) = support::gpu();
     let mut renderer = CanvasRenderer::new(&device, &queue, support::FORMAT);
     let frame = CanvasFrame {
         file: std::sync::Arc::new(file),
