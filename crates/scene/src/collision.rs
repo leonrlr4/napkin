@@ -48,15 +48,19 @@ pub enum Segment {
     Cubic(CurveSeg),
 }
 
-/// `getElementHitThreshold`: `max(strokeWidth / 2 + 0.1, 0.85 * DEFAULT_COLLISION_THRESHOLD /
-/// zoom)`. A `Raw` element reads `strokeWidth` from its JSON when it is a number, 0 otherwise
-/// (it has no `ElementBase` to fall back on).
-pub fn hit_threshold(element: &Element, zoom: f64) -> f64 {
-    let stroke_width = match element {
+/// `element.strokeWidth`; a `Raw` element reads it from its JSON when it is a number, 0
+/// otherwise (it has no `ElementBase` to fall back on).
+pub(crate) fn stroke_width(element: &Element) -> f64 {
+    match element {
         Element::Raw(v) => v.get("strokeWidth").and_then(Value::as_f64).unwrap_or(0.0),
         _ => element.base().map_or(0.0, |b| b.stroke_width),
-    };
-    (stroke_width / 2.0 + 0.1).max(0.85 * DEFAULT_COLLISION_THRESHOLD / zoom)
+    }
+}
+
+/// `getElementHitThreshold`: `max(strokeWidth / 2 + 0.1, 0.85 * DEFAULT_COLLISION_THRESHOLD /
+/// zoom)`.
+pub fn hit_threshold(element: &Element, zoom: f64) -> f64 {
+    (stroke_width(element) / 2.0 + 0.1).max(0.85 * DEFAULT_COLLISION_THRESHOLD / zoom)
 }
 
 /// `hasBackground`: element (and tool-only) types that can carry a fill.

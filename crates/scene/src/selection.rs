@@ -17,7 +17,7 @@
 //! selection's label bounds both read a bound text element's own stored `x`/`y` instead of
 //! porting `LinearElementEditor.getBoundTextElementPosition`'s recomputed position for an
 //! arrow label; this only disagrees with Excalidraw once a multi-point arrow's label has
-//! drifted from that stored position, which is outside this task's scope.
+//! drifted from that stored position.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -25,7 +25,7 @@ use serde_json::Value;
 
 use crate::collision::{
     DEFAULT_COLLISION_THRESHOLD, DEFAULT_TRANSFORM_HANDLE_SPACING, hit_element_itself,
-    hit_threshold, is_point_in_element,
+    hit_threshold, is_point_in_element, stroke_width,
 };
 use crate::element::Element;
 use crate::file::SceneFile;
@@ -86,15 +86,6 @@ impl Selection {
 /// non-deleted element list).
 pub fn is_selectable(element: &Element) -> bool {
     !element.is_deleted() && !element.is_locked() && element.container_id().is_none()
-}
-
-/// `element.strokeWidth`; a `Raw` element without a numeric one reads as 0. Mirrors
-/// `collision::hit_threshold`'s own reading of the same field.
-fn stroke_width(element: &Element) -> f64 {
-    match element {
-        Element::Raw(v) => v.get("strokeWidth").and_then(Value::as_f64).unwrap_or(0.0),
-        _ => element.base().map_or(0.0, |b| b.stroke_width),
-    }
 }
 
 /// `selectGroupsForSelectedElements` without `editingGroupId`: every element sharing an
@@ -227,11 +218,10 @@ pub fn box_select(geometry: &mut GeometryCache, file: &SceneFile, rect: Bounds) 
     Selection::from_ids(result)
 }
 
-/// `hasBoundingBox`, generalized to the size of the whole current selection rather than a
-/// single-element array: the only call site (`hitElement`) always passes a length-1 array, so
-/// `elements.length > 1` never fires in the ported source; the controller ruling for this
-/// task applies that branch to the selection size instead, since that is the only way it can
-/// ever be true.
+/// `hasBoundingBox`, taking the size of the whole current selection directly rather than a
+/// single-element array: `hitElement` is the only caller, and it always wants the answer for
+/// the whole selection, so the "more than one element" branch checks the selection's size
+/// instead of a length-1 array that could never satisfy it.
 fn has_bounding_box(element: &Element, selected_count: usize) -> bool {
     if selected_count > 1 {
         return true;
