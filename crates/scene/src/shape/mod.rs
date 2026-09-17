@@ -12,6 +12,7 @@ use rough::RoughGenerator;
 use crate::element::{Element, ElementBase};
 
 pub use freedraw::freedraw_outline_points;
+pub(crate) use generic::{corner_radius, diamond_points};
 pub use options::generate_rough_options;
 
 /// One segment of a freedraw stroke outline, in element-local coordinates. Mirrors the SVG

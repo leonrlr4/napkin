@@ -14,9 +14,6 @@ use crate::json::Slot;
 /// `ROUGHNESS.cartoonist` (`packages/common/src/constants.ts`).
 const ROUGHNESS_CARTOONIST: f64 = 2.0;
 
-/// `LINE_CONFIRM_THRESHOLD` (px, `packages/common/src/constants.ts`).
-const LINE_CONFIRM_THRESHOLD: f64 = 8.0;
-
 /// `getDashArrayDashed`.
 fn dash_array_dashed(stroke_width: f64) -> Vec<f64> {
     vec![8.0, 8.0 + stroke_width]
@@ -39,15 +36,10 @@ pub(crate) fn dark(color: &str, dark_mode: bool) -> String {
     }
 }
 
-/// `isPathALoop`, with `zoomValue` fixed at 1 (napkin has no zoom-aware caller for this).
+/// `isPathALoop`, with `zoomValue` fixed at 1: rendering has no zoom-aware caller for this
+/// (`collision::is_path_a_loop` is the zoom-aware version hit testing uses).
 pub(crate) fn is_path_a_loop(points: &[[f64; 2]]) -> bool {
-    if points.len() < 3 {
-        return false;
-    }
-    let first = points[0];
-    let last = points[points.len() - 1];
-    let distance = rough::js::hypot(last[0] - first[0], last[1] - first[1]);
-    distance <= LINE_CONFIRM_THRESHOLD
+    crate::collision::is_path_a_loop(points, 1.0)
 }
 
 /// `canChangeRoundness`.

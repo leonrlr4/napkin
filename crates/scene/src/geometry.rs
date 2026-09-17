@@ -4,9 +4,11 @@
 //! `packages/common/src/points.ts`'s `getSizeFromPoints`, at the pinned commit).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rough::{Op, OpSetType};
 
+use crate::collision::Segment;
 use crate::element::Element;
 use crate::shape::{ElementShape, ShapeContext, generate_element_shape};
 
@@ -309,14 +311,17 @@ pub fn element_bounds(element: &Element) -> Option<Bounds> {
 
 /// One [`GeometryCache`] entry: the `(version, versionNonce)` it was computed for, plus the
 /// lazily computed fields themselves. Each field is `None` until first requested, so a
-/// cache hit that only ever asks for `bounds` never pays for `absolute_coords`. A future
-/// collision shape (Task 2) is another field of this same shape.
+/// cache hit that only ever asks for `bounds` never pays for `absolute_coords`.
 #[derive(Default)]
-struct GeometryEntry {
+pub(crate) struct GeometryEntry {
     version: f64,
     version_nonce_bits: u64,
     absolute_coords: Option<Option<(Bounds, [f64; 2])>>,
     bounds: Option<Option<Bounds>>,
+    /// `collision::GeometryCache::linear_collision_shape`'s cache; lives here so it resets
+    /// on the same `(version, versionNonce)` change as every other field. `pub(crate)`:
+    /// `collision.rs` reads and fills it directly through [`GeometryCache::entry_for`].
+    pub(crate) linear_collision_shape: Option<Arc<[Segment]>>,
 }
 
 /// Per-element geometry keyed by `(id, version, versionNonce)`, one entry per id. Mirrors
@@ -330,8 +335,9 @@ pub struct GeometryCache {
 
 impl GeometryCache {
     /// The entry for `element`, reset to empty when its `(version, versionNonce)` no longer
-    /// matches what it was last computed for.
-    fn entry_for(&mut self, element: &Element) -> &mut GeometryEntry {
+    /// matches what it was last computed for. `pub(crate)`: `collision.rs`'s
+    /// `linear_collision_shape` reads and fills its own field of the same entry.
+    pub(crate) fn entry_for(&mut self, element: &Element) -> &mut GeometryEntry {
         let id = element.id().unwrap_or("").to_owned();
         let version = element.version();
         let version_nonce_bits = element.version_nonce().to_bits();
