@@ -13,6 +13,7 @@ mod laser_pointer;
 pub mod new_element;
 mod perfect_freehand;
 pub mod sample;
+pub mod selection;
 pub mod shape;
 
 pub use crate::element::{Element, Placement};
