@@ -69,6 +69,21 @@ fn corpus_round_trips() {
 }
 
 #[test]
+fn every_corpus_element_has_a_placement() {
+    for (name, text) in corpus() {
+        let file = SceneFile::from_json_str(&text).expect("corpus loads");
+        for element in &file.elements {
+            assert!(
+                element.placement().is_some(),
+                "{name}: {} {:?} has no placement",
+                element.kind(),
+                element.id()
+            );
+        }
+    }
+}
+
+#[test]
 fn corpus_covers_spec_checklist() {
     let mut seen = BTreeSet::new();
     for (_, text) in corpus() {
