@@ -48,6 +48,50 @@ pub fn camera_at(t: f64, start: Camera, view_size: [f64; 2]) -> Option<Camera> {
     }
 }
 
+/// The drag phase's length, after the camera script (`DURATION_S`).
+pub const DRAG_S: f64 = 5.0;
+
+/// The circle `drag_pointer_at`'s grab point follows around `start`, in scene units.
+const DRAG_RADIUS: f64 = 200.0;
+
+/// The scene point the dragged element's grab point follows `t` seconds into the drag phase:
+/// one revolution around `start` with a 200-unit radius. `None` once `t >= DRAG_S`.
+///
+/// Uses the same `start + radius * (cos θ - 1, sin θ)` form as `camera_at`'s pan phase, so at
+/// t = 0 the point is exactly `start` and the drag ends back where it began.
+pub fn drag_pointer_at(t: f64, start: [f64; 2]) -> Option<[f64; 2]> {
+    if t >= DRAG_S {
+        return None;
+    }
+    let angle = 2.0 * std::f64::consts::PI * (t / DRAG_S);
+    Some([
+        start[0] + DRAG_RADIUS * (angle.cos() - 1.0),
+        start[1] + DRAG_RADIUS * angle.sin(),
+    ])
+}
+
+/// The element the drag phase moves: the last non-deleted rectangle, diamond or ellipse, and
+/// the center of its (unrotated) placement box. `None` when the scene has no such element.
+pub fn drag_target(file: &scene::SceneFile) -> Option<(usize, [f64; 2])> {
+    file.elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| {
+            !element.is_deleted() && matches!(element.kind(), "rectangle" | "diamond" | "ellipse")
+        })
+        .filter_map(|(index, element)| {
+            let placement = element.placement()?;
+            Some((
+                index,
+                [
+                    placement.x + placement.width / 2.0,
+                    placement.y + placement.height / 2.0,
+                ],
+            ))
+        })
+        .next_back()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +106,22 @@ mod tests {
         let zoom = camera_at(7.5, start, view).expect("zooming");
         assert!((0.5..=2.0).contains(&zoom.zoom));
         assert_eq!(camera_at(DURATION_S, start, view), None);
+    }
+
+    #[test]
+    fn drag_phase_circles_the_start_and_picks_the_last_shape() {
+        let start = [100.0, 50.0];
+        assert_eq!(drag_pointer_at(0.0, start), Some(start));
+        let quarter = drag_pointer_at(DRAG_S / 4.0, start).expect("dragging");
+        assert!(((quarter[0] - start[0]).powi(2) + (quarter[1] - start[1]).powi(2)).sqrt() > 100.0);
+        assert_eq!(drag_pointer_at(DRAG_S, start), None);
+
+        let file = scene::sample::file(vec![
+            scene::sample::generic("rectangle", "a", [0.0, 0.0, 10.0, 10.0]),
+            scene::sample::generic("ellipse", "b", [20.0, 0.0, 10.0, 20.0]),
+            scene::sample::linear("arrow", "c", [0.0, 0.0], &[[0.0, 0.0], [5.0, 5.0]]),
+        ]);
+        assert_eq!(drag_target(&file), Some((1, [25.0, 10.0])));
+        assert_eq!(drag_target(&scene::SceneFile::new()), None);
     }
 }

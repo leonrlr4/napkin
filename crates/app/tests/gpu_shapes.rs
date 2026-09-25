@@ -2,7 +2,7 @@ mod support;
 
 use app::camera::Camera;
 use app::render::gpu::{CanvasFrame, CanvasRenderer};
-use app::sample;
+use scene::sample;
 use serde_json::json;
 
 fn close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
@@ -131,7 +131,7 @@ fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
     // asking wgpu for a buffer past `max_buffer_size` and panicking (`support::gpu`'s device
     // panics on any uncaptured validation error). The view stays small so the sweep is fast;
     // the bug is in how capacity *grows*, not in how much is visible at once.
-    let (device, queue) = support::gpu();
+    let (_gpu, device, queue) = support::gpu();
     let mut renderer = CanvasRenderer::new(&device, &queue, support::FORMAT);
     let file = std::sync::Arc::new(app::fixture::generate(1, 1000));
     let max_buffer_size = device.limits().max_buffer_size;
@@ -149,6 +149,7 @@ fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
             size_px: [320, 240],
             pixels_per_point: 1.0,
             dark: false,
+            generation: 0,
         };
         let prepared = renderer.prepare(&device, &queue, &frame);
         queue.submit(prepared);
@@ -163,6 +164,35 @@ fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
         );
         assert!(stats.buffer_vertices_used <= stats.buffer_vertices_capacity);
     }
+}
+
+#[test]
+fn a_new_generation_forgets_cached_meshes() {
+    // Same id, version and versionNonce with different geometry: only the generation says the
+    // scene was replaced.
+    let at = |x: f64| {
+        sample::file(vec![sample::with(
+            sample::generic("rectangle", "r", [x, 20.0, 30.0, 30.0]),
+            json!({"roughness": 0, "backgroundColor": "#ffc9c9"}),
+        )])
+    };
+    let image = support::render_sequence(
+        vec![(at(10.0), 0), (at(60.0), 1)],
+        Camera::default(),
+        100,
+        80,
+        false,
+    );
+    assert!(
+        close(image.pixel(75, 35), [0xff, 0xc9, 0xc9], 2),
+        "{:?}",
+        image.pixel(75, 35)
+    );
+    assert!(
+        close(image.pixel(25, 35), [0xff, 0xff, 0xff], 0),
+        "{:?}",
+        image.pixel(25, 35)
+    );
 }
 
 #[test]

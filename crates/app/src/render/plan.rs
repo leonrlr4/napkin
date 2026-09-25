@@ -9,7 +9,7 @@ use scene::Element;
 use scene::shape::ElementShape;
 
 use crate::camera::SceneRect;
-use crate::render::cache::{MeshKey, SceneCache};
+use crate::render::cache::{MeshKey, SceneCache, ShapeKey};
 use crate::render::tessellate::local_center;
 
 /// Coarse-cull margin added to an element's rotated bounds on top of `8 * strokeWidth`, in
@@ -298,18 +298,19 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
         let is_raw = matches!(element, Element::Raw(_));
         let id = element.id().unwrap_or_default();
         let version_bits = element.version().to_bits();
+        let version_nonce_bits = element.version_nonce().to_bits();
         let is_placeholder = if is_raw {
             true
         } else {
+            let key = ShapeKey {
+                index,
+                id: id.to_owned(),
+                version_bits,
+                version_nonce_bits,
+                dark: view.dark,
+            };
             matches!(
-                *cache.shape(
-                    element,
-                    index,
-                    id,
-                    version_bits,
-                    view.dark,
-                    canvas_background
-                ),
+                *cache.shape(element, &key, canvas_background),
                 ElementShape::Placeholder
             )
         };
@@ -324,6 +325,7 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
             index,
             id: id.to_owned(),
             version_bits,
+            version_nonce_bits,
             dark: view.dark,
             alpha_bits: alpha.to_bits(),
             bucket: view.bucket,
@@ -402,7 +404,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::sample;
+    use scene::sample;
 
     fn view() -> View {
         View {

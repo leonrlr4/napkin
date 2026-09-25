@@ -12,9 +12,11 @@ use crate::render::buffers::Segment;
 use crate::render::tessellate::{Mesh, Style, tessellate, tolerance_for_bucket};
 
 /// Identifies one cached mesh: an element's tessellated appearance depends on its own data
-/// (`id` + `version_bits`, the bit pattern of its `f64` version so equal versions hash equal),
-/// dark mode, alpha (element opacity times frame opacity, as `f32::to_bits` since `f32` is not
-/// `Eq`/`Hash`) and the zoom bucket's tessellation tolerance.
+/// (`id` + `version_bits`, the bit pattern of its `f64` version so equal versions hash equal,
+/// plus `version_nonce_bits` since the scene editor can replace a scene wholesale between two
+/// elements that happen to share both), dark mode, alpha (element opacity times frame opacity,
+/// as `f32::to_bits` since `f32` is not `Eq`/`Hash`) and the zoom bucket's tessellation
+/// tolerance.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct MeshKey {
     /// The element's position in `SceneFile::elements`. Excalidraw renames a duplicate id when
@@ -23,6 +25,7 @@ pub struct MeshKey {
     pub index: usize,
     pub id: String,
     pub version_bits: u64,
+    pub version_nonce_bits: u64,
     pub dark: bool,
     pub alpha_bits: u32,
     pub bucket: i32,
@@ -38,11 +41,24 @@ pub struct CachedMesh {
 /// A shape depends on the element's data and dark mode only, not on opacity or zoom. `index`
 /// disambiguates a duplicate id exactly like [`MeshKey::index`].
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct ShapeKey {
-    index: usize,
-    id: String,
-    version_bits: u64,
-    dark: bool,
+pub(crate) struct ShapeKey {
+    pub(crate) index: usize,
+    pub(crate) id: String,
+    pub(crate) version_bits: u64,
+    pub(crate) version_nonce_bits: u64,
+    pub(crate) dark: bool,
+}
+
+impl From<&MeshKey> for ShapeKey {
+    fn from(key: &MeshKey) -> ShapeKey {
+        ShapeKey {
+            index: key.index,
+            id: key.id.clone(),
+            version_bits: key.version_bits,
+            version_nonce_bits: key.version_nonce_bits,
+            dark: key.dark,
+        }
+    }
 }
 
 struct MeshEntry {
@@ -100,23 +116,14 @@ impl SceneCache {
     pub(crate) fn shape(
         &mut self,
         element: &scene::Element,
-        index: usize,
-        id: &str,
-        version_bits: u64,
-        dark: bool,
+        key: &ShapeKey,
         canvas_background: &str,
     ) -> Arc<ElementShape> {
-        let key = ShapeKey {
-            index,
-            id: id.to_owned(),
-            version_bits,
-            dark,
-        };
         self.shapes
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| {
                 let ctx = ShapeContext {
-                    dark_mode: dark,
+                    dark_mode: key.dark,
                     canvas_background_color: canvas_background,
                 };
                 Arc::new(generate_element_shape(element, &ctx))
@@ -130,14 +137,7 @@ impl SceneCache {
         key: &MeshKey,
         canvas_background: &str,
     ) -> &mut CachedMesh {
-        let shape = self.shape(
-            element,
-            key.index,
-            &key.id,
-            key.version_bits,
-            key.dark,
-            canvas_background,
-        );
+        let shape = self.shape(element, &ShapeKey::from(key), canvas_background);
         let frame = self.frame;
         let entry = self.meshes.entry(key.clone()).or_insert_with(|| {
             let style = Style {
@@ -187,7 +187,7 @@ impl Default for SceneCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sample;
+    use scene::sample;
 
     fn rect() -> scene::Element {
         scene::Element::from_value(sample::generic("rectangle", "a", [0.0, 0.0, 10.0, 10.0]))
@@ -198,6 +198,7 @@ mod tests {
             index,
             id: element.id().unwrap_or_default().to_owned(),
             version_bits: element.version().to_bits(),
+            version_nonce_bits: element.version_nonce().to_bits(),
             dark: false,
             alpha_bits: 1.0f32.to_bits(),
             bucket: 0,
@@ -299,6 +300,25 @@ mod tests {
         cache.clear();
         assert_eq!(cache.mesh_count(), 0);
         assert!(cache.shapes.is_empty());
+    }
+
+    #[test]
+    fn a_different_version_nonce_is_a_different_mesh() {
+        let mut cache = SceneCache::new();
+        let element = rect();
+        let other = scene::Element::from_value(sample::with(
+            sample::generic("rectangle", "a", [0.0, 0.0, 20.0, 10.0]),
+            serde_json::json!({"versionNonce": 99}),
+        ));
+        let first = cache
+            .mesh(&element, &key(&element, 0), "#ffffff")
+            .mesh
+            .clone();
+        let second = cache.mesh(&other, &key(&other, 0), "#ffffff").mesh.clone();
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "same id and version, different nonce"
+        );
     }
 
     #[test]

@@ -19,7 +19,23 @@ impl Image {
     }
 }
 
-pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
+/// Serializes GPU setup and teardown across every test in this binary. Both the Vulkan loader
+/// (`vkEnumerateInstanceExtensionProperties`, entered while creating a `wgpu::Instance`) and
+/// wgpu-hal's EGL context teardown crash when several test threads create or drop GPU instances
+/// at once, so GPU tests run one at a time instead of in parallel.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquires the GPU lock and returns a fresh instance, adapter and device. Bind the guard first
+/// so it outlives the device and queue, e.g. `let (_gpu, device, queue) = support::gpu();`:
+/// binding it to `_` drops it immediately and defeats the lock.
+pub fn gpu() -> (
+    std::sync::MutexGuard<'static, ()>,
+    wgpu::Device,
+    wgpu::Queue,
+) {
+    let guard = GPU
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let instance = wgpu::Instance::default();
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
@@ -30,7 +46,7 @@ pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
     device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
         panic!("wgpu validation error: {error}")
     }));
-    (device, queue)
+    (guard, device, queue)
 }
 
 /// Renders `file` at pixels-per-point 1 over its own view background.
@@ -54,18 +70,64 @@ pub fn render_with_ppp(
     pixels_per_point: f32,
     dark: bool,
 ) -> Image {
-    let (device, queue) = gpu();
-    let background = app::render::color::render_color(file.view_background_color(), dark);
-    let mut renderer = CanvasRenderer::new(&device, &queue, FORMAT);
-    let frame = CanvasFrame {
-        file: std::sync::Arc::new(file),
+    render_sequence_with_ppp(
+        vec![(file, 0)],
         camera,
-        size_px: [width, height],
+        width,
+        height,
         pixels_per_point,
         dark,
-    };
-    let prepared = renderer.prepare(&device, &queue, &frame);
-    queue.submit(prepared);
+    )
+}
+
+/// Runs the same `CanvasRenderer` through `prepare` for each `(SceneFile, generation)` in
+/// order, at pixels-per-point 1, and reads back only the last one: exercises a generation
+/// change (or the lack of one) exactly as a live renderer sees it across frames, instead of the
+/// fresh renderer every other `render*` helper here starts from.
+///
+/// Only `gpu_shapes.rs` currently calls this directly (the other test binaries compile this
+/// module too, so an unused `pub fn` here would warn in each of them).
+#[allow(dead_code)]
+pub fn render_sequence(
+    files: Vec<(scene::SceneFile, u64)>,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    dark: bool,
+) -> Image {
+    render_sequence_with_ppp(files, camera, width, height, 1.0, dark)
+}
+
+/// Like [`render_sequence`], but at an explicit `pixels_per_point`.
+pub fn render_sequence_with_ppp(
+    files: Vec<(scene::SceneFile, u64)>,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    pixels_per_point: f32,
+    dark: bool,
+) -> Image {
+    let (_gpu, device, queue) = gpu();
+    let last = files
+        .last()
+        .expect("at least one file")
+        .0
+        .view_background_color()
+        .to_owned();
+    let background = app::render::color::render_color(&last, dark);
+    let mut renderer = CanvasRenderer::new(&device, &queue, FORMAT);
+    for (file, generation) in files {
+        let frame = CanvasFrame {
+            file: std::sync::Arc::new(file),
+            camera,
+            size_px: [width, height],
+            pixels_per_point,
+            dark,
+            generation,
+        };
+        let prepared = renderer.prepare(&device, &queue, &frame);
+        queue.submit(prepared);
+    }
 
     let size = wgpu::Extent3d {
         width,

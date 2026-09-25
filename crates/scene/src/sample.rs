@@ -1,5 +1,5 @@
-//! Complete element JSON for tests and the performance fixture: enough keys that
-//! [`scene::Element::from_value`] loads a typed element, not [`scene::Element::Raw`].
+//! Complete element JSON for tests and fixtures: enough keys that
+//! [`crate::Element::from_value`] loads a typed element, not [`crate::Element::Raw`].
 
 use serde_json::{Value, json};
 
@@ -102,20 +102,20 @@ pub fn with(value: Value, overrides: Value) -> Value {
     value
 }
 
-/// A scene file holding `elements`, parsed the same way [`scene::SceneFile::from_json_str`]
+/// A scene file holding `elements`, parsed the same way [`crate::SceneFile::from_json_str`]
 /// would.
-pub fn file(elements: Vec<Value>) -> scene::SceneFile {
-    let mut file = scene::SceneFile::new();
+pub fn file(elements: Vec<Value>) -> crate::SceneFile {
+    let mut file = crate::SceneFile::new();
     file.elements = elements
         .into_iter()
-        .map(scene::Element::from_value)
+        .map(crate::Element::from_value)
         .collect();
     file
 }
 
 #[cfg(test)]
 mod tests {
-    use scene::Element;
+    use crate::Element;
 
     use super::*;
 

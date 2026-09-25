@@ -46,6 +46,19 @@ pub fn math_round(x: f64) -> f64 {
     if x - floor >= 0.5 { floor + 1.0 } else { floor }
 }
 
+/// `Math.sign`: `NaN` propagates, `0`/`-0` stay themselves (their own sign, not `1.0`), every
+/// other value collapses to `±1.0`. Unlike `f64::signum`, which maps `0.0` to `1.0` and
+/// `-0.0` to `-1.0`.
+pub fn sign(x: f64) -> f64 {
+    if x.is_nan() || x == 0.0 {
+        x
+    } else if x > 0.0 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
 /// `Math.atan`, ported from V8's `atan` (`src/base/ieee754.cc`, itself adapted from
 /// fdlibm), V8 14.6.202.34 — the version node 26.7.0 (`process.versions.v8`) embeds, and
 /// the one the baseline generator's node runs. Used by [`atan2`] (`x == 1.0`, and every
@@ -353,6 +366,15 @@ mod tests {
         assert_eq!(math_round(-2.5), -2.0);
         assert_eq!(math_round(2.5), 3.0);
         assert_eq!(math_round(0.49999999999999994), 0.0);
+    }
+
+    #[test]
+    fn sign_keeps_zero_sign_and_propagates_nan() {
+        assert_eq!(sign(5.0), 1.0);
+        assert_eq!(sign(-5.0), -1.0);
+        assert!(sign(0.0).is_sign_positive() && sign(0.0) == 0.0);
+        assert!(sign(-0.0).is_sign_negative() && sign(-0.0) == 0.0);
+        assert!(sign(f64::NAN).is_nan());
     }
 
     #[test]

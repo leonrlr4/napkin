@@ -58,67 +58,71 @@ fn all_zero_integer() -> String {
 
 // --- packages/fractional-indexing/src/index.ts ---
 
-/// `midpoint`. `a` may be empty; `b` is `None` or non-empty (checked by callers). Recurses
-/// once per digit `a` and `b` share as a common prefix (the `n > 0` branch below builds
-/// that prefix and recurses on the rest), so its stack depth grows with the length of that
-/// shared run: two indices that agree on a very long run of trailing digits (a pathological
-/// `index`, not one this module generates) would recurse that deep and could overflow the
-/// stack.
+/// `midpoint`. `a` may be empty; `b` is `None` or non-empty (checked by callers). The source
+/// recurses once per digit consumed, whether that is a shared prefix of `a` and `b` or (with
+/// `b` exhausted to `None`) a single leading digit of `a` peeled off one at a time; either way
+/// the recursion is only ever a prefix prepended to a shorter subproblem's result, so this
+/// builds the same prefix in a loop instead, keeping the same behavior without growing the
+/// stack for a pathological `index` whose digits agree with its neighbor (or repeat the
+/// highest digit) for a very long run.
 fn midpoint(a: &str, b: Option<&str>) -> Result<String, IndexError> {
-    if let Some(b) = b
-        && utf16_cmp(a, b) != Ordering::Less
-    {
-        return Err(err(format!("{a} >= {b}")));
-    }
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_nonempty = b.filter(|b| !b.is_empty());
-    if a_chars.last() == Some(&ZERO) || b_nonempty.is_some_and(|b| b.ends_with(ZERO)) {
-        return Err(err("trailing zero"));
-    }
-    if let Some(b) = b_nonempty {
-        let b_chars: Vec<char> = b.chars().collect();
-        let mut n = 0usize;
-        while b_chars.get(n).copied() == Some(a_chars.get(n).copied().unwrap_or(ZERO)) {
-            n += 1;
+    let mut prefix = String::new();
+    let mut a = a;
+    let mut b = b;
+
+    loop {
+        if let Some(b) = b
+            && utf16_cmp(a, b) != Ordering::Less
+        {
+            return Err(err(format!("{a} >= {b}")));
         }
-        if n > 0 {
-            let prefix: String = b_chars[..n].iter().collect();
-            let a_rest: String = a_chars.get(n..).unwrap_or(&[]).iter().collect();
-            let b_rest: String = b_chars[n..].iter().collect();
-            return Ok(prefix + &midpoint(&a_rest, Some(&b_rest))?);
+        let b_nonempty = b.filter(|b| !b.is_empty());
+        if a.ends_with(ZERO) || b_nonempty.is_some_and(|b| b.ends_with(ZERO)) {
+            return Err(err("trailing zero"));
         }
-    }
-    let digit_a: i64 = if a.is_empty() {
-        0
-    } else {
-        index_of_digit(a_chars[0])
-    };
-    let digit_b: i64 = match b {
-        Some(b) => match b.chars().next() {
+
+        if let Some(b_str) = b_nonempty {
+            let a_bytes = a.as_bytes();
+            let b_bytes = b_str.as_bytes();
+            let mut n = 0usize;
+            while n < b_bytes.len() && b_bytes[n] == a_bytes.get(n).copied().unwrap_or(ZERO as u8) {
+                n += 1;
+            }
+            if n > 0 {
+                prefix.push_str(&b_str[..n]);
+                a = a.get(n..).unwrap_or("");
+                b = Some(&b_str[n..]);
+                continue;
+            }
+        }
+
+        let digit_a: i64 = match a.chars().next() {
             Some(c) => index_of_digit(c),
-            None => -1,
-        },
-        None => DIGITS.chars().count() as i64,
-    };
-    if digit_b - digit_a > 1 {
-        let mid_digit = math_round(0.5 * (digit_a as f64 + digit_b as f64)) as i64;
-        return Ok(nth_digit(mid_digit).to_string());
+            None => 0,
+        };
+        let digit_b: i64 = match b {
+            Some(b) => match b.chars().next() {
+                Some(c) => index_of_digit(c),
+                None => -1,
+            },
+            None => DIGITS.chars().count() as i64,
+        };
+        if digit_b - digit_a > 1 {
+            let mid_digit = math_round(0.5 * (digit_a as f64 + digit_b as f64)) as i64;
+            prefix.push(nth_digit(mid_digit));
+            return Ok(prefix);
+        }
+        if let Some(b_str) = b_nonempty
+            && b_str.chars().count() > 1
+        {
+            prefix.push(b_str.chars().next().expect("non-empty"));
+            return Ok(prefix);
+        }
+
+        prefix.push(nth_digit(digit_a));
+        a = a.get(1..).unwrap_or("");
+        b = None;
     }
-    if let Some(b) = b_nonempty
-        && b.chars().count() > 1
-    {
-        return Ok(b.chars().next().expect("non-empty").to_string());
-    }
-    let rest = midpoint(
-        a_chars
-            .get(1..)
-            .unwrap_or(&[])
-            .iter()
-            .collect::<String>()
-            .as_str(),
-        None,
-    )?;
-    Ok(format!("{}{rest}", nth_digit(digit_a)))
 }
 
 fn index_of_digit(c: char) -> i64 {
@@ -585,19 +589,77 @@ pub fn sync_moved_indices(elements: &mut [Element], moved: &HashSet<String>, env
     }
 }
 
-/// `syncInvalidIndices`. Unlike `syncMovedIndices`, the source has no `try`/`catch` here:
-/// a `generateIndices` failure is a bug reachable only from already-invalid data, and JS
-/// lets it propagate as an uncaught exception, so this panics rather than returning
-/// `Result` (napkin's `sync_invalid_indices` has no error case in its public signature).
-/// `generate_indices` fails only when a group's lower-bound index is not strictly less than
-/// its upper-bound index (`midpoint`'s `>=` check, propagated through
+/// Reassigns every element's `index` in array order, spread evenly with
+/// `generate_n_keys_between(None, None, elements.len())`. napkin's fallback for element data
+/// on which the JS algorithm (`sync_invalid_indices`'s `generateIndices` call) would throw:
+/// unlike `syncMovedIndices`, `syncInvalidIndices` has no `try`/`catch` in the source and lets
+/// that exception propagate uncaught, but `sync_invalid_indices` has no error case in its
+/// public signature, so it recovers here instead. Only elements whose `index` actually changes
+/// get a new `version`.
+fn reassign_all_indices(elements: &mut [Element], env: &mut impl Env) {
+    let keys = generate_n_keys_between(None, None, elements.len())
+        .expect("generate_n_keys_between(None, None, n) never compares two generated keys");
+    for (element, key) in elements.iter_mut().zip(keys) {
+        if element.index() != Some(key.as_str()) {
+            element.set_index(key);
+            bump_version(element, env);
+        }
+    }
+}
+
+/// `syncInvalidIndices`. `generate_indices` fails only when a group's lower-bound index is
+/// not strictly less than its upper-bound index (`midpoint`'s `>=` check, propagated through
 /// `generate_n_keys_between`); `get_invalid_indices_groups` always picks that pair from the
 /// valid indices surrounding a run of invalid ones, which keeps them correctly ordered for
 /// any input seen so far, but two elements at a group's boundary sharing the exact same
-/// `index` string would trip this.
+/// `index` string would trip this. [`reassign_all_indices`] is napkin's recovery for that
+/// case, in place of the uncaught exception the JS source would raise.
 pub fn sync_invalid_indices(elements: &mut [Element], env: &mut impl Env) {
     let groups = get_invalid_indices_groups(elements);
-    let updates =
-        generate_indices(elements, groups).expect("indices groups from valid element data");
-    apply_updates(elements, updates, env);
+    match generate_indices(elements, groups) {
+        Ok(updates) => apply_updates(elements, updates, env),
+        Err(_) => reassign_all_indices(elements, env),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedEnv;
+
+    impl Env for FixedEnv {
+        fn fill_random(&mut self, bytes: &mut [u8]) {
+            bytes.fill(3);
+        }
+
+        fn now_ms(&mut self) -> f64 {
+            1.0
+        }
+    }
+
+    #[test]
+    fn midpoint_handles_long_digit_runs() {
+        // 200 000 trailing `z` digits: one stack frame per digit would overflow the 2 MiB
+        // test-thread stack.
+        let long = format!("a1{}", "z".repeat(200_000));
+        let key = generate_key_between(Some(&long), Some("a2")).expect("key between");
+        assert!(key.as_str() > long.as_str() && key.as_str() < "a2");
+    }
+
+    #[test]
+    fn reassigning_all_indices_orders_every_element() {
+        let mut elements: Vec<Element> = ["c", "b", "a"]
+            .iter()
+            .map(|id| {
+                Element::from_value(crate::sample::with(
+                    crate::sample::generic("rectangle", id, [0.0, 0.0, 1.0, 1.0]),
+                    serde_json::json!({"index": "zz"}),
+                ))
+            })
+            .collect();
+        reassign_all_indices(&mut elements, &mut FixedEnv);
+        let indices: Vec<&str> = elements.iter().map(|e| e.index().unwrap()).collect();
+        assert!(indices.windows(2).all(|w| w[0] < w[1]), "{indices:?}");
+    }
 }

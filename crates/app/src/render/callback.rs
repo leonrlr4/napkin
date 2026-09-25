@@ -38,7 +38,7 @@ impl egui_wgpu::CallbackTrait for CanvasCallback {
 }
 
 /// Inserts a [`CanvasRenderer`] into eframe's callback resources so [`CanvasCallback`] can find
-/// it each frame; called once from `Viewer::new` when `cc.wgpu_render_state` is `Some`.
+/// it each frame; called once from `NapkinApp::new` when `cc.wgpu_render_state` is `Some`.
 pub fn install(render_state: &egui_wgpu::RenderState) {
     let renderer = CanvasRenderer::new(
         &render_state.device,

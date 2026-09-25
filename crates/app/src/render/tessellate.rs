@@ -343,7 +343,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::sample;
+    use scene::sample;
 
     /// `FillTessellator::tessellate_path` returns `Err(UnsupportedParamater::ToleranceIsNaN)`
     /// for a NaN tolerance without touching the path at all (verified against lyon_tessellation

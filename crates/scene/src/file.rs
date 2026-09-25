@@ -81,12 +81,12 @@ impl SceneFile {
             return Err(LoadError::NotExcalidraw);
         }
         let elements = match root.get_mut("elements").map(Value::take) {
-            None => Vec::new(),
+            None | Some(Value::Null) => Vec::new(),
             Some(Value::Array(items)) => items.into_iter().map(Element::from_value).collect(),
             Some(_) => return Err(LoadError::ElementsNotArray),
         };
         let app_state = match root.get_mut("appState").map(Value::take) {
-            None => Map::new(),
+            None | Some(Value::Null) => Map::new(),
             Some(Value::Object(map)) => map,
             Some(_) => return Err(LoadError::AppStateNotObject),
         };
@@ -99,13 +99,26 @@ impl SceneFile {
 
     /// Pretty-printed like Excalidraw's `JSON.stringify(data, null, 2)`.
     pub fn to_json_string(&self) -> String {
+        self.to_json_string_with_view(None)
+    }
+
+    /// Like [`to_json_string`](Self::to_json_string), with `appState.napkin` set to `view` in
+    /// the written text only; `self.app_state` is untouched.
+    pub fn to_json_string_with_view(&self, view: Option<NapkinView>) -> String {
         let mut root = self.root.clone();
         let elements = Value::Array(self.elements.iter().map(Element::to_value).collect());
         if root.contains_key("elements") || !self.elements.is_empty() {
             root.insert("elements".into(), elements);
         }
-        if root.contains_key("appState") || !self.app_state.is_empty() {
-            root.insert("appState".into(), Value::Object(self.app_state.clone()));
+        let mut app_state = self.app_state.clone();
+        if let Some(view) = view {
+            app_state.insert(
+                "napkin".into(),
+                json!({ "scrollX": view.scroll_x, "scrollY": view.scroll_y, "zoom": view.zoom }),
+            );
+        }
+        if root.contains_key("appState") || !app_state.is_empty() {
+            root.insert("appState".into(), Value::Object(app_state));
         }
         let mut value = Value::Object(root);
         normalize_numbers(&mut value);
@@ -178,6 +191,43 @@ mod tests {
         file.set_napkin_view(view);
         let reread = SceneFile::from_json_str(&file.to_json_string()).unwrap();
         assert_eq!(reread.napkin_view(), Some(view));
+    }
+
+    #[test]
+    fn null_elements_and_app_state_load_as_empty() {
+        let file =
+            SceneFile::from_json_str(r#"{"type":"excalidraw","elements":null,"appState":null}"#)
+                .unwrap();
+        assert!(file.elements.is_empty() && file.app_state.is_empty());
+        let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
+        assert!(
+            semantic_eq(
+                &written,
+                &json!({"type": "excalidraw", "elements": [], "appState": {}})
+            ),
+            "{written}"
+        );
+        assert!(matches!(
+            SceneFile::from_json_str(r#"{"type":"excalidraw","appState":3}"#),
+            Err(LoadError::AppStateNotObject)
+        ));
+    }
+
+    #[test]
+    fn writing_with_a_view_leaves_the_file_untouched() {
+        let file = SceneFile::new();
+        let view = NapkinView {
+            scroll_x: 1.0,
+            scroll_y: 2.0,
+            zoom: 1.5,
+        };
+        let text = file.to_json_string_with_view(Some(view));
+        assert_eq!(
+            SceneFile::from_json_str(&text).unwrap().napkin_view(),
+            Some(view)
+        );
+        assert_eq!(file.napkin_view(), None);
+        assert_eq!(file.to_json_string_with_view(None), file.to_json_string());
     }
 
     #[test]

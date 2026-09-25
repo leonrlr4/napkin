@@ -2,7 +2,7 @@ mod support;
 
 use app::camera::Camera;
 use app::render::gpu::{CanvasFrame, CanvasRenderer};
-use app::sample;
+use scene::sample;
 use serde_json::json;
 
 fn white_pixels(image: &support::Image, x0: u32, x1: u32, y0: u32, y1: u32) -> usize {
@@ -29,7 +29,7 @@ fn rotated(id: &str, rect: [f64; 4], text: &str) -> serde_json::Value {
 /// Runs `CanvasRenderer::prepare` (and submits what it returns) without a paint pass, for tests
 /// that only care whether `prepare` panics.
 fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixels_per_point: f32) {
-    let (device, queue) = support::gpu();
+    let (_gpu, device, queue) = support::gpu();
     let mut renderer = CanvasRenderer::new(&device, &queue, support::FORMAT);
     let frame = CanvasFrame {
         file: std::sync::Arc::new(file),
@@ -37,6 +37,7 @@ fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixel
         size_px,
         pixels_per_point,
         dark: false,
+        generation: 0,
     };
     let prepared = renderer.prepare(&device, &queue, &frame);
     queue.submit(prepared);

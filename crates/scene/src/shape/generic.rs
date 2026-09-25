@@ -28,8 +28,9 @@ const ROUNDNESS_PROPORTIONAL_RADIUS: f64 = 2.0;
 const ROUNDNESS_ADAPTIVE_RADIUS: f64 = 3.0;
 
 /// `getCornerRadius`. `roundness?.type` and `roundness?.value` treat absent and `null`
-/// alike, matched here by `Slot::value()`.
-fn corner_radius(x: f64, roundness: &Slot<Roundness>) -> f64 {
+/// alike, matched here by `Slot::value()`. `pub(crate)`: `collision.rs`'s rectanguloid and
+/// diamond outline/inside tests reuse this rather than duplicating the roundness rules.
+pub(crate) fn corner_radius(x: f64, roundness: &Slot<Roundness>) -> f64 {
     let Some(r) = roundness.value() else {
         return 0.0;
     };
@@ -50,8 +51,9 @@ fn corner_radius(x: f64, roundness: &Slot<Roundness>) -> f64 {
 
 /// `getDiamondPoints`: `topX, topY, rightX, rightY, bottomX, bottomY, leftX, leftY`.
 /// `Math.floor` and `f64::floor` agree for every finite input, so no `rough::js` helper
-/// is needed here (unlike `Math.round`).
-fn diamond_points(width: f64, height: f64) -> [f64; 8] {
+/// is needed here (unlike `Math.round`). `pub(crate)`: `collision.rs`'s diamond distance and
+/// inside tests reuse this rather than re-deriving the same floor/plus-one asymmetry.
+pub(crate) fn diamond_points(width: f64, height: f64) -> [f64; 8] {
     let top_x = (width / 2.0).floor() + 1.0;
     let top_y = 0.0;
     let right_x = width;
