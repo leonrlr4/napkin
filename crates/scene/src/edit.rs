@@ -12,11 +12,12 @@
 //!
 //! A dragged element's bound text moves with it whether or not the element is an arrow: napkin
 //! stores an arrow label's position rather than recomputing it from the arrow's path at render
-//! time (M3), so leaving it behind during a drag would strand it. Dragging never rebinds or
-//! unbinds an arrow's endpoints, and deletion's elbow-arrow-specific early unbinding in
-//! `deleteSelectedElements` is not ported: `fixBindingsAfterDeletion`, applied afterwards
-//! regardless, already clears every binding that pointed at a deleted element, and napkin never
-//! creates elbow arrows (M4a).
+//! time (M3), so leaving it behind during a drag would strand it. Dragging never rebinds an
+//! arrow's endpoints (only deleting and recreating a binding does that, M5); it does unbind
+//! them, the same way `dragSelectedElements` does. Deletion's elbow-arrow-specific early
+//! unbinding in `deleteSelectedElements` is not ported: `fixBindingsAfterDeletion`, applied
+//! afterwards regardless, already clears every binding that pointed at a deleted element, and
+//! napkin never creates elbow arrows (M4a).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -30,6 +31,11 @@ use crate::selection::Selection;
 
 /// `SHIFT_LOCKING_ANGLE` (`packages/common/src/constants.ts`).
 const SHIFT_LOCKING_ANGLE: f64 = std::f64::consts::PI / 12.0;
+
+/// `DRAGGING_THRESHOLD` (`packages/common/src/constants.ts`). Compared against a drag offset
+/// that is already in scene coordinates (as `dragSelectedElements` compares it), not screen
+/// pixels.
+const DRAGGING_THRESHOLD: f64 = 10.0;
 
 /// The Shift drag-axis lock App.tsx applies to `dragOffset` before calling
 /// `dragSelectedElements`: the axis that moved less is zeroed, so the drag runs along the
@@ -96,6 +102,17 @@ pub fn drag_targets(file: &SceneFile, selection: &Selection) -> Vec<usize> {
 
 /// `updateElementCoords`: sets every target's position to its `start` position plus `offset`.
 /// A `Raw` target whose `x`/`y` are not both numbers does not move and is not touched.
+///
+/// A bound arrow that is the only target does not move at all — and so keeps both its
+/// bindings — until `offset` clears [`DRAGGING_THRESHOLD`], the same guard
+/// `dragSelectedElements` applies before it will unbind a lone dragged arrow by accident. Once
+/// an arrow does move, whichever of its `startBinding`/`endBinding` names an element that is
+/// not itself among `targets` is cleared, the way `unbindBindingElement` clears it: the arrow's
+/// own binding field is set to `null`, and the arrow is dropped from that element's
+/// `boundElements` (unless the arrow's other end is bound to the very same element, in which
+/// case that `boundElements` record still covers the remaining end and stays). Every call
+/// recomputes from `start` and `targets`, so calling this repeatedly with the same arguments is
+/// idempotent, not cumulative.
 pub fn apply_drag(
     file: &mut SceneFile,
     start: &SceneFile,
@@ -103,7 +120,27 @@ pub fn apply_drag(
     offset: [f64; 2],
     env: &mut impl Env,
 ) {
+    let target_positions: HashSet<usize> = targets.iter().copied().collect();
+    let id_to_pos: HashMap<&str, usize> = start
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, element)| element.id().map(|id| (id, pos)))
+        .collect();
+    let past_threshold = offset[0].abs().max(offset[1].abs()) > DRAGGING_THRESHOLD;
+
     for &pos in targets {
+        let is_arrow = start.elements[pos].kind() == "arrow";
+        if is_arrow {
+            let has_start = start.elements[pos]
+                .binding_target(LinearEnd::Start)
+                .is_some();
+            let has_end = start.elements[pos].binding_target(LinearEnd::End).is_some();
+            if targets.len() <= 1 && !past_threshold && (has_start || has_end) {
+                continue;
+            }
+        }
+
         let Some(placement) = start.elements[pos].placement() else {
             continue;
         };
@@ -112,6 +149,57 @@ pub fn apply_drag(
         if file.elements[pos] != before {
             bump_version(&mut file.elements[pos], env);
         }
+
+        if !is_arrow {
+            continue;
+        }
+        for end in [LinearEnd::Start, LinearEnd::End] {
+            let Some(target_id) = start.elements[pos].binding_target(end) else {
+                continue;
+            };
+            let bound_to_a_target = id_to_pos
+                .get(target_id)
+                .is_some_and(|target_pos| target_positions.contains(target_pos));
+            if !bound_to_a_target {
+                unbind_arrow_end(file, &id_to_pos, pos, end, env);
+            }
+        }
+    }
+}
+
+/// `unbindBindingElement`: clears the arrow at `pos`'s binding for `end` and, unless the
+/// arrow's other end is bound to the same element (that `boundElements` record then still
+/// covers the remaining end), removes the arrow from that element's `boundElements`.
+fn unbind_arrow_end(
+    file: &mut SceneFile,
+    id_to_pos: &HashMap<&str, usize>,
+    pos: usize,
+    end: LinearEnd,
+    env: &mut impl Env,
+) {
+    let Some(target_id) = file.elements[pos].binding_target(end).map(str::to_owned) else {
+        return;
+    };
+    let opposite = match end {
+        LinearEnd::Start => LinearEnd::End,
+        LinearEnd::End => LinearEnd::Start,
+    };
+    let opposite_target = file.elements[pos].binding_target(opposite);
+    let shares_target = opposite_target == Some(target_id.as_str());
+
+    if !shares_target && let Some(&target_pos) = id_to_pos.get(target_id.as_str()) {
+        let arrow_id = file.elements[pos].id().expect("looked up by id").to_owned();
+        let before = file.elements[target_pos].clone();
+        file.elements[target_pos].remove_bound_element(&arrow_id);
+        if file.elements[target_pos] != before {
+            bump_version(&mut file.elements[target_pos], env);
+        }
+    }
+
+    let before = file.elements[pos].clone();
+    file.elements[pos].clear_binding(end);
+    if file.elements[pos] != before {
+        bump_version(&mut file.elements[pos], env);
     }
 }
 
@@ -564,6 +652,72 @@ mod tests {
         // Re-applying from the same start is idempotent, not cumulative.
         apply_drag(&mut file, &start, &targets, [10.0, 5.0], &mut TestEnv(0));
         assert_eq!(xy(&file, "r"), (10.0, 5.0));
+    }
+
+    /// An arrow bound at both ends to shapes it has no other relation to (no label, so
+    /// dragging the arrow alone makes it the sole drag target).
+    fn bound_arrow_scene() -> SceneFile {
+        sample::file(vec![
+            sample::with(
+                rect("r", [0.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::with(
+                rect("s", [300.0, 150.0, 50.0, 50.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 200.0], &[[0.0, 0.0], [100.0, 0.0]]),
+                json!({
+                    "startBinding": {"elementId": "r", "fixedPoint": [0.5, 1.0], "mode": "orbit"},
+                    "endBinding": {"elementId": "s", "fixedPoint": [0.0, 0.5], "mode": "orbit"}
+                }),
+            ),
+        ])
+    }
+
+    #[test]
+    fn lone_bound_arrow_unbinds_both_ends_past_the_dragging_threshold() {
+        let start = bound_arrow_scene();
+        let selection = Selection::from_ids(["a"]);
+        let targets = drag_targets(&start, &selection);
+        assert_eq!(targets, vec![2]);
+        let mut file = start.clone();
+        apply_drag(&mut file, &start, &targets, [11.0, 0.0], &mut TestEnv(0));
+        assert_eq!(xy(&file, "a"), (11.0, 200.0));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), None);
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::End), None);
+        assert_eq!(get(&file, "r").bound_elements(), vec![]);
+        assert_eq!(get(&file, "s").bound_elements(), vec![]);
+    }
+
+    #[test]
+    fn dragging_an_arrow_with_its_start_shape_keeps_only_that_binding() {
+        let start = bound_arrow_scene();
+        let selection = Selection::from_ids(["r", "a"]);
+        let targets = drag_targets(&start, &selection);
+        assert_eq!(targets, vec![0, 2]);
+        let mut file = start.clone();
+        // Under the dragging threshold: with more than one target, the threshold guard does
+        // not apply at all (matches `dragSelectedElements`'s `elementsToUpdate.size > 1`).
+        apply_drag(&mut file, &start, &targets, [4.0, 0.0], &mut TestEnv(0));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::End), None);
+        assert_eq!(get(&file, "r").bound_elements(), vec![("a", "arrow")]);
+        assert_eq!(get(&file, "s").bound_elements(), vec![]);
+    }
+
+    #[test]
+    fn lone_bound_arrow_stays_put_under_the_dragging_threshold() {
+        let start = bound_arrow_scene();
+        let selection = Selection::from_ids(["a"]);
+        let targets = drag_targets(&start, &selection);
+        let mut file = start.clone();
+        apply_drag(&mut file, &start, &targets, [5.0, 5.0], &mut TestEnv(0));
+        assert_eq!(xy(&file, "a"), xy(&start, "a"));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::End), Some("s"));
+        assert_eq!(get(&file, "a").version(), get(&start, "a").version());
     }
 
     #[test]
