@@ -284,17 +284,14 @@ pub fn resize_offset(
     rotate_point(offset, [0.0, 0.0], angle)
 }
 
-/// JS `Math.sign`, except `0`/`-0`/`NaN` all map to `0.0` (the only callers, the aspect-ratio
-/// branches of [`next_single_width_height`] and `resize_elements`, only ever multiply the
-/// result by another factor).
-fn js_sign(x: f64) -> f64 {
-    if x > 0.0 {
-        1.0
-    } else if x < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
+/// Whether every value is finite: Excalidraw's `Number.isFinite(newOrigin.x) &&
+/// Number.isFinite(newOrigin.y)` guard in `resizeElements.ts`, generalized here to every
+/// computed x, y, width, height, point coordinate and font size a resize writes, since a
+/// zero-width or zero-height bound (dividing by `bounds_width`/`bounds_height` in
+/// [`next_single_width_height`], or by a container's `base.width` in [`font_size_for_width`])
+/// can produce `±Infinity` or `NaN` that survives the plain `== 0.0` checks below.
+fn all_finite(values: &[f64]) -> bool {
+    values.iter().all(|v| v.is_finite())
 }
 
 /// `normalizeRadians`.
@@ -381,8 +378,8 @@ fn next_single_width_height(
             next_width *= height_ratio;
         } else {
             let ratio = width_ratio.max(height_ratio);
-            next_width = orig_width * ratio * js_sign(next_width);
-            next_height = orig_height * ratio * js_sign(next_height);
+            next_width = orig_width * ratio * rough::js::sign(next_width);
+            next_height = orig_height * ratio * rough::js::sign(next_height);
         }
     }
 
@@ -590,7 +587,7 @@ pub fn resize_element(
         pointer,
         options,
     );
-    if next_width == 0.0 || next_height == 0.0 {
+    if next_width == 0.0 || next_height == 0.0 || !all_finite(&[next_width, next_height]) {
         return false;
     }
 
@@ -612,6 +609,9 @@ pub fn resize_element(
             false,
             options.from_center,
         );
+        if !all_finite(&[metrics_width, font_size, new_origin[0], new_origin[1]]) {
+            return false;
+        }
 
         let mut next = orig.clone();
         let Element::Text(t) = &mut next else {
@@ -623,12 +623,14 @@ pub fn resize_element(
         t.base.x = new_origin[0];
         t.base.y = new_origin[1];
 
-        if next == *orig {
-            return false;
-        }
+        // Always write `next` back, even when it equals `orig` (the pointer returned to its
+        // grab point): see the generic branch's identical comment below.
+        let changed = next != *orig;
         file.elements[position] = next;
-        bump_version(&mut file.elements[position], env);
-        return true;
+        if changed {
+            bump_version(&mut file.elements[position], env);
+        }
+        return changed;
     }
 
     let is_line_or_arrow = matches!(orig, Element::Line(_) | Element::Arrow(_));
@@ -684,6 +686,14 @@ pub fn resize_element(
         new_origin[1] += next_height;
     }
 
+    if !all_finite(&[new_origin[0], new_origin[1]])
+        || rescaled_points
+            .as_ref()
+            .is_some_and(|points| !points.iter().all(|p| all_finite(p)))
+    {
+        return false;
+    }
+
     let mut next = orig.clone();
     match &mut next {
         Element::Rectangle(g) | Element::Diamond(g) | Element::Ellipse(g) => {
@@ -713,11 +723,14 @@ pub fn resize_element(
         Element::Text(_) | Element::Raw(_) => unreachable!("handled above"),
     }
 
-    let mut changed = false;
-    if next != *orig {
-        file.elements[position] = next;
+    // Always write `next` back, even when it equals `orig`: this call always recomputes from
+    // `start` (see the doc comment above), so an unchanged result here means the pointer
+    // returned to its grab point, and `file` must reset to that original size rather than keep
+    // whatever a previous call in the same gesture (a larger pointer offset) left behind.
+    let mut changed = next != *orig;
+    file.elements[position] = next;
+    if changed {
         bump_version(&mut file.elements[position], env);
-        changed = true;
     }
 
     if matches!(
@@ -825,13 +838,13 @@ pub fn resize_elements(
         let scale = ((pointer[0] - anchor[0]).abs() / width)
             .max((pointer[1] - anchor[1]).abs() / height)
             * resize_from_center_scale;
-        next_width = width * scale * js_sign(pointer[0] - anchor[0]);
-        next_height = height * scale * js_sign(pointer[1] - anchor[1]);
+        next_width = width * scale * rough::js::sign(pointer[0] - anchor[0]);
+        next_height = height * scale * rough::js::sign(pointer[1] - anchor[1]);
     }
 
     let (flip_x, flip_y) = multi_flip(handle, pointer, anchor);
 
-    if next_width == 0.0 || next_height == 0.0 {
+    if next_width == 0.0 || next_height == 0.0 || !all_finite(&[next_width, next_height]) {
         return false;
     }
 
@@ -936,6 +949,15 @@ pub fn resize_elements(
         } else {
             None
         };
+
+        if !all_finite(&[new_width, new_height, new_x, new_y])
+            || rescaled_points
+                .as_ref()
+                .is_some_and(|points| !points.iter().all(|p| all_finite(p)))
+            || text_font_size.is_some_and(|size| !size.is_finite())
+        {
+            return false;
+        }
 
         let mut next = orig.clone();
         match &mut next {
@@ -1357,6 +1379,42 @@ mod tests {
     }
 
     #[test]
+    fn resizing_back_to_the_grab_point_restores_the_original_size() {
+        use HandleKind::*;
+        let start = sample::file(vec![rect("r", [0.0, 0.0, 100.0, 50.0])]);
+        let mut file = start.clone();
+        let mut geometry = GeometryCache::default();
+        resize_element(
+            &mut geometry,
+            &mut file,
+            &start,
+            0,
+            Se,
+            [140.0, 90.0],
+            PLAIN,
+            &mut TestEnv,
+        );
+        assert_rect(rect_of(&file, 0), [0.0, 0.0, 140.0, 90.0]);
+
+        // Same gesture, dragged back to the original bottom-right corner: every call
+        // recomputes from `start`, so this should reset the element, not leave it at the
+        // previous call's larger size.
+        let changed = resize_element(
+            &mut geometry,
+            &mut file,
+            &start,
+            0,
+            Se,
+            [100.0, 50.0],
+            PLAIN,
+            &mut TestEnv,
+        );
+        assert!(!changed);
+        assert_rect(rect_of(&file, 0), [0.0, 0.0, 100.0, 50.0]);
+        assert_eq!(file.elements[0].version(), start.elements[0].version());
+    }
+
+    #[test]
     fn lines_scale_points_and_text_scales_font_size() {
         use HandleKind::*;
         let line = sample::with(
@@ -1384,6 +1442,57 @@ mod tests {
         // Below MIN_FONT_SIZE nothing changes.
         let tiny = resize(text(), &[0], Se, [2.0, 1.0], PLAIN);
         assert_eq!(tiny, sample::file(text()));
+    }
+
+    #[test]
+    fn zero_height_freedraw_and_line_resize_stay_finite() {
+        use HandleKind::*;
+        let freedraw = sample::with(
+            sample::freedraw("f", [0.0, 0.0], &[[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]]),
+            json!({"width": 100.0, "height": 0.0}),
+        );
+        let file = resize(vec![freedraw], &[0], S, [50.0, 20.0], PLAIN);
+        let v = file.elements[0].to_value();
+        for key in ["x", "y", "width", "height"] {
+            let n = v[key]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{key} not finite: {v}"));
+            assert!(n.is_finite(), "{key} = {n}");
+        }
+        for point in v["points"].as_array().expect("points") {
+            for coord in point.as_array().expect("point") {
+                let n = coord
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("point coord not finite: {v}"));
+                assert!(n.is_finite(), "point coord = {n}");
+            }
+        }
+
+        let line = sample::with(
+            sample::linear(
+                "line",
+                "l",
+                [0.0, 0.0],
+                &[[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]],
+            ),
+            json!({"roughness": 0, "roundness": null, "width": 100.0, "height": 0.0}),
+        );
+        let file = resize(vec![line], &[0], S, [50.0, 20.0], PLAIN);
+        let v = file.elements[0].to_value();
+        for key in ["x", "y", "width", "height"] {
+            let n = v[key]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{key} not finite: {v}"));
+            assert!(n.is_finite(), "{key} = {n}");
+        }
+        for point in v["points"].as_array().expect("points") {
+            for coord in point.as_array().expect("point") {
+                let n = coord
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("point coord not finite: {v}"));
+                assert!(n.is_finite(), "point coord = {n}");
+            }
+        }
     }
 
     #[test]

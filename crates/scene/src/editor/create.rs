@@ -711,17 +711,6 @@ fn points_close(a: [f64; 2], b: [f64; 2], tolerance: f64) -> bool {
     (a[0] - b[0]).abs() < tolerance && (a[1] - b[1]).abs() < tolerance
 }
 
-/// `Math.sign`: `0` (or `-0`) stays itself, `NaN` propagates, otherwise `±1`.
-fn js_sign(x: f64) -> f64 {
-    if x == 0.0 || x.is_nan() {
-        x
-    } else if x > 0.0 {
-        1.0
-    } else {
-        -1.0
-    }
-}
-
 /// `dragNewElement` plus the generic-element branch of `getPerfectElementSize` (a rectangle,
 /// diamond or ellipse never takes the line/arrow/freedraw branch, since those are never
 /// dragged through this function): `origin` to `pointer` as `(x, y, width, height)`, Shift
@@ -742,11 +731,11 @@ fn drag_new_shape_geometry(
         if (y - origin_y).abs() > (x - origin_x).abs() {
             let signed_width = if x < origin_x { -width } else { width };
             let new_width = height;
-            height *= js_sign(signed_width);
+            height *= rough::js::sign(signed_width);
             width = new_width;
         } else {
             let signed_height = if y < origin_y { -height } else { height };
-            height = width * js_sign(signed_height);
+            height = width * rough::js::sign(signed_height);
         }
         if height < 0.0 {
             height = -height;

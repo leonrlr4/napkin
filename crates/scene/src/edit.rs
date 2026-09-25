@@ -147,6 +147,10 @@ pub fn apply_drag(
 
     // Arrows the lone-target threshold guard holds still; a label whose container is one of
     // these is held still along with it, so it does not drift away from a stationary arrow.
+    // Bindings are read from `file`, not `start`: a prior call in the same drag gesture (from
+    // the same `start`, a larger offset that cleared the threshold) may already have unbound
+    // this arrow in `file`, and once unbound it is no longer held still, exactly as JS's guard
+    // reads the live element's `startBinding`/`endBinding`, not the drag's original snapshot.
     let suppressed_arrows: HashSet<usize> = targets
         .iter()
         .copied()
@@ -154,10 +158,10 @@ pub fn apply_drag(
             start.elements[pos].kind() == "arrow"
                 && primary_targets.len() <= 1
                 && !past_threshold
-                && (start.elements[pos]
+                && (file.elements[pos]
                     .binding_target(LinearEnd::Start)
                     .is_some()
-                    || start.elements[pos].binding_target(LinearEnd::End).is_some())
+                    || file.elements[pos].binding_target(LinearEnd::End).is_some())
         })
         .collect();
 
@@ -215,7 +219,16 @@ fn unbind_arrow_end(
     let opposite_target = file.elements[pos].binding_target(opposite);
     let shares_target = opposite_target == Some(target_id.as_str());
 
-    if !shares_target && let Some(&target_pos) = id_to_pos.get(target_id.as_str()) {
+    // `Raw`'s restricted mutation surface (spec §5.2) has no binding fields, so `clear_binding`
+    // below is a no-op for a Raw arrow. Removing it from the target's `boundElements` anyway
+    // would leave the binding one-sided: the target no longer lists the arrow, but the arrow's
+    // own JSON still names the target.
+    let can_clear = !matches!(file.elements[pos], Element::Raw(_));
+
+    if can_clear
+        && !shares_target
+        && let Some(&target_pos) = id_to_pos.get(target_id.as_str())
+    {
         let arrow_id = file.elements[pos].id().expect("looked up by id").to_owned();
         let before = file.elements[target_pos].clone();
         file.elements[target_pos].remove_bound_element(&arrow_id);
@@ -705,6 +718,51 @@ mod tests {
     }
 
     #[test]
+    fn raw_arrow_dragged_past_threshold_keeps_its_binding_on_both_sides() {
+        let mut arrow = sample::with(
+            sample::linear("arrow", "a", [0.0, 200.0], &[[0.0, 0.0], [100.0, 0.0]]),
+            json!({
+                "startBinding": {"elementId": "r", "fixedPoint": [0.5, 1.0], "mode": "orbit"},
+                "endBinding": {"elementId": "s", "fixedPoint": [0.0, 0.5], "mode": "orbit"}
+            }),
+        );
+        // Missing `strokeStyle` (no `#[serde(default)]` on `ElementBase`) fails the exact
+        // round-trip check, so this arrow loads as `Element::Raw`, not `Element::Arrow`.
+        if let Value::Object(map) = &mut arrow {
+            map.remove("strokeStyle");
+        }
+        assert!(matches!(
+            Element::from_value(arrow.clone()),
+            Element::Raw(_)
+        ));
+
+        let start = sample::file(vec![
+            sample::with(
+                rect("r", [0.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::with(
+                rect("s", [300.0, 150.0, 50.0, 50.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            arrow,
+        ]);
+        let selection = Selection::from_ids(["a"]);
+        let targets = drag_targets(&start, &selection);
+        assert_eq!(targets, vec![2]);
+        let mut file = start.clone();
+        apply_drag(&mut file, &start, &targets, [11.0, 0.0], &mut TestEnv(0));
+        assert_eq!(xy(&file, "a"), (11.0, 200.0));
+        // The arrow's own binding fields cannot be cleared (`Raw`'s restricted mutation
+        // surface has no binding fields), so the target side is left untouched too: both
+        // stay bound rather than the target losing the arrow one-sidedly.
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::End), Some("s"));
+        assert_eq!(get(&file, "r").bound_elements(), vec![("a", "arrow")]);
+        assert_eq!(get(&file, "s").bound_elements(), vec![("a", "arrow")]);
+    }
+
+    #[test]
     fn lone_bound_arrow_unbinds_both_ends_past_the_dragging_threshold() {
         let start = bound_arrow_scene();
         let selection = Selection::from_ids(["a"]);
@@ -717,6 +775,23 @@ mod tests {
         assert_eq!(get(&file, "a").binding_target(LinearEnd::End), None);
         assert_eq!(get(&file, "r").bound_elements(), vec![]);
         assert_eq!(get(&file, "s").bound_elements(), vec![]);
+    }
+
+    #[test]
+    fn lone_bound_arrow_dragged_past_threshold_then_back_settles_at_the_new_offset() {
+        let start = bound_arrow_scene();
+        let selection = Selection::from_ids(["a"]);
+        let targets = drag_targets(&start, &selection);
+        let mut file = start.clone();
+        // Past the threshold: the arrow moves and unbinds both ends.
+        apply_drag(&mut file, &start, &targets, [30.0, 0.0], &mut TestEnv(0));
+        assert_eq!(xy(&file, "a"), (30.0, 200.0));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), None);
+        // Same gesture, dragged back under the threshold: the arrow is no longer bound (in
+        // `file`, mutated by the call above), so the lone-arrow guard no longer applies and it
+        // follows the pointer back down to the new offset instead of staying at +30.
+        apply_drag(&mut file, &start, &targets, [3.0, 0.0], &mut TestEnv(0));
+        assert_eq!(xy(&file, "a"), (3.0, 200.0));
     }
 
     #[test]
