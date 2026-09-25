@@ -273,3 +273,34 @@ fn elbow_arrows_move_as_a_whole_without_point_or_resize_handles() {
         json!([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0]])
     );
 }
+
+#[test]
+fn a_click_grazing_only_the_bounding_box_of_a_selected_transparent_shape_clears_it() {
+    // Unfilled (transparent), so only its outline is hittable; roughness 0 keeps the outline
+    // exact so a point near an edge reliably hits it.
+    let outline = sample::with(
+        sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 100.0]),
+        json!({"roughness": 0}),
+    );
+    let mut e = editor(vec![outline]);
+    // Near the top edge: hits the outline itself, selecting the shape.
+    click(&mut e, at(50.0, 1.0));
+    assert_eq!(selected(&e), ["r"]);
+    // Dead center: inside the unrotated bounding box, but far past the outline's hit
+    // threshold and not on any bound text, so this click only grazes the bounding box.
+    click(&mut e, at(50.0, 50.0));
+    assert!(selected(&e).is_empty());
+}
+
+#[test]
+fn changing_tool_mid_drag_finishes_the_gesture_as_one_undo_step() {
+    let mut e = editor(vec![solid("a", [0.0, 0.0, 10.0, 10.0])]);
+    e.pointer_down(at(5.0, 5.0));
+    e.pointer_move(at(15.0, 5.0));
+    assert!(!e.is_idle());
+    e.set_tool(Tool::Rectangle);
+    assert!(e.is_idle());
+    assert_eq!(rect_of(&e, "a")[..2], [10.0, 0.0]);
+    assert!(e.command(Command::Undo));
+    assert_eq!(rect_of(&e, "a")[..2], [0.0, 0.0]);
+}

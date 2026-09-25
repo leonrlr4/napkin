@@ -9,6 +9,7 @@
 //! `handlePointerMove`'s `pointerOffset` handling; all at commit
 //! `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::collision;
@@ -291,25 +292,48 @@ pub(super) fn pointer_up(editor: &mut Editor<impl Env>, event: PointerEvent) {
     if editor.tool != Tool::Selection {
         return;
     }
+    finish_gesture(editor, Some(event));
+    update_cursor(editor, event);
+}
+
+/// Ends whatever selection-tool gesture is in progress. A drag, resize or point-drag applies
+/// `event` at its final position first (when one is given), then always records one history
+/// entry for it (`Editor::finish_edit`, a no-op when nothing actually changed); a click or box
+/// selection just ends, since there is nothing to record for either. Shared by [`pointer_up`],
+/// which passes the release event, and `Editor::set_tool`, which passes `None`: a tool switch
+/// mid-gesture has no release position of its own, so whatever the last `pointer_move` already
+/// applied to the scene stands as the gesture's final state.
+pub(super) fn finish_gesture(editor: &mut Editor<impl Env>, event: Option<PointerEvent>) {
     let gesture = std::mem::replace(&mut editor.gesture, Gesture::None);
     match gesture {
         Gesture::None => {}
-        Gesture::Click(click) => finish_click(editor, click, event),
+        Gesture::Click(click) => {
+            if let Some(event) = event {
+                finish_click(editor, click, event);
+            }
+        }
         Gesture::Drag(state) => {
-            apply_drag_move(editor, &state, event);
+            if let Some(event) = event {
+                apply_drag_move(editor, &state, event);
+            }
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::Resize(state) => {
-            apply_resize_move(editor, &state, event);
+            if let Some(event) = event {
+                apply_resize_move(editor, &state, event);
+            }
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::PointDrag(state) => {
-            apply_point_drag_move(editor, &state, event);
+            if let Some(event) = event {
+                apply_point_drag_move(editor, &state, event);
+            }
             editor.finish_edit(&state.start, &state.selection_before);
         }
+        // The current selection is exactly the last box-select result already; nothing more
+        // to apply or record.
         Gesture::BoxSelect(_) => {}
     }
-    update_cursor(editor, event);
 }
 
 /// `dragSelectedElements`'s targets, computed once as the drag begins (not recomputed on every
@@ -451,8 +475,8 @@ fn apply_click_narrow_or_remove(editor: &mut Editor<impl Env>, pos: usize, shift
     }
 }
 
-/// `hitElementBoundingBoxOnly`: `point` falls inside the element's padded bounds but neither on
-/// its own outline nor inside its bound text.
+/// `hitElementBoundingBoxOnly`: `point` falls inside the element's unrotated bounds but neither
+/// on its own outline nor inside its bound text.
 fn hit_bounding_box_only(
     editor: &mut Editor<impl Env>,
     pos: usize,
@@ -464,37 +488,23 @@ fn hit_bounding_box_only(
     if collision::hit_element_itself(&mut editor.geometry, &element, point, threshold) {
         return false;
     }
-    if let Some((text_id, _)) = element
-        .bound_elements()
-        .into_iter()
-        .find(|&(_, kind)| kind == "text")
-        && let Some(text) = editor
-            .file
-            .elements
-            .iter()
-            .find(|e| e.id() == Some(text_id))
-            .cloned()
-        && collision::is_point_in_element(&mut editor.geometry, &text, point)
-    {
+    let index_by_id: HashMap<&str, usize> = editor
+        .file
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, e)| e.id().map(|id| (id, index)))
+        .collect();
+    if selection::hit_element_bound_text(
+        &mut editor.geometry,
+        &editor.file.elements,
+        &index_by_id,
+        &element,
+        point,
+    ) {
         return false;
     }
-    hit_unrotated_bounds(&mut editor.geometry, &element, point)
-}
-
-/// `hitElementBoundingBox` at zero tolerance: `point`, rotated back into the element's own
-/// unrotated frame, falls within its unrotated bounds.
-fn hit_unrotated_bounds(geometry: &mut GeometryCache, element: &Element, point: [f64; 2]) -> bool {
-    let Some((bounds, center)) = geometry.absolute_coords(element) else {
-        return false;
-    };
-    let angle = element.placement().map_or(0.0, |p| p.angle);
-    let local = if angle == 0.0 {
-        point
-    } else {
-        rotate_point(point, center, -angle)
-    };
-    let [x1, y1, x2, y2] = bounds;
-    local[0] >= x1 && local[0] <= x2 && local[1] >= y1 && local[1] <= y2
+    selection::hit_element_bounding_box(&mut editor.geometry, &element, point, 0.0)
 }
 
 /// Updates the idle cursor for `event`'s position: a resize cursor on a handle, `Pointer` on a

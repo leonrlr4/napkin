@@ -249,8 +249,10 @@ fn has_bounding_box(element: &Element, selected_count: usize) -> bool {
 }
 
 /// `hitElementBoundingBox`: whether `point`, rotated back into the element's own unrotated
-/// frame, falls within its unrotated bounds widened by `tolerance`.
-fn hit_element_bounding_box(
+/// frame, falls within its unrotated bounds widened by `tolerance`. `pub(crate)`: the editor's
+/// selection tool reuses it for its own `hitElementBoundingBoxOnly` check (a release-time click
+/// that only grazed the padded bounding box, not the element's own outline or bound text).
+pub(crate) fn hit_element_bounding_box(
     geometry: &mut GeometryCache,
     element: &Element,
     point: [f64; 2],
@@ -274,8 +276,9 @@ fn hit_element_bounding_box(
 
 /// `hitElementBoundText`: whether `point` falls inside `element`'s bound text label, using the
 /// label's own stored placement (see the module doc comment for why
-/// `getBoundTextElementPosition` is not ported).
-fn hit_element_bound_text(
+/// `getBoundTextElementPosition` is not ported). `pub(crate)`, for the same reason as
+/// [`hit_element_bounding_box`].
+pub(crate) fn hit_element_bound_text(
     geometry: &mut GeometryCache,
     elements: &[Element],
     index_by_id: &HashMap<&str, usize>,

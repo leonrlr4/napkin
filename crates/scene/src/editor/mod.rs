@@ -157,8 +157,14 @@ impl<E: Env> Editor<E> {
     }
 
     /// Any tool other than [`Tool::Selection`] and [`Tool::Hand`] clears the selection
-    /// (`clearSelectionIfNotUsingSelection`).
+    /// (`clearSelectionIfNotUsingSelection`). First ends whatever selection-tool gesture is in
+    /// progress the way releasing the pointer at its last position would: a drag, resize or
+    /// point-drag records one history step, a box selection just stops (its last result is
+    /// already the current selection). Without this, switching tools mid-gesture would leave
+    /// the mutation unrecorded and the editor permanently "not idle", since `pointer_move` and
+    /// `pointer_up` both do nothing once the tool is no longer `Selection`.
     pub fn set_tool(&mut self, tool: Tool) {
+        select::finish_gesture(self, None);
         if !matches!(tool, Tool::Selection | Tool::Hand) {
             self.selection = Selection::new();
             self.cursor = Cursor::Crosshair;
