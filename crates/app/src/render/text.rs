@@ -236,6 +236,50 @@ pub fn text_area_top(origin_px: f32, baseline: f64, baseline_in_buffer: f32, sca
     origin_px + baseline as f32 * scale - baseline_in_buffer * scale
 }
 
+/// Widths for `scene::text::measure_text` from napkin's bundled fonts (and the system CJK
+/// fallback), the way `TextMetricsProvider.getLineWidth` gets them from the canvas: one line
+/// shaped without wrapping, its advance width.
+pub struct FontMeasure {
+    font_system: glyphon::FontSystem,
+}
+
+impl FontMeasure {
+    pub fn new() -> FontMeasure {
+        FontMeasure {
+            font_system: font_system(),
+        }
+    }
+}
+
+impl Default for FontMeasure {
+    fn default() -> Self {
+        FontMeasure::new()
+    }
+}
+
+impl scene::text::TextMeasure for FontMeasure {
+    fn line_width(&mut self, line: &str, font_family: f64, font_size: f64) -> f64 {
+        if line.is_empty() || font_size.is_nan() || font_size <= 0.0 {
+            return 0.0;
+        }
+        let size = font_size as f32;
+        let mut buffer = glyphon::Buffer::new(
+            &mut self.font_system,
+            glyphon::Metrics::new(size, size * 1.25),
+        );
+        buffer.set_wrap(glyphon::Wrap::None);
+        buffer.set_size(None, None);
+        let attrs =
+            glyphon::Attrs::new().family(glyphon::Family::Name(bundled_family(font_family)));
+        buffer.set_text(line, &attrs, glyphon::Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer
+            .layout_runs()
+            .map(|run| f64::from(run.line_w))
+            .fold(0.0, f64::max)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use scene::Element;
@@ -252,6 +296,22 @@ mod tests {
             Element::Text(text) => text,
             other => panic!("not text: {other:?}"),
         }
+    }
+
+    #[test]
+    fn font_measure_scales_with_size_and_glyphs() {
+        use scene::text::TextMeasure;
+        let mut measure = FontMeasure::new();
+        let wide = measure.line_width("MMMM", 5.0, 20.0);
+        let narrow = measure.line_width("iiii", 5.0, 20.0);
+        assert!(wide > narrow && narrow > 0.0, "{wide} {narrow}");
+        let double = measure.line_width("MMMM", 5.0, 40.0);
+        assert!((double / wide - 2.0).abs() < 0.05, "{double} vs {wide}");
+        assert!(
+            measure.line_width("漢字", 5.0, 20.0) > 20.0,
+            "system CJK fallback"
+        );
+        assert_eq!(measure.line_width("", 5.0, 20.0), 0.0);
     }
 
     #[test]

@@ -11,9 +11,10 @@ use scene::fractional_index::{
     generate_key_between, generate_n_keys_between, sync_invalid_indices, sync_moved_indices,
 };
 use scene::new_element::{
-    ElementProps, GenericKind, new_arrow_element, new_freedraw_element, new_generic_element,
-    new_line_element,
+    ElementProps, GenericKind, TextProps, new_arrow_element, new_freedraw_element,
+    new_generic_element, new_line_element, new_text_element,
 };
+use scene::sample::CharWidthMeasure;
 use scene::shape::{
     ElementShape, PathOp, ShapeContext, freedraw_outline_points, generate_element_shape,
     generate_rough_options,
@@ -65,7 +66,8 @@ fn props_from(opts: &Value) -> ElementProps {
             }
             "locked" => props.locked = v.as_bool().expect("locked"),
             "type" | "id" | "seed" | "points" | "pressures" | "simulatePressure"
-            | "strokeOptions" | "startArrowhead" | "endArrowhead" => {}
+            | "strokeOptions" | "startArrowhead" | "endArrowhead" | "text" | "fontSize"
+            | "fontFamily" | "textAlign" | "verticalAlign" | "containerId" | "lineHeight" => {}
             other => panic!("unknown newElement option {other}"),
         }
     }
@@ -110,6 +112,20 @@ fn new_element() {
                 opts.get("strokeOptions").map(|o| {
                     serde_json::from_value::<StrokeOptions>(o.clone()).expect("strokeOptions")
                 }),
+                env,
+            ),
+            ("newTextElement", _) => new_text_element(
+                props,
+                TextProps {
+                    text: opts["text"].as_str().expect("text").to_owned(),
+                    font_size: opts.get("fontSize").map(num),
+                    font_family: opts.get("fontFamily").map(num),
+                    text_align: head("textAlign"),
+                    vertical_align: head("verticalAlign"),
+                    container_id: head("containerId"),
+                    line_height: opts.get("lineHeight").map(num),
+                },
+                &mut CharWidthMeasure,
                 env,
             ),
             other => panic!("unknown constructor {other:?}"),

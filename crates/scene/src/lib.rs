@@ -18,6 +18,7 @@ mod perfect_freehand;
 pub mod sample;
 pub mod selection;
 pub mod shape;
+pub mod text;
 pub mod transform;
 
 pub use crate::element::{Element, Placement};

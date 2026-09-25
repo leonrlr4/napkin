@@ -21,7 +21,8 @@ const lib = await bundleExcalidraw(
   "scene",
   `
   export { ShapeCache, generateRoughOptions, getFreedrawOutlinePoints } from "@excalidraw/element/shape";
-  export { newElement, newLinearElement, newArrowElement, newFreeDrawElement } from "@excalidraw/element/newElement";
+  export { newElement, newLinearElement, newArrowElement, newFreeDrawElement, newTextElement } from "@excalidraw/element/newElement";
+  export { setCustomTextMetricsProvider } from "@excalidraw/element/textMeasurements";
   export { syncMovedIndices, syncInvalidIndices } from "@excalidraw/element/fractionalIndex";
   export { applyDarkModeFilter, isTransparent } from "@excalidraw/common";
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
@@ -173,6 +174,10 @@ for (const [label, indices, moved] of indexScenarios) {
   });
 }
 writeGroup(outDir, "fractional_index", source, indexCases);
+
+// Canvas text metrics do not exist in node; every UTF-16 code unit is 0.6em wide. The Rust
+// side uses the same formula (`scene::sample::CharWidthMeasure`).
+lib.setCustomTextMetricsProvider({ getLineWidth: (text, font) => text.length * parseFloat(font) * 0.6 });
 
 // newElement stamps `updated`/`created` with Date.now(); pin it so the defaults are comparable.
 // Callers pass id and seed, the two values that are random by design.

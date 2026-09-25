@@ -1,14 +1,17 @@
-//! `packages/element/src/newElement.ts` (`_newElementBase` and the per-type constructors)
-//! and `bumpVersion` from `mutateElement.ts`. Defaults are the constructors' own, not the
-//! editor's current-item settings; the tools in M4 pass those in `ElementProps`.
+//! `packages/element/src/newElement.ts` (`_newElementBase`, the per-type constructors and
+//! `newTextElement`'s `getTextAnchorRatios`/`getTextElementPositionOffsets`) and `bumpVersion`
+//! from `mutateElement.ts`. Defaults are the constructors' own, not the editor's current-item
+//! settings; the tools in M4 pass those in `ElementProps`.
 
 use serde_json::{Map, Value, json};
 
 use crate::element::{
     Element, ElementBase, FreedrawElement, GenericElement, LinearElement, Roundness, StrokeOptions,
+    TextElement,
 };
 use crate::env::{Env, random_id, random_integer};
 use crate::json::Slot;
+use crate::text::{self, TextMeasure};
 
 /// `DEFAULT_STROKE_STREAMLINE` (packages/common/src/constants.ts).
 pub const DEFAULT_STROKE_STREAMLINE: f64 = 0.5;
@@ -179,6 +182,91 @@ pub fn new_freedraw_element(
     })
 }
 
+/// `newTextElement`'s type-specific options; the shared ones are in `ElementProps`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextProps {
+    pub text: String,
+    /// `None` (or a JS-falsy value) takes `newTextElement`'s default.
+    pub font_size: Option<f64>,
+    pub font_family: Option<f64>,
+    pub text_align: Option<String>,
+    pub vertical_align: Option<String>,
+    pub container_id: Option<String>,
+    pub line_height: Option<f64>,
+}
+
+/// JS `opts.field || default`, applied to a string: `None` and `Some(String::new())` (an empty
+/// string, JS-falsy) both mean "not given".
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.is_empty())
+}
+
+/// `newTextElement`. `fontFamily`, `fontSize` and `lineHeight` fall back on JS-falsy input
+/// (`0`, `NaN`, missing), matching the JS `||`; `textAlign`/`verticalAlign` do the same for an
+/// empty string.
+pub fn new_text_element(
+    props: ElementProps,
+    text: TextProps,
+    measure: &mut dyn TextMeasure,
+    env: &mut impl Env,
+) -> Element {
+    let font_family = text
+        .font_family
+        .filter(|&f| rough::js::truthy(f))
+        .unwrap_or(text::DEFAULT_FONT_FAMILY);
+    let font_size = text
+        .font_size
+        .filter(|&f| rough::js::truthy(f))
+        .unwrap_or(text::DEFAULT_FONT_SIZE);
+    let line_height = text
+        .line_height
+        .filter(|&f| rough::js::truthy(f))
+        .unwrap_or_else(|| text::line_height(font_family));
+    let normalized = text::normalize_text(&text.text);
+    let [width, height] =
+        text::measure_text(&normalized, font_family, font_size, line_height, measure);
+    let text_align = non_empty(text.text_align).unwrap_or_else(|| "left".to_owned());
+    let vertical_align = non_empty(text.vertical_align).unwrap_or_else(|| "top".to_owned());
+    let ratio_x = match text_align.as_str() {
+        "center" => 0.5,
+        "right" => 1.0,
+        _ => 0.0,
+    };
+    let ratio_y = match vertical_align.as_str() {
+        "middle" => 0.5,
+        "bottom" => 1.0,
+        _ => 0.0,
+    };
+    let x = props.x - width * ratio_x;
+    let y = props.y - height * ratio_y;
+    let (base, mut extra) = new_base(
+        "text",
+        ElementProps {
+            x,
+            y,
+            width,
+            height,
+            ..props
+        },
+        env,
+    );
+    extra.insert("baseFontSize".into(), Value::Null);
+    extra.insert("labelPosition".into(), Value::Null);
+    Element::Text(TextElement {
+        base,
+        text: normalized.clone(),
+        font_size,
+        font_family,
+        text_align,
+        vertical_align,
+        container_id: non_empty(text.container_id).map_or(Slot::Null, Slot::Value),
+        original_text: Some(normalized),
+        auto_resize: Some(true),
+        line_height: Some(line_height),
+        extra,
+    })
+}
+
 /// `bumpVersion`: every modification increments `version`, redraws `versionNonce` and
 /// stamps `updated` (spec §5.3).
 pub fn bump_version(element: &mut Element, env: &mut impl Env) {
@@ -249,5 +337,25 @@ mod tests {
         assert_eq!(base.version, version_before + 1.0);
         assert_eq!(base.version_nonce, expected_nonce);
         assert_eq!(element.to_value()["updated"], json!(expected_now));
+    }
+
+    #[test]
+    fn new_text_element_round_trips_through_json() {
+        let mut env = TestEnv { now: 100.0 };
+        let element = new_text_element(
+            ElementProps::default(),
+            TextProps {
+                text: "hello".into(),
+                ..TextProps::default()
+            },
+            &mut crate::sample::CharWidthMeasure,
+            &mut env,
+        );
+        assert!(matches!(element, Element::Text(_)));
+        let reloaded = Element::from_value(element.to_value());
+        assert!(
+            matches!(reloaded, Element::Text(_)),
+            "new_text_element's own output must load back as a typed element, not fall back to Raw"
+        );
     }
 }

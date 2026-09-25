@@ -288,4 +288,17 @@ export const newElementCalls = [
     type: "freedraw", id: "f2", seed: 12, x: 0, y: 0, points: [[0, 0], [3, 4]], pressures: [0.5, 0.7],
     simulatePressure: false, strokeOptions: { variability: "constant", streamline: 0.5 },
   }],
+  ["text/defaults", "newTextElement", { type: "text", id: "t1", seed: 13, x: 10, y: 20, text: "hello" }],
+  ["text/centeredTwoLines", "newTextElement", {
+    type: "text", id: "t2", seed: 14, x: 100, y: 50, text: "two\nlines", textAlign: "center",
+    verticalAlign: "middle", fontSize: 28, fontFamily: 6, strokeColor: "#1971c2",
+  }],
+  ["text/emptyLine", "newTextElement", { type: "text", id: "t3", seed: 15, x: 0, y: 0, text: "a\n\nb", fontFamily: 8 }],
+  ["text/crlfTabs", "newTextElement", {
+    type: "text", id: "t4", seed: 16, x: 5, y: 5, text: "x\r\ny\tz", textAlign: "right", verticalAlign: "bottom",
+  }],
+  ["text/container", "newTextElement", {
+    type: "text", id: "t5", seed: 17, x: 0, y: 0, text: "label", containerId: "r1", lineHeight: 1.5, fontFamily: 7,
+  }],
+  ["text/unknownFamily", "newTextElement", { type: "text", id: "t6", seed: 18, x: 0, y: 0, text: "?", fontFamily: 42 }],
 ];
