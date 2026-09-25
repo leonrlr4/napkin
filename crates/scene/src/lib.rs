@@ -9,6 +9,7 @@ pub mod env;
 pub mod file;
 pub mod fractional_index;
 pub mod geometry;
+pub mod history;
 pub mod json;
 mod laser_pointer;
 pub mod new_element;
