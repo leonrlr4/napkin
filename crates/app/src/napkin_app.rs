@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
-use scene::editor::{Editor, Tool};
+use scene::editor::{Editor, Modifiers, PointerEvent, Tool};
 use scene::env::SystemEnv;
 use scene::file::NapkinView;
 
@@ -32,12 +32,28 @@ const NOTICE_DURATION: Duration = Duration::from_secs(10);
 /// `editor` afterwards.
 const EDITOR_INVARIANT: &str = "editor exists once load_error is None";
 
-/// The camera and wall-clock origin `--bench`'s script runs from, captured once the first
-/// real frame (positive view size, camera initialized) arrives: `bench::camera_at` needs a
-/// concrete starting camera and wall-clock origin to compute each later frame's camera from.
-struct BenchRun {
-    start: Instant,
-    base_camera: Camera,
+/// `--bench`'s progress: waiting for the first real frame (positive view size, camera
+/// initialized), running the camera pan/zoom script, running the drag phase that follows it,
+/// or finished (both summary lines printed and the window asked to close).
+#[derive(Clone, Copy)]
+enum BenchState {
+    NotStarted,
+    /// Driven by [`bench::camera_at`] from `start` (the wall-clock origin) and `base_camera`
+    /// (the camera in effect when the script began).
+    Camera {
+        start: Instant,
+        base_camera: Camera,
+    },
+    /// Driven by [`bench::drag_pointer_at`] from `start` (the wall-clock origin) and `target`
+    /// (the dragged element's grab point in scene coordinates, fixed for the whole phase).
+    /// `base_clones` is `Editor::scene_clones()` when the phase began, so the summary line
+    /// reports only the clones the drag itself caused.
+    Drag {
+        start: Instant,
+        target: [f64; 2],
+        base_clones: u64,
+    },
+    Done,
 }
 
 pub struct NapkinApp {
@@ -54,14 +70,12 @@ pub struct NapkinApp {
     /// `None` until the first frame, when the canvas's `view_size` becomes known and the
     /// camera is set from `appState.napkin` or the document's bounds (decision 5).
     camera: Option<Camera>,
-    /// Set from `--bench`: drives the camera with [`bench::camera_at`] once the first real
-    /// frame arrives, then prints a summary and closes the window (spec §9.3, decision 11).
+    /// Set from `--bench`: drives the camera with [`bench::camera_at`], then the selection
+    /// tool through a scripted drag with [`bench::drag_pointer_at`], then prints a summary for
+    /// each phase and closes the window (spec §9.3, decision 11).
     bench: bool,
-    /// `--bench`'s script state, `None` until the first real frame starts it.
-    bench_run: Option<BenchRun>,
-    /// Set once the closing `bench:` summary line has been printed, so a frame or two of
-    /// shutdown latency after `ViewportCommand::Close` cannot print it twice.
-    bench_done: bool,
+    /// `--bench`'s state machine.
+    bench_state: BenchState,
     /// Rolling frame-time statistics for the hidden panel and `--bench`'s summary line.
     stats: FrameStats,
     /// Toggled by F12; the panel is hidden by default (spec §9.3).
@@ -144,8 +158,7 @@ impl NapkinApp {
             theme: load_theme(),
             camera: None,
             bench,
-            bench_run: None,
-            bench_done: false,
+            bench_state: BenchState::NotStarted,
             stats: FrameStats::new(),
             show_stats: false,
             // Assume the window starts focused: `theme` was just loaded above, so the first
@@ -361,6 +374,13 @@ impl eframe::App for NapkinApp {
                     ui.centered_and_justified(|ui| {
                         ui.colored_label(egui::Color32::RED, error);
                     });
+                    // `--bench` has no editor to drive a script with; without this, the
+                    // window would sit open indefinitely instead of finishing the run.
+                    if self.bench && !matches!(self.bench_state, BenchState::Done) {
+                        println!("bench: no scene");
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.bench_state = BenchState::Done;
+                    }
                     return;
                 }
 
@@ -381,37 +401,118 @@ impl eframe::App for NapkinApp {
                 };
 
                 if self.bench {
-                    if self.bench_run.is_none() {
+                    if matches!(self.bench_state, BenchState::NotStarted) {
                         // The script starts now, on the first frame with a real camera: reset
                         // the statistics so the summary only covers the script itself, not
                         // whatever startup frames came before it.
-                        self.bench_run = Some(BenchRun {
+                        self.bench_state = BenchState::Camera {
                             start: frame_start,
                             base_camera: *camera,
-                        });
+                        };
                         self.stats = FrameStats::new();
                         self.stats.frame_started(frame_start);
                     }
-                    let run = self.bench_run.as_ref().expect("set above");
-                    let elapsed = run.start.elapsed().as_secs_f64();
-                    match bench::camera_at(elapsed, run.base_camera, view_size) {
-                        Some(next) => {
-                            *camera = next;
-                            ui.ctx().request_repaint();
-                        }
-                        None => {
-                            if !self.bench_done {
-                                println!(
-                                    "bench: frames {}, interval p99 {:.2} ms, cpu p99 {:.2} ms",
-                                    self.stats.frames(),
-                                    self.stats.interval_p99().unwrap_or(0.0),
-                                    self.stats.cpu_p99().unwrap_or(0.0),
-                                );
-                                self.bench_done = true;
+                    match self.bench_state {
+                        BenchState::Camera { start, base_camera } => {
+                            let elapsed = start.elapsed().as_secs_f64();
+                            match bench::camera_at(elapsed, base_camera, view_size) {
+                                Some(next) => {
+                                    *camera = next;
+                                    ui.ctx().request_repaint();
+                                }
+                                None => {
+                                    println!(
+                                        "bench: frames {}, interval p99 {:.2} ms, cpu p99 {:.2} ms",
+                                        self.stats.frames(),
+                                        self.stats.interval_p99().unwrap_or(0.0),
+                                        self.stats.cpu_p99().unwrap_or(0.0),
+                                    );
+                                    let editor = self.editor.as_mut().expect(EDITOR_INVARIANT);
+                                    self.bench_state = match bench::drag_target(editor.file()) {
+                                        Some((index, target)) => {
+                                            let placement =
+                                                editor.file().elements[index].placement().expect(
+                                                    "drag_target only returns elements with a \
+                                                     placement",
+                                                );
+                                            *camera = Camera::centered_on(
+                                                SceneRect {
+                                                    min: [placement.x, placement.y],
+                                                    max: [
+                                                        placement.x + placement.width,
+                                                        placement.y + placement.height,
+                                                    ],
+                                                },
+                                                view_size,
+                                            );
+                                            editor.set_tool(Tool::Selection);
+                                            let base_clones = editor.scene_clones();
+                                            editor.pointer_down(PointerEvent {
+                                                at: target,
+                                                modifiers: Modifiers::default(),
+                                                zoom: camera.zoom,
+                                            });
+                                            // The drag phase gets its own statistics window,
+                                            // same as the camera script's above.
+                                            self.stats = FrameStats::new();
+                                            self.stats.frame_started(frame_start);
+                                            ui.ctx().request_repaint();
+                                            BenchState::Drag {
+                                                start: frame_start,
+                                                target,
+                                                base_clones,
+                                            }
+                                        }
+                                        None => {
+                                            println!("bench drag: no shape to drag");
+                                            ui.ctx()
+                                                .send_viewport_cmd(egui::ViewportCommand::Close);
+                                            BenchState::Done
+                                        }
+                                    };
+                                }
                             }
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                            return;
                         }
+                        BenchState::Drag {
+                            start,
+                            target,
+                            base_clones,
+                        } => {
+                            let elapsed = start.elapsed().as_secs_f64();
+                            let editor = self.editor.as_mut().expect(EDITOR_INVARIANT);
+                            match bench::drag_pointer_at(elapsed, target) {
+                                Some(pos) => {
+                                    editor.pointer_move(PointerEvent {
+                                        at: pos,
+                                        modifiers: Modifiers::default(),
+                                        zoom: camera.zoom,
+                                    });
+                                    ui.ctx().request_repaint();
+                                }
+                                None => {
+                                    // A full revolution ends back where it started.
+                                    editor.pointer_up(PointerEvent {
+                                        at: target,
+                                        modifiers: Modifiers::default(),
+                                        zoom: camera.zoom,
+                                    });
+                                    println!(
+                                        "bench drag: frames {}, interval p99 {:.2} ms, cpu p99 \
+                                         {:.2} ms, scene clones {}",
+                                        self.stats.frames(),
+                                        self.stats.interval_p99().unwrap_or(0.0),
+                                        self.stats.cpu_p99().unwrap_or(0.0),
+                                        editor.scene_clones() - base_clones,
+                                    );
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                    self.bench_state = BenchState::Done;
+                                }
+                            }
+                        }
+                        BenchState::NotStarted | BenchState::Done => {}
+                    }
+                    if matches!(self.bench_state, BenchState::Done) {
+                        return;
                     }
                 } else {
                     let space_down = ui.input(|i| i.key_down(egui::Key::Space));
