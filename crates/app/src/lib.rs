@@ -6,6 +6,7 @@ pub mod autosave;
 pub mod bench;
 pub mod camera;
 pub mod cli;
+pub mod control;
 pub mod edit_input;
 pub mod fixture;
 pub mod input;
