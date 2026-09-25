@@ -188,30 +188,73 @@ pub fn remember(paths: &Paths, path: &Path) -> io::Result<()> {
     fs::write(&paths.last, absolute.to_string_lossy().as_bytes())
 }
 
-/// Writes a sibling temporary file, syncs it, renames it over `path` and syncs the directory
-/// (spec §5.5). Creates missing parent directories; removes the temporary file on failure.
-pub fn write_atomic(path: &Path, contents: &str) -> io::Result<SystemTime> {
+/// `path` with every symlink component resolved, including a symlink `path` itself: the real
+/// file [`write_atomic`] must rename over, so that renaming a temporary file onto a symlinked
+/// target replaces what the link points at instead of replacing the link itself with a plain
+/// file. Falls back to `path` unresolved when it (or a parent directory) does not exist yet,
+/// or is not a symlink, or resolving it fails for any other reason: `fs::canonicalize` needs
+/// every component to exist, which a target being written for the first time might not.
+fn resolve_target(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir)?;
-    let file_name = path
+    match fs::canonicalize(dir) {
+        Ok(real_dir) => real_dir.join(file_name),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// Writes a sibling temporary file, syncs it, renames it over `path` and syncs the directory
+/// (spec §5.5). Creates missing parent directories; removes the temporary file on failure.
+///
+/// A symlinked `path` is resolved to its real target first ([`resolve_target`]), so the rename
+/// replaces that file's contents rather than replacing the symlink itself with a plain file.
+/// The temporary file starts with the target's existing permission bits, when it has any, so a
+/// mode set on the file (spec §5.4 says nothing about it, but a hand-`chmod`ed canvas should
+/// keep it) survives the replacement instead of falling back to the process's umask default.
+/// The temporary file's name includes this process's id, so two napkin processes writing the
+/// same path concurrently never share (and race on) one temporary file.
+pub fn write_atomic(path: &Path, contents: &str) -> io::Result<SystemTime> {
+    let create_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(create_dir)?;
+
+    let target = resolve_target(path);
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = target
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(file_name);
-    tmp_name.push(".napkin-tmp");
+    tmp_name.push(format!(".{}.napkin-tmp", std::process::id()));
     let tmp_path = dir.join(tmp_name);
+
+    let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
 
     let result = (|| {
         let mut tmp_file = fs::File::create(&tmp_path)?;
+        if let Some(permissions) = &permissions {
+            tmp_file.set_permissions(permissions.clone())?;
+        }
         tmp_file.write_all(contents.as_bytes())?;
         tmp_file.sync_all()?;
         drop(tmp_file);
-        fs::rename(&tmp_path, path)?;
+        fs::rename(&tmp_path, &target)?;
         fs::File::open(dir)?.sync_all()?;
-        modified(path)?.ok_or_else(|| io::Error::other("file vanished right after being written"))
+        modified(&target)?
+            .ok_or_else(|| io::Error::other("file vanished right after being written"))
     })();
 
     if result.is_err() {
@@ -334,6 +377,39 @@ mod tests {
         assert!(
             matches!(&opened.content, Content::Unreadable(e) if e.contains("broken.excalidraw"))
         );
+    }
+
+    #[test]
+    fn atomic_write_through_a_symlink_keeps_the_link_and_updates_the_real_file() {
+        use std::os::unix::fs::symlink;
+
+        let home = TempHome::new("symlink");
+        let real = home.0.join("real.excalidraw");
+        std::fs::write(&real, VALID).unwrap();
+        let link = home.0.join("link.excalidraw");
+        symlink(&real, &link).unwrap();
+
+        write_atomic(&link, "second").unwrap();
+
+        let link_meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(link_meta.file_type().is_symlink(), "still a symlink");
+        assert_eq!(std::fs::read_link(&link).unwrap(), real);
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "second");
+    }
+
+    #[test]
+    fn atomic_write_preserves_the_target_files_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TempHome::new("perms");
+        let path = home.0.join("mode.excalidraw");
+        write_atomic(&path, VALID).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_atomic(&path, "second").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
     }
 
     #[test]
