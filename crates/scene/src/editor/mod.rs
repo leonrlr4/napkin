@@ -188,6 +188,23 @@ impl<E: Env> Editor<E> {
         self.tool = tool;
     }
 
+    /// Finishes any in-progress pointer gesture or multi-point line without changing the
+    /// tool, the same code path [`Editor::set_tool`] runs before switching: a selection-tool
+    /// drag, resize or point-drag records one history step; a shape, initial linear drag or
+    /// freedraw stroke finishes as a release at its last position would; a multi-point line
+    /// or arrow finishes the way `Command::Finalize` (Enter) would, dropping its uncommitted
+    /// cursor-following point. A no-op when [`Editor::is_idle`].
+    ///
+    /// A multi-point line's follow point already sits in `file` (each `pointer_move` writes
+    /// it so the overlay tracks the cursor) but is not reflected in `revision` until the
+    /// gesture finishes, so closing the window or losing focus mid-gesture without calling
+    /// this first would save that uncommitted point as if it were confirmed, or lose it
+    /// entirely if nothing else changed to bump the revision.
+    pub fn finish_pending_gesture(&mut self) {
+        select::finish_gesture(self, None);
+        create::finish_gesture(self, None);
+    }
+
     pub fn selection(&self) -> &Selection {
         &self.selection
     }

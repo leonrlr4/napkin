@@ -118,6 +118,38 @@ fn clicks_build_a_multi_point_line_that_enter_finishes() {
 }
 
 #[test]
+fn finish_pending_gesture_commits_a_multi_point_line_without_finalize() {
+    let mut e = editor(vec![]);
+    e.set_tool(Tool::Line);
+    click(&mut e, at(0.0, 0.0));
+    e.pointer_move(at(100.0, 0.0));
+    click(&mut e, at(100.0, 0.0));
+    e.pointer_move(at(100.0, 100.0));
+    click(&mut e, at(100.0, 100.0));
+    // The cursor-following point: written into `file` by `pointer_move`, but not yet
+    // committed (no click confirmed it) and not yet reflected in `revision`.
+    e.pointer_move(at(50.0, 150.0));
+    assert!(!e.is_idle());
+    let revision_before = e.revision();
+
+    e.finish_pending_gesture();
+
+    assert!(e.is_idle());
+    let v = only(&e);
+    assert_eq!(
+        v["points"],
+        json!([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]]),
+        "the follow point is dropped"
+    );
+    assert_eq!(e.revision(), revision_before + 1);
+    assert!(e.command(Command::Undo));
+    assert!(
+        e.file().elements.is_empty(),
+        "the whole line is one undo step"
+    );
+}
+
+#[test]
 fn clicking_back_on_the_start_closes_a_line_into_a_polygon() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Line);

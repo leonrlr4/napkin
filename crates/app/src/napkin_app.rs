@@ -108,6 +108,11 @@ pub struct NapkinApp {
     /// Bumped every time a reload replaces the scene outright, so the renderer drops its
     /// per-element caches instead of matching old and new elements by id.
     generation: u64,
+    /// Set on a focus gain, cleared once the reload check in [`NapkinApp::ui`] actually runs.
+    /// A save in flight at the moment focus returns defers the check rather than skipping it:
+    /// without this flag, that single frame's `gained_focus` edge would be the only chance to
+    /// notice an external change, and the next autosave would silently overwrite it.
+    reload_check_pending: bool,
 }
 
 impl NapkinApp {
@@ -175,6 +180,7 @@ impl NapkinApp {
             writer,
             known_mtime,
             generation: 0,
+            reload_check_pending: false,
         }
     }
 
@@ -283,6 +289,14 @@ fn camera_view(camera: Camera) -> NapkinView {
     }
 }
 
+/// Whether a reload check queued by a focus gain ([`NapkinApp::reload_check_pending`]) should
+/// run this frame: only once no save is in flight. A pending check that finds a save running
+/// stays pending instead of being dropped, so the caller must keep asking (by requesting a
+/// repaint) until this returns `true`.
+fn reload_check_ready(pending: bool, saving: bool) -> bool {
+    pending && !saving
+}
+
 /// Spec §5.6: reload when the file on disk changed since napkin last read or wrote it, no
 /// save is running and no unsaved element change would be lost.
 pub fn should_reload(
@@ -320,12 +334,16 @@ impl eframe::App for NapkinApp {
         if self.unreadable.is_some() {
             return;
         }
-        let Some(editor) = self.editor.as_ref() else {
+        let Some(editor) = self.editor.as_mut() else {
             return;
         };
         let Some(camera) = self.camera else {
             return;
         };
+        // An in-progress multi-point line's cursor-following point is already in `file` but
+        // not yet reflected in `revision`; without this, exiting would either save that
+        // uncommitted point as if confirmed, or drop it entirely (spec §8).
+        editor.finish_pending_gesture();
         let path = self.path.clone().expect("a writer implies a save path");
         let view = camera_view(camera);
         let state = DocumentState {
@@ -359,6 +377,7 @@ impl eframe::App for NapkinApp {
         let lost_focus = !focused && self.focused;
         if gained_focus {
             self.theme = load_theme();
+            self.reload_check_pending = true;
         }
         self.focused = focused;
         ui.ctx().set_visuals(self.theme.visuals());
@@ -535,33 +554,38 @@ impl eframe::App for NapkinApp {
                         // Regaining focus: reread the file if it changed while napkin was away
                         // and nothing here would be lost (spec §5.6). The camera does not
                         // move; a failed reparse stops input and saving until a later reload
-                        // (on a later focus gain) succeeds.
-                        if gained_focus && let Some(path) = self.path.clone() {
-                            let disk_mtime = storage::modified(&path).unwrap_or_else(|error| {
-                                eprintln!("napkin: {}: {error}", path.display());
-                                None
-                            });
-                            let unsaved = self.autosave.has_unsaved_changes(editor.revision());
-                            if should_reload(
-                                self.known_mtime,
-                                disk_mtime,
-                                self.autosave.in_flight(),
-                                unsaved,
-                            ) {
-                                match storage::load(&path) {
-                                    storage::Loaded::Parsed { file, mtime } => {
-                                        editor.replace_file(file);
-                                        self.generation += 1;
-                                        self.autosave
-                                            .reset(editor.revision(), camera_view(*camera));
-                                        self.known_mtime = Some(mtime);
-                                        self.unreadable = None;
+                        // succeeds. A save in flight when focus returns defers the check
+                        // (`reload_check_pending` stays set) instead of skipping it outright,
+                        // and asks for a repaint so it runs again once the save finishes,
+                        // rather than waiting for the next focus gain and letting that save
+                        // (or the next autosave) overwrite the external change unnoticed.
+                        if let Some(path) = self.path.clone() {
+                            let saving = self.autosave.in_flight();
+                            if reload_check_ready(self.reload_check_pending, saving) {
+                                self.reload_check_pending = false;
+                                let disk_mtime = storage::modified(&path).unwrap_or_else(|error| {
+                                    eprintln!("napkin: {}: {error}", path.display());
+                                    None
+                                });
+                                let unsaved = self.autosave.has_unsaved_changes(editor.revision());
+                                if should_reload(self.known_mtime, disk_mtime, saving, unsaved) {
+                                    match storage::load(&path) {
+                                        storage::Loaded::Parsed { file, mtime } => {
+                                            editor.replace_file(file);
+                                            self.generation += 1;
+                                            self.autosave
+                                                .reset(editor.revision(), camera_view(*camera));
+                                            self.known_mtime = Some(mtime);
+                                            self.unreadable = None;
+                                        }
+                                        storage::Loaded::Invalid(message) => {
+                                            self.unreadable = Some(message);
+                                        }
+                                        storage::Loaded::Missing => {}
                                     }
-                                    storage::Loaded::Invalid(message) => {
-                                        self.unreadable = Some(message);
-                                    }
-                                    storage::Loaded::Missing => {}
                                 }
+                            } else if self.reload_check_pending {
+                                ui.ctx().request_repaint();
                             }
                         }
 
@@ -598,6 +622,13 @@ impl eframe::App for NapkinApp {
                             && let (Some(path), Some(writer)) =
                                 (self.path.clone(), self.writer.as_ref())
                         {
+                            if lost_focus {
+                                // See `on_exit`'s identical comment: a multi-point line's
+                                // follow point must be committed before a focus-loss save, or
+                                // the save would either capture that uncommitted point as if
+                                // confirmed, or, if nothing else changed, miss it entirely.
+                                editor.finish_pending_gesture();
+                            }
                             let view = camera_view(*camera);
                             let state = DocumentState {
                                 revision: editor.revision(),
@@ -775,6 +806,16 @@ mod tests {
 
     use super::*;
     use crate::camera::MAX_ZOOM;
+
+    #[test]
+    fn reload_check_waits_out_an_in_flight_save() {
+        assert!(!reload_check_ready(false, false), "nothing pending");
+        assert!(
+            !reload_check_ready(true, true),
+            "a save is running; stay pending and try again next frame"
+        );
+        assert!(reload_check_ready(true, false));
+    }
 
     #[test]
     fn reload_only_when_the_disk_changed_and_nothing_would_be_lost() {
