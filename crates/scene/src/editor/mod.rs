@@ -21,12 +21,16 @@ mod style;
 
 use std::sync::Arc;
 
+use serde_json::Value;
+
+use crate::batch::{self, BatchReport, OpError};
 use crate::edit;
 use crate::env::Env;
 use crate::file::SceneFile;
 use crate::geometry::{Bounds, GeometryCache, rotate_point};
 use crate::history::History;
 use crate::selection::{self, Selection};
+use crate::text::TextMeasure;
 use crate::transform;
 
 pub use style::{ArrowType, EdgeStyle, ItemStyle, StrokeWidth};
@@ -293,6 +297,29 @@ impl<E: Env> Editor<E> {
             }
             Command::Finalize => create::finalize_command(self),
         }
+    }
+
+    /// Applies one batch as one history step (AI spec §4.1), keeping the selection (minus
+    /// anything the batch deleted). Refuses while a gesture is in progress: the caller waits
+    /// for `is_idle`. Bumps `revision` on success.
+    pub fn apply_batch(
+        &mut self,
+        batch: &Value,
+        measure: &mut dyn TextMeasure,
+    ) -> Result<BatchReport, Vec<OpError>> {
+        if !self.is_idle() {
+            return Err(vec![OpError {
+                op: None,
+                field: None,
+                message: "napkin is in the middle of a drawing gesture; try again".into(),
+            }]);
+        }
+        let (next, report) =
+            batch::apply_batch(&self.file, batch, &self.style, measure, &mut self.env)?;
+        let before = std::mem::replace(&mut self.file, Arc::new(next));
+        let selection = self.selection.clone();
+        self.finish_edit(&before, &selection);
+        Ok(report)
     }
 
     /// For the latest pointer position.
