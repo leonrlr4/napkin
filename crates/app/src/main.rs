@@ -31,7 +31,7 @@ fn main() -> eframe::Result {
         "napkin",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(app::viewer::Viewer::new(
+            Ok(Box::new(app::napkin_app::NapkinApp::new(
                 cc, document, load_error, bench,
             )))
         }),

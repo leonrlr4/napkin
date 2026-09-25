@@ -37,6 +37,7 @@ fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixel
         size_px,
         pixels_per_point,
         dark: false,
+        generation: 0,
     };
     let prepared = renderer.prepare(&device, &queue, &frame);
     queue.submit(prepared);

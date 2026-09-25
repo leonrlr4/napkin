@@ -1,14 +1,18 @@
 //! The eframe [`App`](eframe::App) that hosts the canvas: theme, document title, the camera,
-//! the load-error banner and the GPU canvas itself.
+//! the scene editor and its overlay, the load-error banner and the GPU canvas itself.
 
 use std::time::Instant;
 
 use eframe::egui;
+use scene::editor::{Editor, Tool};
+use scene::env::SystemEnv;
 
 use crate::bench;
 use crate::camera::{Camera, SceneRect, normalized_zoom};
 use crate::document::Document;
+use crate::edit_input::{self, EditorInput, PointerCapture};
 use crate::input::{self, CanvasInput};
+use crate::overlay::{self, OverlayColors};
 use crate::pinch::{PinchListener, PinchTracker};
 use crate::render::callback::{self, CanvasCallback};
 use crate::render::color::render_color;
@@ -24,9 +28,16 @@ struct BenchRun {
     base_camera: Camera,
 }
 
-pub struct Viewer {
+pub struct NapkinApp {
     document: Document,
     load_error: Option<String>,
+    /// `Some` whenever `load_error` is `None`: the scene editor driving pointer and keyboard
+    /// input, undo/redo and the selection overlay. `None` on a load error, same as M3's
+    /// read-only banner.
+    editor: Option<Editor<SystemEnv>>,
+    /// The active primary-button press, carried across frames so a drag that leaves the canvas
+    /// (or the window loses focus mid-drag) still reaches the editor as one gesture.
+    capture: PointerCapture,
     theme: Theme,
     /// `None` until the first frame, when the canvas's `view_size` becomes known and the
     /// camera is set from `appState.napkin` or the document's bounds (decision 5).
@@ -47,19 +58,20 @@ pub struct Viewer {
     /// triggers a theme re-read (spec §7.6).
     focused: bool,
     /// `None` when the compositor isn't Wayland or lacks `zwp_pointer_gestures_v1`; the
-    /// reason is logged once in [`Viewer::new`] and the canvas falls back to Ctrl+wheel zoom.
+    /// reason is logged once in [`NapkinApp::new`] and the canvas falls back to Ctrl+wheel
+    /// zoom.
     pinch: Option<PinchListener>,
     /// Turns this listener's begin-relative `scale` into per-event zoom factors.
     pinch_tracker: PinchTracker,
 }
 
-impl Viewer {
+impl NapkinApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         document: Document,
         load_error: Option<String>,
         bench: bool,
-    ) -> Viewer {
+    ) -> NapkinApp {
         if let Some(render_state) = &cc.wgpu_render_state {
             callback::install(render_state);
         }
@@ -68,9 +80,14 @@ impl Viewer {
                 eprintln!("napkin: touchpad pinch zoom unavailable: {reason}");
             })
             .ok();
-        Viewer {
+        let editor = load_error
+            .is_none()
+            .then(|| Editor::new((*document.file).clone(), SystemEnv));
+        NapkinApp {
             document,
             load_error,
+            editor,
+            capture: PointerCapture::default(),
             theme: load_theme(),
             camera: None,
             bench,
@@ -86,6 +103,20 @@ impl Viewer {
             pinch,
             pinch_tracker: PinchTracker::default(),
         }
+    }
+}
+
+/// The tool's lowercase name, as shown above the canvas.
+fn tool_label(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Selection => "selection",
+        Tool::Hand => "hand",
+        Tool::Rectangle => "rectangle",
+        Tool::Diamond => "diamond",
+        Tool::Ellipse => "ellipse",
+        Tool::Arrow => "arrow",
+        Tool::Line => "line",
+        Tool::Freedraw => "freedraw",
     }
 }
 
@@ -151,7 +182,7 @@ fn load_theme() -> Theme {
     }
 }
 
-impl eframe::App for Viewer {
+impl eframe::App for NapkinApp {
     /// Stops the pinch dispatch thread before eframe disconnects the Wayland display it
     /// borrows from (see [`PinchListener`]'s doc comment).
     fn on_exit(&mut self) {
@@ -232,7 +263,9 @@ impl eframe::App for Viewer {
                         }
                     }
                 } else {
-                    let mut canvas_input = CanvasInput::from_egui(ui, &response);
+                    let space_down = ui.input(|i| i.key_down(egui::Key::Space));
+                    let hand_tool = self.editor.as_ref().is_some_and(|e| e.tool() == Tool::Hand);
+                    let mut canvas_input = CanvasInput::from_egui(ui, &response, hand_tool);
                     if let Some(pinch) = &self.pinch {
                         for event in pinch.events() {
                             if let Some(factor) = self.pinch_tracker.factor(event) {
@@ -244,6 +277,36 @@ impl eframe::App for Viewer {
                     // The input that changed the camera already triggered this repaint, so
                     // no `request_repaint` call is needed here.
                     input::apply(camera, &canvas_input);
+
+                    let panning = space_down || hand_tool;
+                    if let Some(editor) = self.editor.as_mut() {
+                        let events = ui.input(|i| i.events.clone());
+                        let frame_input = edit_input::FrameInput {
+                            events: &events,
+                            canvas: response.rect,
+                            camera: *camera,
+                            modifiers: ui.input(|i| i.modifiers),
+                            panning,
+                            keyboard_taken: ui.ctx().egui_wants_keyboard_input(),
+                            focused: self.focused,
+                        };
+                        for action in edit_input::translate(&frame_input, &mut self.capture) {
+                            match action {
+                                EditorInput::Down(event) => editor.pointer_down(event),
+                                EditorInput::Move(event) => editor.pointer_move(event),
+                                EditorInput::Up(event) => editor.pointer_up(event),
+                                EditorInput::Tool(tool) => editor.set_tool(tool),
+                                EditorInput::Command(command) => {
+                                    editor.command(command);
+                                }
+                            }
+                        }
+                        ui.ctx().set_cursor_icon(if panning {
+                            egui::CursorIcon::Grab
+                        } else {
+                            edit_input::cursor_icon(editor.cursor())
+                        });
+                    }
                 }
 
                 let background =
@@ -264,17 +327,41 @@ impl eframe::App for Viewer {
                     (response.rect.width() * pixels_per_point).round() as u32,
                     (response.rect.height() * pixels_per_point).round() as u32,
                 ];
+                let file = self.editor.as_ref().map_or_else(
+                    || self.document.file.clone(),
+                    |editor| editor.file().clone(),
+                );
                 let frame = CanvasFrame {
-                    file: self.document.file.clone(),
+                    file,
                     camera: *camera,
                     size_px,
                     pixels_per_point,
                     dark: self.theme.dark,
+                    // The editor never replaces its own scene wholesale (only a reload would),
+                    // so every frame is still the one it started with.
+                    generation: 0,
                 };
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                     response.rect,
                     CanvasCallback { frame },
                 ));
+
+                if let Some(editor) = self.editor.as_mut() {
+                    let overlay = editor.overlay(camera.zoom);
+                    let colors = OverlayColors::from_theme(&self.theme);
+                    ui.painter().extend(overlay::shapes(
+                        &overlay,
+                        camera,
+                        response.rect.min,
+                        colors,
+                    ));
+
+                    egui::Area::new(egui::Id::new("napkin-current-tool"))
+                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 8.0))
+                        .show(ui.ctx(), |ui| {
+                            ui.small(tool_label(editor.tool()));
+                        });
+                }
             });
 
         // The renderer's stats are from the *previous* frame's `prepare` call: this frame's
@@ -314,6 +401,9 @@ impl eframe::App for Viewer {
                             render_stats.buffer_vertices_used,
                             render_stats.buffer_vertices_capacity
                         ));
+                        if let Some(editor) = &self.editor {
+                            ui.label(format!("scene clones {}", editor.scene_clones()));
+                        }
                     });
                 });
         }

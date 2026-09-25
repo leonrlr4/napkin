@@ -69,8 +69,9 @@ pub fn apply(camera: &mut Camera, input: &CanvasInput) -> bool {
 }
 
 impl CanvasInput {
-    /// Reads this frame's events for the canvas `response`.
-    pub fn from_egui(ui: &egui::Ui, response: &egui::Response) -> CanvasInput {
+    /// Reads this frame's events for the canvas `response`. `hand` makes a primary drag pan,
+    /// like Space+drag (the Hand tool).
+    pub fn from_egui(ui: &egui::Ui, response: &egui::Response, hand: bool) -> CanvasInput {
         let view_size = [response.rect.width() as f64, response.rect.height() as f64];
         let pointer = response
             .hover_pos()
@@ -125,7 +126,7 @@ impl CanvasInput {
         };
 
         let pan_drag = if response.dragged_by(egui::PointerButton::Middle)
-            || (ui.input(|i| i.key_down(egui::Key::Space))
+            || ((hand || ui.input(|i| i.key_down(egui::Key::Space)))
                 && response.dragged_by(egui::PointerButton::Primary))
         {
             let delta = response.drag_delta();

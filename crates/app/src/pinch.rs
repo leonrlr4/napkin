@@ -151,7 +151,7 @@ delegate_noop!(GestureState: ignore wl_pointer::WlPointer);
 ///
 /// winit disconnects the Wayland connection (`wl_display_disconnect`) when its thread-local
 /// `EventLoop` value is dropped at thread exit, which happens after eframe has dropped the
-/// `Viewer` (so after [`eframe::App::on_exit`] has already returned). `Viewer::on_exit` calls
+/// `NapkinApp` (so after [`eframe::App::on_exit`] has already returned). `NapkinApp::on_exit` calls
 /// [`PinchListener::stop`], which joins the dispatch thread before returning, so nothing is
 /// left touching the borrowed `wl_display` pointer once `on_exit` has run, well before winit
 /// gets around to disconnecting it. For the entire lifetime of the dispatch thread (from

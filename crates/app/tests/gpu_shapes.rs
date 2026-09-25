@@ -149,6 +149,7 @@ fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
             size_px: [320, 240],
             pixels_per_point: 1.0,
             dark: false,
+            generation: 0,
         };
         let prepared = renderer.prepare(&device, &queue, &frame);
         queue.submit(prepared);
@@ -163,6 +164,35 @@ fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
         );
         assert!(stats.buffer_vertices_used <= stats.buffer_vertices_capacity);
     }
+}
+
+#[test]
+fn a_new_generation_forgets_cached_meshes() {
+    // Same id, version and versionNonce with different geometry: only the generation says the
+    // scene was replaced.
+    let at = |x: f64| {
+        sample::file(vec![sample::with(
+            sample::generic("rectangle", "r", [x, 20.0, 30.0, 30.0]),
+            json!({"roughness": 0, "backgroundColor": "#ffc9c9"}),
+        )])
+    };
+    let image = support::render_sequence(
+        vec![(at(10.0), 0), (at(60.0), 1)],
+        Camera::default(),
+        100,
+        80,
+        false,
+    );
+    assert!(
+        close(image.pixel(75, 35), [0xff, 0xc9, 0xc9], 2),
+        "{:?}",
+        image.pixel(75, 35)
+    );
+    assert!(
+        close(image.pixel(25, 35), [0xff, 0xff, 0xff], 0),
+        "{:?}",
+        image.pixel(25, 35)
+    );
 }
 
 #[test]

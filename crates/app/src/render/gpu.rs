@@ -155,6 +155,10 @@ pub struct CanvasFrame {
     pub size_px: [u32; 2],
     pub pixels_per_point: f32,
     pub dark: bool,
+    /// Changes when the scene is replaced (a reload): `CanvasRenderer::prepare` then drops
+    /// every cache instead of trusting element ids and versions to tell an old scene's elements
+    /// apart from an unrelated new scene's.
+    pub generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -213,6 +217,7 @@ struct RotatedTextKey {
     index: usize,
     id: String,
     version_bits: u64,
+    version_nonce_bits: u64,
     scale_bits: u32,
     dark: bool,
     alpha_bits: u32,
@@ -419,6 +424,10 @@ pub struct CanvasRenderer {
     rotated_quad_index_capacity: u32,
 
     cache: SceneCache,
+    /// The last frame's `CanvasFrame::generation`; `None` before the first `prepare` call.
+    /// `prepare` clears every cache when this changes, since a reload can reuse ids, versions
+    /// and version nonces an evicted scene already used.
+    generation: Option<u64>,
 
     text_font_system: glyphon::FontSystem,
     text_swash_cache: glyphon::SwashCache,
@@ -433,7 +442,7 @@ pub struct CanvasRenderer {
     /// `index` disambiguates a duplicate id): independent of rotation or scale, so a
     /// `RotatedText` element's lines are shaped once and reused for
     /// every zoom level's offscreen texture.
-    text_lines: HashMap<(usize, String, u64), Vec<text::ShapedLine>>,
+    text_lines: HashMap<(usize, String, u64, u64), Vec<text::ShapedLine>>,
 
     /// Rotated text: its own atlas (a fixed offscreen format, sample count 1, no stencil) and
     /// a single renderer reused sequentially, since each rotated element's texture is rendered
@@ -698,6 +707,7 @@ impl CanvasRenderer {
             rotated_quad_vertex_capacity,
             rotated_quad_index_capacity,
             cache: SceneCache::new(),
+            generation: None,
             text_font_system: text::font_system(),
             text_swash_cache: glyphon::SwashCache::new(),
             text_atlas,
@@ -756,6 +766,10 @@ impl CanvasRenderer {
         frame: &CanvasFrame,
     ) -> Vec<wgpu::CommandBuffer> {
         let started = std::time::Instant::now();
+        if self.generation != Some(frame.generation) {
+            self.reset();
+            self.generation = Some(frame.generation);
+        }
         let view_size = [
             f64::from(frame.size_px[0]) / f64::from(frame.pixels_per_point),
             f64::from(frame.size_px[1]) / f64::from(frame.pixels_per_point),
@@ -1120,6 +1134,7 @@ impl CanvasRenderer {
             index,
             element.id().unwrap_or_default().to_owned(),
             element.version().to_bits(),
+            element.version_nonce().to_bits(),
         );
         if self.text_lines.contains_key(&key) {
             return;
@@ -1601,6 +1616,7 @@ fn rotated_text_key(
         index: draw.element,
         id: element.id().unwrap_or_default().to_owned(),
         version_bits: element.version().to_bits(),
+        version_nonce_bits: element.version_nonce().to_bits(),
         scale_bits: raster_scale.to_bits(),
         dark,
         alpha_bits: draw.alpha.to_bits(),
@@ -1662,7 +1678,7 @@ fn text_draw_color(file: &scene::SceneFile, draw: &TextDraw, dark: bool) -> glyp
 /// `element`'s (at file position `index`) cached shaped lines; panics if `ensure_shaped` was not
 /// called for it first.
 fn shaped_lines_for<'a>(
-    lines: &'a HashMap<(usize, String, u64), Vec<text::ShapedLine>>,
+    lines: &'a HashMap<(usize, String, u64, u64), Vec<text::ShapedLine>>,
     index: usize,
     element: &scene::Element,
 ) -> &'a [text::ShapedLine] {
@@ -1670,6 +1686,7 @@ fn shaped_lines_for<'a>(
         index,
         element.id().unwrap_or_default().to_owned(),
         element.version().to_bits(),
+        element.version_nonce().to_bits(),
     );
     lines
         .get(&key)
@@ -1681,7 +1698,7 @@ fn shaped_lines_for<'a>(
 /// i's baseline lands at physical pixel `(element origin + scroll) * scale`, offset down by that
 /// line's own `baseline`; a placeholder label is additionally offset 4 scene units right.
 fn build_text_areas<'a>(
-    lines: &'a HashMap<(usize, String, u64), Vec<text::ShapedLine>>,
+    lines: &'a HashMap<(usize, String, u64, u64), Vec<text::ShapedLine>>,
     file: &scene::SceneFile,
     draws: &[TextDraw],
     scroll: [f32; 2],
