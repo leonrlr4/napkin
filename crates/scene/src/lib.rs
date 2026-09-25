@@ -4,6 +4,7 @@
 pub mod collision;
 pub mod color;
 pub mod edit;
+pub mod editor;
 pub mod element;
 pub mod env;
 pub mod file;
