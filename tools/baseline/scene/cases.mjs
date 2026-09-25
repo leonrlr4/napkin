@@ -302,3 +302,43 @@ export const newElementCalls = [
   }],
   ["text/unknownFamily", "newTextElement", { type: "text", id: "t6", seed: 18, x: 0, y: 0, text: "?", fontFamily: 42 }],
 ];
+
+/** [case name, skeleton list] for convertToExcalidrawElements. Every label fits its container
+ * under the generator's 0.6em text metrics: napkin never wraps or grows (AI spec §4.5). */
+export const skeletonBatches = [
+  ["shapes", [
+    { type: "rectangle", x: 0, y: 0, width: 120, height: 60, strokeColor: "#1971c2", backgroundColor: "#a5d8ff" },
+    { type: "diamond", x: 200, y: 0, width: 100, height: 80, fillStyle: "hachure", strokeWidth: 4, strokeStyle: "dashed" },
+    { type: "ellipse", x: 0, y: 150, width: 90, height: 40, roughness: 0, opacity: 60, groupIds: ["g1"] },
+  ]],
+  ["labels", [
+    { type: "rectangle", id: "r", x: 0, y: 0, width: 160, height: 70, label: { text: "Parser" } },
+    { type: "diamond", id: "d", x: 200, y: 0, width: 200, height: 160, strokeColor: "#e03131",
+      label: { text: "a\nb", textAlign: "left", verticalAlign: "top", fontSize: 16 } },
+    { type: "ellipse", id: "e", x: 0, y: 200, width: 220, height: 120, label: { text: "Nunito", fontFamily: 6 } },
+  ]],
+  ["text", [
+    { type: "text", x: 10, y: 10, text: "left" },
+    { type: "text", x: 200, y: 10, text: "centered", textAlign: "center" },
+    { type: "text", x: 0, y: 100, text: "code\nblock", fontFamily: 8, fontSize: 28, strokeColor: "#2f9e44" },
+  ]],
+  ["lines", [
+    { type: "line", x: 0, y: 0, width: 100, height: 50 },
+    { type: "line", x: 0, y: 100, width: 80, height: -40 },
+    { type: "arrow", x: 0, y: 200 },
+    { type: "arrow", x: 0, y: 300, points: [[0, 0], [60, 40], [120, 0]] },
+    { type: "arrow", x: 300, y: 0, points: [[0, 0], [-100, 0]] },
+    { type: "arrow", x: 300, y: 100, points: [[0, 0], [0, -80]], startArrowhead: "dot", endArrowhead: "triangle" },
+  ]],
+  ["bindings", [
+    { type: "arrow", id: "a", x: 125, y: 30, points: [[0, 0], [70, 0]], start: { id: "r1" }, end: { id: "r2" } },
+    { type: "rectangle", id: "r1", x: 0, y: 0, width: 120, height: 60, label: { text: "one" } },
+    { type: "rectangle", id: "r2", x: 200, y: 0, width: 120, height: 60 },
+    { type: "arrow", id: "self", x: 60, y: 65, points: [[0, 0], [0, 40], [260, 40], [260, 0]], start: { id: "r1" }, end: { id: "r2" } },
+    { type: "arrow", id: "inside", x: 30, y: 30, points: [[0, 0], [200, 0]], start: { id: "r1" }, end: { id: "r1" } },
+  ]],
+  ["tinyTarget", [
+    { type: "ellipse", id: "dot", x: 0, y: 0, width: 0.5, height: 20 },
+    { type: "arrow", x: 50, y: 10, points: [[0, 0], [-45, 0]], end: { id: "dot" } },
+  ]],
+];

@@ -98,8 +98,12 @@ function structureOf(value) {
  * compared number by number. A case that does is run a second time with a different
  * Math.random stream; if its structure is identical both times only the structure is
  * compared, otherwise the case is rejected because nothing about it is reproducible.
+ *
+ * With `{ exactDespiteRandom: true }`, a case that calls Math.random but produces byte-identical
+ * output under both streams (the caller already stripped every random-derived value) is still
+ * compared number by number.
  */
-export function runCase(name, fn) {
+export function runCase(name, fn, { exactDespiteRandom = false } = {}) {
   randomCalls = 0;
   randomStream = lcg(1);
   const first = encode(capture(fn));
@@ -108,6 +112,12 @@ export function runCase(name, fn) {
   }
   randomStream = lcg(2);
   const second = encode(capture(fn));
+  if (exactDespiteRandom) {
+    if (JSON.stringify(first) !== JSON.stringify(second)) {
+      throw new Error(`${name}: output still depends on Math.random after normalization`);
+    }
+    return { compare: "exact", expected: first };
+  }
   if (JSON.stringify(structureOf(first)) !== JSON.stringify(structureOf(second))) {
     throw new Error(`${name}: output structure depends on Math.random; drop this case`);
   }

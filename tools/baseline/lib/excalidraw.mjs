@@ -33,20 +33,32 @@ export function excalidrawCheckout() {
 // Imported by Excalidraw modules that the shape code never calls; bundling them would
 // need their npm packages installed for nothing. The default export stays callable because
 // Scene.ts wraps a function with lodash.throttle at module load; whatever it returns throws
-// if the baseline ever reaches it.
+// if the baseline ever reaches it. Two exceptions: `nanoid` returns an incrementing counter
+// string instead of throwing, since the skeleton conversion always generates ids; and
+// `lodash.throttle` returns a no-op wrapper (dropping the wrapped call rather than running
+// it) instead of throwing, since `Scene.replaceAllElements` (reached by `scene.mutateElement`,
+// which the skeleton conversion's bindings call) invokes its throttled validator
+// synchronously, and that validator references the DOM global `window`, unavailable here.
 const STUBBED = /^(@braintree\/sanitize-url|es6-promise-pool|lodash\.throttle|nanoid)$/;
 
 const stubPlugin = {
   name: "stub-unused",
   setup(build) {
     build.onResolve({ filter: STUBBED }, (args) => ({ path: args.path, namespace: "stub" }));
-    build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-      contents: [
-        "const unused = () => { throw new Error('stubbed module called'); };",
-        "export default () => unused; export const sanitizeUrl = unused; export const nanoid = unused;",
-      ].join("\n"),
-      loader: "js",
-    }));
+    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
+      if (args.path === "lodash.throttle") {
+        return { contents: "export default () => () => {};", loader: "js" };
+      }
+      return {
+        contents: [
+          "const unused = () => { throw new Error('stubbed module called'); };",
+          "let nanoidCount = 0;",
+          "export default () => unused; export const sanitizeUrl = unused;",
+          "export const nanoid = () => `nanoid-${++nanoidCount}`;",
+        ].join("\n"),
+        loader: "js",
+      };
+    });
   },
 };
 

@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, runCase, writeGroup } from "../lib/harness.mjs";
-import { colors, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements } from "./cases.mjs";
+import { colors, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -26,6 +26,7 @@ const lib = await bundleExcalidraw(
   export { syncMovedIndices, syncInvalidIndices } from "@excalidraw/element/fractionalIndex";
   export { applyDarkModeFilter, isTransparent } from "@excalidraw/common";
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
+  export { convertToExcalidrawElements } from "@excalidraw/element/transform";
   `,
 );
 
@@ -191,5 +192,41 @@ writeGroup(
     call: fn,
     args: [opts],
     ...runCase(name, () => lib[fn](structuredClone(opts))),
+  })),
+);
+
+/**
+ * Stable across Math.random streams: `seed` and `versionNonce` are dropped and every id is
+ * renamed to `e<position>` in output order, references included. `crates/scene/tests/
+ * baseline.rs`'s `normalize_skeleton_output` does the same.
+ */
+function normalizeSkeletonOutput(elements) {
+  const rename = new Map(elements.map((e, i) => [e.id, `e${i}`]));
+  const id = (value) => rename.get(value) ?? value;
+  return elements.map(({ seed, versionNonce, ...rest }) => {
+    const out = structuredClone(rest);
+    out.id = id(out.id);
+    if (typeof out.containerId === "string") out.containerId = id(out.containerId);
+    if (Array.isArray(out.boundElements)) out.boundElements = out.boundElements.map((b) => ({ ...b, id: id(b.id) }));
+    for (const key of ["startBinding", "endBinding"]) {
+      if (out[key]) out[key] = { ...out[key], elementId: id(out[key].elementId) };
+    }
+    return out;
+  });
+}
+
+writeGroup(
+  outDir,
+  "skeleton",
+  source,
+  skeletonBatches.map(([name, skeletons]) => ({
+    name,
+    call: "convertToExcalidrawElements",
+    args: [skeletons],
+    ...runCase(
+      name,
+      () => normalizeSkeletonOutput(lib.convertToExcalidrawElements(structuredClone(skeletons))),
+      { exactDespiteRandom: true },
+    ),
   })),
 );
