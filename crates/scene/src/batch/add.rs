@@ -819,7 +819,6 @@ pub(crate) fn bind_label(
         .stroke_color
         .clone();
     let angle = container_before.placement().map_or(0.0, |p| p.angle);
-    let kind = container_before.kind().to_owned();
     let container_id = container_before
         .id()
         .expect("bind_label's container has an id")
@@ -880,10 +879,32 @@ pub(crate) fn bind_label(
         bump_version(&mut file.elements[label_position], env);
     }
 
-    if let Element::Text(t) = &file.elements[label_position]
-        && let Some([max_w, max_h]) = bound_text_max_size(&container_after)
-        && (t.base.width > max_w || t.base.height > max_h)
-    {
+    warn_if_label_overflows(
+        &container_after,
+        &file.elements[label_position],
+        name,
+        warnings,
+    );
+
+    label_position
+}
+
+/// Pushes a warning to `warnings` when `label`'s width or height exceeds what `container`
+/// fits (`name` is how the warning refers to `container`); a no-op when it fits, when
+/// `label` is not a text element, or for a container type [`bound_text_max_size`] has no
+/// limit for.
+pub(crate) fn warn_if_label_overflows(
+    container: &Element,
+    label: &Element,
+    name: &str,
+    warnings: &mut Vec<String>,
+) {
+    let Element::Text(t) = label else { return };
+    let Some([max_w, max_h]) = bound_text_max_size(container) else {
+        return;
+    };
+    if t.base.width > max_w || t.base.height > max_h {
+        let kind = container.kind();
         let fmt = |v: f64| format!("{v:.0}");
         warnings.push(format!(
             "{name}: label needs {}x{} but the {kind} fits {}x{}; make the {kind} larger or \
@@ -894,8 +915,6 @@ pub(crate) fn bind_label(
             fmt(max_h)
         ));
     }
-
-    label_position
 }
 
 /// First point moved to `[0, 0]`, the offset added to the origin (`getNormalizedPoints`).
