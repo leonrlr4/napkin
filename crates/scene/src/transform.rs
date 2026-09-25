@@ -86,20 +86,43 @@ pub fn corner_handles(
 
 /// Whether `element` alone, as the sole member of a selection, is a two-point line or arrow:
 /// napkin shows no handles at all for that case (see the module doc comment) rather than
-/// porting `OMIT_SIDES_FOR_LINE_SLASH`/`BACKSLASH`.
+/// porting `OMIT_SIDES_FOR_LINE_SLASH`/`BACKSLASH` for it. A two-point freedraw is different:
+/// it keeps its (partial) corner handles, see [`freedraw_two_point_omit`].
 fn is_two_point_linear(element: &Element) -> bool {
     matches!(element, Element::Line(l) | Element::Arrow(l) if l.points.len() <= 2)
 }
 
-/// The bounds and margin [`corner_handles`] should use for `selection`'s corner squares, or
-/// `None` when napkin shows no handles at all: an empty selection, a single two-point line or
-/// arrow, or a selection containing a rotated, locked, elbow-arrow or [`Element::Raw`]
-/// element (`hasBoundingBox` plus `getTransformHandles`'s own locked/elbow-arrow checks).
+/// `getTransformHandles`'s slash/backslash corner omission for a two-point freedraw element,
+/// keyed on which quadrant its second point (the first is always `(0, 0)`) falls in:
+/// `OMIT_SIDES_FOR_LINE_SLASH` (omit `nw`/`se`, keeping `ne`/`sw`) for the two "/"-ish
+/// quadrants, `OMIT_SIDES_FOR_LINE_BACKSLASH` (omit neither, since it only lists the `n`/`s`/
+/// `e`/`w` sides this crate never shows anyway) for the two "\"-ish quadrants and for a point
+/// sitting on an axis.
+fn freedraw_two_point_omit(points: &[[f64; 2]]) -> Vec<HandleKind> {
+    let [px, py] = points[1];
+    if px == 0.0 || py == 0.0 {
+        Vec::new()
+    } else if px > 0.0 && py < 0.0 {
+        vec![HandleKind::Nw, HandleKind::Se]
+    } else if px > 0.0 && py > 0.0 {
+        Vec::new()
+    } else if px < 0.0 && py > 0.0 {
+        vec![HandleKind::Nw, HandleKind::Se]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The bounds, margin and corner omission [`corner_handles`] should use for `selection`'s
+/// corner squares, or `None` when napkin shows no handles at all: an empty selection, a single
+/// two-point line or arrow, or a selection containing a rotated, locked, elbow-arrow or
+/// [`Element::Raw`] element (`hasBoundingBox` plus `getTransformHandles`'s own locked/
+/// elbow-arrow checks).
 fn resizable_bounds(
     geometry: &mut GeometryCache,
     file: &SceneFile,
     selection: &Selection,
-) -> Option<(Bounds, f64)> {
+) -> Option<(Bounds, f64, Vec<HandleKind>)> {
     let positions = selection.positions(file);
     if positions.is_empty() {
         return None;
@@ -132,9 +155,13 @@ fn resizable_bounds(
         } else {
             DEFAULT_TRANSFORM_HANDLE_SPACING
         };
-        Some((element_absolute_coords(element)?.0, margin))
+        let omit = match element {
+            Element::Freedraw(f) if f.points.len() == 2 => freedraw_two_point_omit(&f.points),
+            _ => Vec::new(),
+        };
+        Some((element_absolute_coords(element)?.0, margin, omit))
     } else {
-        Some((selected_bounds(geometry, file, selection)?, 4.0))
+        Some((selected_bounds(geometry, file, selection)?, 4.0, Vec::new()))
     }
 }
 
@@ -147,7 +174,7 @@ pub fn selection_handles(
     zoom: f64,
 ) -> Vec<(HandleKind, Bounds)> {
     match resizable_bounds(geometry, file, selection) {
-        Some((bounds, margin)) => corner_handles(bounds, zoom, margin, &[]),
+        Some((bounds, margin, omit)) => corner_handles(bounds, zoom, margin, &omit),
         None => Vec::new(),
     }
 }
@@ -181,8 +208,8 @@ pub fn handle_at(
     point: [f64; 2],
     zoom: f64,
 ) -> Option<HandleKind> {
-    let (corner_bounds, margin) = resizable_bounds(geometry, file, selection)?;
-    for (kind, bounds) in corner_handles(corner_bounds, zoom, margin, &[]) {
+    let (corner_bounds, margin, omit) = resizable_bounds(geometry, file, selection)?;
+    for (kind, bounds) in corner_handles(corner_bounds, zoom, margin, &omit) {
         if point[0] >= bounds[0]
             && point[0] <= bounds[2]
             && point[1] >= bounds[1]
@@ -1046,7 +1073,7 @@ pub fn bound_text_position(container: &Element, text: &TextElement) -> Option<[f
 }
 
 /// Repositions `container_position`'s bound text (if it has one, and it is not deleted) with
-/// [`bound_text_position`], rounding through `Math.round`. Returns whether the text moved.
+/// [`bound_text_position`]. Returns whether the text moved.
 fn reposition_bound_text(
     file: &mut SceneFile,
     container_position: usize,
@@ -1071,10 +1098,9 @@ fn reposition_bound_text(
     let Element::Text(text) = &file.elements[text_position] else {
         return false;
     };
-    let Some([x, y]) = bound_text_position(&container, text) else {
+    let Some([new_x, new_y]) = bound_text_position(&container, text) else {
         return false;
     };
-    let (new_x, new_y) = (rough::js::math_round(x), rough::js::math_round(y));
 
     let Element::Text(t) = &mut file.elements[text_position] else {
         unreachable!("checked above")
@@ -1195,6 +1221,40 @@ mod tests {
             .map(|(k, _)| k)
             .collect();
         assert_eq!(slash, vec![Ne, Sw]);
+    }
+
+    #[test]
+    fn freedraw_two_point_selection_omits_slash_or_backslash_corners() {
+        use HandleKind::*;
+        let file = sample::file(vec![
+            sample::freedraw("slash", [0.0, 0.0], &[[0.0, 0.0], [10.0, -5.0]]),
+            sample::freedraw("backslash", [100.0, 0.0], &[[0.0, 0.0], [10.0, 5.0]]),
+        ]);
+        let mut g = GeometryCache::default();
+
+        let slash = Selection::from_ids(["slash"]);
+        let kinds: Vec<HandleKind> = selection_handles(&mut g, &file, &slash, 1.0)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(kinds, vec![Ne, Sw]);
+        // The kept `ne` corner still resolves to itself...
+        assert_eq!(
+            handle_at(&mut g, &file, &slash, [14.0, -9.0], 1.0),
+            Some(Ne)
+        );
+        // ...but the omitted `nw` corner never does, even where its square used to sit.
+        assert_ne!(
+            handle_at(&mut g, &file, &slash, [-4.0, -9.0], 1.0),
+            Some(Nw)
+        );
+
+        let backslash = Selection::from_ids(["backslash"]);
+        let kinds: Vec<HandleKind> = selection_handles(&mut g, &file, &backslash, 1.0)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(kinds, vec![Nw, Ne, Sw, Se]);
     }
 
     #[test]
@@ -1394,5 +1454,34 @@ mod tests {
             &[[0.0, 0.0], [1.0, 1.0]],
         ));
         assert_eq!(bound_text_position(&line, &text), None);
+    }
+
+    #[test]
+    fn bound_text_reposition_keeps_fractional_coordinates() {
+        let centered = |container: &str| {
+            sample::with(
+                sample::text("t", [30.0, 40.0, 40.0, 20.0], "hi", Some(container)),
+                json!({"textAlign": "center", "verticalAlign": "middle"}),
+            )
+        };
+        // An ellipse container's `computeBoundTextPosition` involves `sqrt(2)`, so its bound
+        // text's repositioned x/y are never round numbers; `reposition_bound_text` must not
+        // round them either (only `getBoundTextMaxWidth`/`Height`, folded into
+        // `bound_text_position` itself, round).
+        let container = sample::with(
+            sample::generic("ellipse", "e", [0.0, 0.0, 100.0, 100.0]),
+            json!({"boundElements": [{"id": "t", "type": "text"}]}),
+        );
+        let file = resize(
+            vec![container, centered("e")],
+            &[0],
+            HandleKind::Se,
+            [200.0, 100.0],
+            PLAIN,
+        );
+        let rect = rect_of(&file, 1);
+        assert!((rect[0] - 79.789_321_881_345_24).abs() < 1e-9, "{rect:?}");
+        assert!((rect[1] - 40.144_660_940_672_62).abs() < 1e-9, "{rect:?}");
+        assert_eq!((rect[2], rect[3]), (40.0, 20.0));
     }
 }
