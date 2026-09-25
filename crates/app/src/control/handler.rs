@@ -1,9 +1,9 @@
 //! Turns a [`Request`] into a [`Response`] against one [`Session`]: no socket I/O, no GPU
-//! rasterization (decision 4). The caller (the socket server, or a test) builds a fresh
-//! `Session` per request and, for a mutating request, waits for `Editor::is_idle` first
-//! ([`is_mutating`]).
+//! rasterization. The caller (the socket server, or a test) builds a fresh `Session` per
+//! request and, for a mutating request, waits for `Editor::is_idle` first ([`is_mutating`]).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use scene::editor::Editor;
 use scene::env::Env;
@@ -11,8 +11,9 @@ use scene::text::TextMeasure;
 use serde_json::{Value, json};
 
 use crate::camera::Camera;
+use crate::control::render::{self, Rasterize};
 use crate::control::summary::{element_lines, format_number, full_lines};
-use crate::control::{Request, Response};
+use crate::control::{RenderTarget, Request, Response};
 
 /// Everything one request needs beyond the wire protocol.
 pub struct Session<'a, E: Env> {
@@ -26,6 +27,9 @@ pub struct Session<'a, E: Env> {
     /// The canvas size in logical points.
     pub canvas_size: [f64; 2],
     pub measure: &'a mut dyn TextMeasure,
+    /// Whether a `render` should draw the scene in dark mode.
+    pub dark: bool,
+    pub rasterizer: &'a mut dyn Rasterize,
 }
 
 /// Whether the request changes the scene, and so must wait for `Editor::is_idle`.
@@ -40,7 +44,7 @@ pub fn handle<E: Env>(session: &mut Session<'_, E>, request: &Request) -> Respon
         Request::Selection { full } => selection(session, *full),
         Request::View => view(session),
         Request::Apply { batch } => apply(session, batch),
-        Request::Render { .. } => Response::error("render is not available"),
+        Request::Render { out, target } => render(session, out, *target),
     }
 }
 
@@ -154,8 +158,41 @@ fn apply<E: Env>(session: &mut Session<'_, E>, batch: &Value) -> Response {
     }
 }
 
+fn render<E: Env>(session: &mut Session<'_, E>, out: &Path, target: RenderTarget) -> Response {
+    let plan = match render::plan(
+        session.editor.file(),
+        session.editor.selection(),
+        target,
+        session.camera,
+        session.canvas_size,
+    ) {
+        Ok(plan) => plan,
+        Err(message) => return Response::error(message),
+    };
+    let rgba = match session.rasterizer.rasterize(
+        Arc::new(plan.scene),
+        plan.camera,
+        plan.size_px,
+        session.dark,
+    ) {
+        Ok(rgba) => rgba,
+        Err(message) => return Response::error(message),
+    };
+    let bytes = render::encode_png(&rgba, plan.size_px);
+    match std::fs::write(out, bytes) {
+        Ok(()) => Response::ok(format!(
+            "{} {}x{}",
+            out.display(),
+            plan.size_px[0],
+            plan.size_px[1]
+        )),
+        Err(error) => Response::error(error.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use scene::SceneFile;
     use scene::sample::{self, CharWidthMeasure};
 
     use super::*;
@@ -173,9 +210,30 @@ mod tests {
         }
     }
 
+    /// A [`Rasterize`] that records every call and hands back an opaque white image, so tests
+    /// can check `render` plans, dispatches and writes without a GPU.
+    #[derive(Default)]
+    struct FakeRasterizer {
+        calls: Vec<(Arc<SceneFile>, Camera, [u32; 2], bool)>,
+    }
+
+    impl Rasterize for FakeRasterizer {
+        fn rasterize(
+            &mut self,
+            scene: Arc<SceneFile>,
+            camera: Camera,
+            size_px: [u32; 2],
+            dark: bool,
+        ) -> Result<Vec<u8>, String> {
+            self.calls.push((scene, camera, size_px, dark));
+            Ok(vec![255; (size_px[0] * size_px[1] * 4) as usize])
+        }
+    }
+
     fn session<'a>(
         editor: &'a mut Editor<FixedEnv>,
         measure: &'a mut CharWidthMeasure,
+        rasterizer: &'a mut dyn Rasterize,
     ) -> Session<'a, FixedEnv> {
         Session {
             editor,
@@ -190,6 +248,8 @@ mod tests {
             },
             canvas_size: [800.0, 600.0],
             measure,
+            dark: false,
+            rasterizer,
         }
     }
 
@@ -204,7 +264,8 @@ mod tests {
             FixedEnv,
         );
         let mut measure = CharWidthMeasure;
-        let mut s = session(&mut editor, &mut measure);
+        let mut rasterizer = FakeRasterizer::default();
+        let mut s = session(&mut editor, &mut measure, &mut rasterizer);
         assert_eq!(
             handle(&mut s, &Request::Status),
             Response::ok(
@@ -225,7 +286,8 @@ mod tests {
     fn apply_reports_ids_and_rejects_on_a_readonly_canvas() {
         let mut editor = Editor::new(sample::file(vec![]), FixedEnv);
         let mut measure = CharWidthMeasure;
-        let mut s = session(&mut editor, &mut measure);
+        let mut rasterizer = FakeRasterizer::default();
+        let mut s = session(&mut editor, &mut measure, &mut rasterizer);
         let batch = json!({"ops": [{"op": "add", "type": "rectangle", "id": "a", "x": 0, "y": 0, "width": 10, "height": 10}]});
         let response = handle(
             &mut s,
@@ -266,5 +328,65 @@ mod tests {
         );
         assert!(is_mutating(&Request::Apply { batch: json!({}) }));
         assert!(!is_mutating(&Request::Scene { full: true }));
+    }
+
+    #[test]
+    fn render_plans_rasterizes_and_writes_a_decodable_png() {
+        let mut editor = Editor::new(
+            sample::file(vec![sample::generic(
+                "rectangle",
+                "r",
+                [0.0, 0.0, 100.0, 50.0],
+            )]),
+            FixedEnv,
+        );
+        let mut measure = CharWidthMeasure;
+        let mut rasterizer = FakeRasterizer::default();
+        let mut s = session(&mut editor, &mut measure, &mut rasterizer);
+        let out = std::env::temp_dir().join(format!(
+            "napkin-handler-render-test-{}.png",
+            std::process::id()
+        ));
+
+        let response = handle(
+            &mut s,
+            &Request::Render {
+                out: out.clone(),
+                target: RenderTarget::All,
+            },
+        );
+
+        assert!(response.ok, "{}", response.output);
+        assert_eq!(response.output, format!("{} 232x132", out.display()));
+        assert_eq!(rasterizer.calls.len(), 1);
+        assert_eq!(rasterizer.calls[0].2, [232, 132]);
+        assert!(!rasterizer.calls[0].3, "dark defaults to false");
+
+        let bytes = std::fs::read(&out).unwrap();
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (232, 132));
+        std::fs::remove_file(&out).ok();
+    }
+
+    #[test]
+    fn render_reports_a_plan_error_without_calling_the_rasterizer() {
+        let mut editor = Editor::new(sample::file(vec![]), FixedEnv);
+        let mut measure = CharWidthMeasure;
+        let mut rasterizer = FakeRasterizer::default();
+        let mut s = session(&mut editor, &mut measure, &mut rasterizer);
+
+        let response = handle(
+            &mut s,
+            &Request::Render {
+                out: "/tmp/napkin-handler-render-unreachable.png".into(),
+                target: RenderTarget::All,
+            },
+        );
+
+        assert!(!response.ok);
+        assert!(rasterizer.calls.is_empty());
     }
 }

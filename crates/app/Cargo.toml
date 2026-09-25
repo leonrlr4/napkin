@@ -15,6 +15,7 @@ eframe.workspace = true
 egui-wgpu.workspace = true
 glyphon.workspace = true
 lyon.workspace = true
+png.workspace = true
 raw-window-handle.workspace = true
 rough.workspace = true
 rustix.workspace = true

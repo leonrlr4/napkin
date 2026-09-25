@@ -1,9 +1,10 @@
-//! The napkin control protocol (AI spec §3, decision 5): one JSON request per line in,
-//! one JSON response per line out. [`handler`] turns a [`Request`] into a [`Response`]
-//! without touching the socket or the GUI; [`summary`] formats the `scene` and `selection`
-//! listings a `Response::output` carries.
+//! The napkin control protocol: one JSON request per line in, one JSON response per line out.
+//! [`handler`] turns a [`Request`] into a [`Response`] without touching the socket or the GUI;
+//! [`summary`] formats the `scene` and `selection` listings a `Response::output` carries;
+//! [`render`] plans the region and encodes the PNG for a `render` request.
 
 pub mod handler;
+pub mod render;
 pub mod summary;
 
 use serde::{Deserialize, Serialize};
