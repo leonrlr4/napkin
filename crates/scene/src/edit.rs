@@ -103,16 +103,20 @@ pub fn drag_targets(file: &SceneFile, selection: &Selection) -> Vec<usize> {
 /// `updateElementCoords`: sets every target's position to its `start` position plus `offset`.
 /// A `Raw` target whose `x`/`y` are not both numbers does not move and is not touched.
 ///
-/// A bound arrow that is the only target does not move at all — and so keeps both its
-/// bindings — until `offset` clears [`DRAGGING_THRESHOLD`], the same guard
-/// `dragSelectedElements` applies before it will unbind a lone dragged arrow by accident. Once
-/// an arrow does move, whichever of its `startBinding`/`endBinding` names an element that is
-/// not itself among `targets` is cleared, the way `unbindBindingElement` clears it: the arrow's
-/// own binding field is set to `null`, and the arrow is dropped from that element's
-/// `boundElements` (unless the arrow's other end is bound to the very same element, in which
-/// case that `boundElements` record still covers the remaining end and stays). Every call
-/// recomputes from `start` and `targets`, so calling this repeatedly with the same arguments is
-/// idempotent, not cumulative.
+/// A bound arrow that is the only *primary* target does not move at all — and so keeps both
+/// its bindings, and so does its label, since it moves with the arrow (see below) — until
+/// `offset` clears [`DRAGGING_THRESHOLD`], the same guard `dragSelectedElements` applies before
+/// it will unbind a lone dragged arrow by accident. Once an arrow does move, whichever of its
+/// `startBinding`/`endBinding` names an element that is not itself a primary target is cleared,
+/// the way `unbindBindingElement` clears it: the arrow's own binding field is set to `null`,
+/// and the arrow is dropped from that element's `boundElements` (unless the arrow's other end
+/// is bound to the very same element, in which case that `boundElements` record still covers
+/// the remaining end and stays). "Primary" mirrors `dragSelectedElements`'s
+/// `elementsToUpdate`, which never includes a bound text: it is `targets` minus any text
+/// element whose container is itself in `targets` (a container's label, or an arrow's — see
+/// the module doc comment for why napkin puts arrow labels in `targets` at all, unlike
+/// Excalidraw). Every call recomputes from `start` and `targets`, so calling this repeatedly
+/// with the same arguments is idempotent, not cumulative.
 pub fn apply_drag(
     file: &mut SceneFile,
     start: &SceneFile,
@@ -127,18 +131,42 @@ pub fn apply_drag(
         .enumerate()
         .filter_map(|(pos, element)| element.id().map(|id| (id, pos)))
         .collect();
+    let container_pos = |pos: usize| {
+        start.elements[pos]
+            .container_id()
+            .and_then(|cid| id_to_pos.get(cid).copied())
+    };
+    let is_bound_text_target =
+        |pos: usize| container_pos(pos).is_some_and(|cpos| target_positions.contains(&cpos));
+    let primary_targets: HashSet<usize> = target_positions
+        .iter()
+        .copied()
+        .filter(|&pos| !is_bound_text_target(pos))
+        .collect();
     let past_threshold = offset[0].abs().max(offset[1].abs()) > DRAGGING_THRESHOLD;
 
+    // Arrows the lone-target threshold guard holds still; a label whose container is one of
+    // these is held still along with it, so it does not drift away from a stationary arrow.
+    let suppressed_arrows: HashSet<usize> = targets
+        .iter()
+        .copied()
+        .filter(|&pos| {
+            start.elements[pos].kind() == "arrow"
+                && primary_targets.len() <= 1
+                && !past_threshold
+                && (start.elements[pos]
+                    .binding_target(LinearEnd::Start)
+                    .is_some()
+                    || start.elements[pos].binding_target(LinearEnd::End).is_some())
+        })
+        .collect();
+
     for &pos in targets {
-        let is_arrow = start.elements[pos].kind() == "arrow";
-        if is_arrow {
-            let has_start = start.elements[pos]
-                .binding_target(LinearEnd::Start)
-                .is_some();
-            let has_end = start.elements[pos].binding_target(LinearEnd::End).is_some();
-            if targets.len() <= 1 && !past_threshold && (has_start || has_end) {
-                continue;
-            }
+        if suppressed_arrows.contains(&pos) {
+            continue;
+        }
+        if container_pos(pos).is_some_and(|cpos| suppressed_arrows.contains(&cpos)) {
+            continue;
         }
 
         let Some(placement) = start.elements[pos].placement() else {
@@ -150,7 +178,7 @@ pub fn apply_drag(
             bump_version(&mut file.elements[pos], env);
         }
 
-        if !is_arrow {
+        if start.elements[pos].kind() != "arrow" {
             continue;
         }
         for end in [LinearEnd::Start, LinearEnd::End] {
@@ -159,7 +187,7 @@ pub fn apply_drag(
             };
             let bound_to_a_target = id_to_pos
                 .get(target_id)
-                .is_some_and(|target_pos| target_positions.contains(target_pos));
+                .is_some_and(|target_pos| primary_targets.contains(target_pos));
             if !bound_to_a_target {
                 unbind_arrow_end(file, &id_to_pos, pos, end, env);
             }
@@ -718,6 +746,24 @@ mod tests {
         assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
         assert_eq!(get(&file, "a").binding_target(LinearEnd::End), Some("s"));
         assert_eq!(get(&file, "a").version(), get(&start, "a").version());
+    }
+
+    #[test]
+    fn labeled_lone_bound_arrow_stays_put_with_its_label_under_the_threshold() {
+        let start = bindings_scene();
+        let selection = Selection::from_ids(["a"]);
+        let targets = drag_targets(&start, &selection);
+        // "a" and its label "l": more than one target, but "l" is not primary (its container,
+        // "a", is itself a target), so the lone-arrow guard still applies to "a".
+        assert_eq!(targets, vec![2, 3]);
+        let mut file = start.clone();
+        apply_drag(&mut file, &start, &targets, [5.0, 5.0], &mut TestEnv(0));
+        assert_eq!(xy(&file, "a"), xy(&start, "a"));
+        assert_eq!(xy(&file, "l"), xy(&start, "l"));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
+        assert_eq!(get(&file, "a").binding_target(LinearEnd::End), Some("s"));
+        assert_eq!(get(&file, "a").version(), get(&start, "a").version());
+        assert_eq!(get(&file, "l").version(), get(&start, "l").version());
     }
 
     #[test]
