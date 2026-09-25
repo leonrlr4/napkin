@@ -175,9 +175,10 @@ pub fn box_select(geometry: &mut GeometryCache, file: &SceneFile, rect: Bounds) 
                 .bound_elements()
                 .into_iter()
                 .find(|&(_, kind)| kind == "text")
-            && let Some(placement) = index_by_id
-                .get(text_id)
-                .and_then(|&index| file.elements[index].placement())
+            && let Some(placement) = index_by_id.get(text_id).and_then(|&index| {
+                let text = &file.elements[index];
+                (!text.is_deleted()).then(|| text.placement()).flatten()
+            })
         {
             let label_aabb = [
                 placement.x,
@@ -295,6 +296,9 @@ pub(crate) fn hit_element_bound_text(
     let Some(&index) = index_by_id.get(text_id) else {
         return false;
     };
+    if elements[index].is_deleted() {
+        return false;
+    }
     is_point_in_element(geometry, &elements[index], point)
 }
 
@@ -495,6 +499,65 @@ mod tests {
         assert_eq!(
             elements_at(&mut geometry, &file, [100.0, 300.0], 1.0, &none),
             vec![2]
+        );
+    }
+
+    #[test]
+    fn a_deleted_bound_text_is_not_resolved_as_part_of_its_owner() {
+        let file = sample::file(vec![
+            sample::with(
+                sample::with(
+                    sample::linear("arrow", "a", [0.0, 300.0], &[[0.0, 0.0], [200.0, 0.0]]),
+                    json!({"roughness": 0, "roundness": null}),
+                ),
+                json!({"boundElements": [{"id": "label", "type": "text"}]}),
+            ),
+            sample::with(
+                sample::text("label", [80.0, 290.0, 40.0, 20.0], "hi", Some("a")),
+                json!({"isDeleted": true}),
+            ),
+        ]);
+        let none = Selection::new();
+        // 9 units from the arrow's own line, inside the (deleted) label's bounds: no longer
+        // resolves as part of the arrow, since a deleted bound text is not a live label.
+        assert_eq!(at(&file, [100.0, 309.0], &none), None);
+        // The arrow's own line is still hit normally.
+        assert_eq!(at(&file, [100.0, 300.9], &none).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn box_selection_ignores_a_deleted_arrow_label() {
+        let file = sample::file(vec![sample::with(
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [50.0, 0.0]]),
+                json!({"roughness": 0, "roundness": null}),
+            ),
+            json!({"boundElements": [{"id": "label", "type": "text"}]}),
+        )]);
+        let mut with_label = file.clone();
+        with_label.elements.push(Element::from_value(sample::text(
+            "label",
+            [500.0, 500.0, 40.0, 20.0],
+            "hi",
+            Some("a"),
+        )));
+        let mut deleted_label = file.clone();
+        deleted_label
+            .elements
+            .push(Element::from_value(sample::with(
+                sample::text("label", [500.0, 500.0, 40.0, 20.0], "hi", Some("a")),
+                json!({"isDeleted": true}),
+            )));
+
+        let mut geometry = GeometryCache::default();
+        let rect = [-5.0, -5.0, 55.0, 5.0];
+        // A live label far from the arrow widens its bounds past the box, so it is excluded...
+        assert!(box_select(&mut geometry, &with_label, rect).is_empty());
+        // ...but a deleted label is not a live label, so the arrow is selected on its own
+        // bounds alone.
+        assert_eq!(
+            box_select(&mut geometry, &deleted_label, rect),
+            Selection::from_ids(["a"])
         );
     }
 

@@ -1,6 +1,10 @@
-//! Undo/redo over element changes, keyed by position rather than id so an insertion or
-//! removal at the end of the element list (matched, per Excalidraw's `HistoryEntry`, by
-//! comparing `before` and `after` position by position) replays correctly in both directions.
+//! Undo/redo over element changes: napkin's own design, not a port of Excalidraw's
+//! id-keyed, per-property `StoreDelta`/`HistoryDelta`. Each recorded step is a snapshot diff
+//! by position rather than id, storing each changed position's element before and after
+//! verbatim (including `version`/`versionNonce`/`updated`) so undo and redo restore it
+//! exactly rather than recomputing it from a property delta; an insertion or removal at the
+//! end of the element list still replays correctly in both directions, since `None` on either
+//! side of a [`Change`] marks a position that did not exist in that state.
 //!
 //! Only elements are recorded; `appState` (the view) is not history's concern here, since
 //! napkin keeps scroll and zoom in the app layer rather than restoring them on undo.
