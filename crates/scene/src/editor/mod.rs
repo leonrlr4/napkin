@@ -6,13 +6,18 @@
 //! `getPointIndexUnderCursor` and `handlePointerMove`; `packages/excalidraw/renderer/
 //! interactiveScene.ts`'s `renderSelectionBorder` and its transform-handle painting;
 //! `packages/excalidraw/actions/actionDeleteSelected.tsx`, `actionSelectAll.ts` and
-//! `actionHistory.tsx`; all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
+//! `actionHistory.tsx`; and, for shape, line, arrow and freedraw creation, the sources listed
+//! in `create`'s own doc comment; all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
 //!
-//! Only the selection tool reacts to pointer events here: a creation tool's pointer events and
-//! `Command::Finalize` are no-ops, since napkin has no shape being drawn yet. `Command::Escape`
-//! only clears the selection while idle; there is no in-progress shape to cancel.
+//! The selection tool and the creation tools each keep their own gesture (`select_gesture`,
+//! `create_gesture`); at most one is active at a time, since [`Editor::set_tool`] finishes both
+//! before switching. `Command::Escape` clears the selection while idle, discards or finishes an
+//! active creation gesture (see `create::escape`), and otherwise does nothing: napkin has no
+//! other in-progress edit to cancel.
 
+mod create;
 mod select;
+mod style;
 
 use std::sync::Arc;
 
@@ -23,6 +28,8 @@ use crate::geometry::{Bounds, GeometryCache, rotate_point};
 use crate::history::History;
 use crate::selection::{self, Selection};
 use crate::transform;
+
+pub use style::{ArrowType, EdgeStyle, ItemStyle, StrokeWidth};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -101,7 +108,9 @@ pub struct Editor<E: Env> {
     env: E,
     tool: Tool,
     selection: Selection,
-    gesture: select::Gesture,
+    select_gesture: select::Gesture,
+    create_gesture: create::Gesture,
+    style: ItemStyle,
     history: History,
     geometry: GeometryCache,
     revision: u64,
@@ -118,7 +127,9 @@ impl<E: Env> Editor<E> {
             env,
             tool: Tool::default(),
             selection: Selection::new(),
-            gesture: select::Gesture::None,
+            select_gesture: select::Gesture::None,
+            create_gesture: create::Gesture::None,
+            style: ItemStyle::default(),
             history: History::default(),
             geometry: GeometryCache::default(),
             revision: 0,
@@ -138,7 +149,8 @@ impl<E: Env> Editor<E> {
         self.file = Arc::new(file);
         self.selection = Selection::new();
         self.history.clear();
-        self.gesture = select::Gesture::None;
+        self.select_gesture = select::Gesture::None;
+        self.create_gesture = create::Gesture::None;
         self.geometry.clear();
     }
 
@@ -157,14 +169,18 @@ impl<E: Env> Editor<E> {
     }
 
     /// Any tool other than [`Tool::Selection`] and [`Tool::Hand`] clears the selection
-    /// (`clearSelectionIfNotUsingSelection`). First ends whatever selection-tool gesture is in
-    /// progress the way releasing the pointer at its last position would: a drag, resize or
+    /// (`clearSelectionIfNotUsingSelection`). First ends whatever gesture is in progress the
+    /// way releasing the pointer at its last position would: a selection-tool drag, resize or
     /// point-drag records one history step, a box selection just stops (its last result is
-    /// already the current selection). Without this, switching tools mid-gesture would leave
-    /// the mutation unrecorded and the editor permanently "not idle", since `pointer_move` and
-    /// `pointer_up` both do nothing once the tool is no longer `Selection`.
+    /// already the current selection); a shape, initial linear drag or freedraw stroke
+    /// finishes exactly as `pointer_up` would, and a multi-point line or arrow finishes the
+    /// way `Command::Finalize` (Enter) would (`create::finish_gesture`'s own doc comment).
+    /// Without this, switching tools mid-gesture would leave the mutation unrecorded and the
+    /// editor permanently "not idle", since `pointer_move` and `pointer_up` both do nothing
+    /// once the tool no longer matches the gesture in progress.
     pub fn set_tool(&mut self, tool: Tool) {
         select::finish_gesture(self, None);
+        create::finish_gesture(self, None);
         if !matches!(tool, Tool::Selection | Tool::Hand) {
             self.selection = Selection::new();
             self.cursor = Cursor::Crosshair;
@@ -176,21 +192,30 @@ impl<E: Env> Editor<E> {
         &self.selection
     }
 
-    /// No pointer gesture and no multi-point line in progress (napkin has none yet).
+    /// The style values (`currentItem*`) a newly created element takes.
+    pub fn style(&self) -> &ItemStyle {
+        &self.style
+    }
+
+    /// No pointer gesture and no multi-point line in progress.
     pub fn is_idle(&self) -> bool {
-        matches!(self.gesture, select::Gesture::None)
+        matches!(self.select_gesture, select::Gesture::None)
+            && matches!(self.create_gesture, create::Gesture::None)
     }
 
     pub fn pointer_down(&mut self, event: PointerEvent) {
         select::pointer_down(self, event);
+        create::pointer_down(self, event);
     }
 
     pub fn pointer_move(&mut self, event: PointerEvent) {
         select::pointer_move(self, event);
+        create::pointer_move(self, event);
     }
 
     pub fn pointer_up(&mut self, event: PointerEvent) {
         select::pointer_up(self, event);
+        create::pointer_up(self, event);
     }
 
     /// Whether the command did anything. Commands are ignored while a pointer gesture is in
@@ -240,13 +265,16 @@ impl<E: Env> Editor<E> {
                 true
             }
             Command::Escape => {
+                if let Some(handled) = create::escape(self) {
+                    return handled;
+                }
                 if !self.is_idle() || self.selection.is_empty() {
                     return false;
                 }
                 self.selection = Selection::new();
                 true
             }
-            Command::Finalize => false,
+            Command::Finalize => create::finalize_command(self),
         }
     }
 
@@ -298,7 +326,7 @@ impl<E: Env> Editor<E> {
             _ => Vec::new(),
         };
 
-        let box_selection = select::box_selection_overlay(&self.gesture);
+        let box_selection = select::box_selection_overlay(&self.select_gesture);
 
         Overlay {
             outlines,

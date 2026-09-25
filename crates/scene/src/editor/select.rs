@@ -167,7 +167,7 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
     }
 
     if let Some((position, index, offset)) = hit_point(editor, event.at, event.zoom) {
-        editor.gesture = Gesture::PointDrag(PointDragState {
+        editor.select_gesture = Gesture::PointDrag(PointDragState {
             start: Arc::clone(&editor.file),
             selection_before: editor.selection.clone(),
             position,
@@ -192,7 +192,7 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
             event.at,
         );
         let targets = editor.selection.positions(&editor.file);
-        editor.gesture = Gesture::Resize(ResizeState {
+        editor.select_gesture = Gesture::Resize(ResizeState {
             start: Arc::clone(&editor.file),
             selection_before: editor.selection.clone(),
             targets,
@@ -236,7 +236,7 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
         added_now = true;
     }
 
-    editor.gesture = Gesture::Click(ClickState {
+    editor.select_gesture = Gesture::Click(ClickState {
         origin: event.at,
         zoom: event.zoom,
         hit,
@@ -250,8 +250,8 @@ pub(super) fn pointer_move(editor: &mut Editor<impl Env>, event: PointerEvent) {
     if editor.tool != Tool::Selection {
         return;
     }
-    let gesture = std::mem::replace(&mut editor.gesture, Gesture::None);
-    editor.gesture = match gesture {
+    let gesture = std::mem::replace(&mut editor.select_gesture, Gesture::None);
+    editor.select_gesture = match gesture {
         Gesture::None => {
             update_cursor(editor, event);
             Gesture::None
@@ -304,7 +304,7 @@ pub(super) fn pointer_up(editor: &mut Editor<impl Env>, event: PointerEvent) {
 /// mid-gesture has no release position of its own, so whatever the last `pointer_move` already
 /// applied to the scene stands as the gesture's final state.
 pub(super) fn finish_gesture(editor: &mut Editor<impl Env>, event: Option<PointerEvent>) {
-    let gesture = std::mem::replace(&mut editor.gesture, Gesture::None);
+    let gesture = std::mem::replace(&mut editor.select_gesture, Gesture::None);
     match gesture {
         Gesture::None => {}
         Gesture::Click(click) => {
