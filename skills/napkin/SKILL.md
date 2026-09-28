@@ -80,17 +80,23 @@ batches, since aliases don't carry over.
   shape to fit its label, so size the box yourself (see Layout below) and check for the
   `warnings` a too-small box produces.
 - `text`: `x`, `y`, `text` (required), optionally `fontSize`, `fontFamily`, `textAlign`
-  (`left`/`center`/`right`, default `left`). `x`/`y` are the anchor `textAlign`/
-  `verticalAlign` describe, not always the top-left corner: with `textAlign: "center"`,
-  `x` is the horizontal center of the text, not its left edge.
+  (`left`/`center`/`right`, default `left`). `y` is always the top of the text; there is no
+  `verticalAlign` for a standalone text element. `x` is the anchor `textAlign` describes,
+  not always the left edge: with `textAlign: "center"`, `x` is the horizontal center of the
+  text, not its left edge.
 - `line`: `x`, `y`, `points` (an array of `[x, y]` pairs, at least 2; the first point is
   treated as `[0, 0]` and `x`/`y` become its actual position).
 - `arrow`: same as `line`, plus optional `start`/`end`, each `{"id": "<alias or real id>"}`
   naming an existing (or same-batch) rectangle/diamond/ellipse to bind to, and optional
-  `startArrowhead`/`endArrowhead` (e.g. `"arrow"`, `"triangle"`, `"bar"`, or omit for
-  none). A bound end is nudged about half a pixel off the shape's edge; don't try to
-  compensate for that yourself.
+  `startArrowhead`/`endArrowhead` (e.g. `"arrow"`, `"triangle"`, `"bar"`). Omit either one
+  to get napkin's default (none at the start, `"arrow"` at the end); send `null` to force
+  no arrowhead at that end instead of the default. A bound end is nudged about half a pixel
+  off the shape's edge; don't try to compensate for that yourself.
 - `freedraw`: `x`, `y`, `points` (at least 1 pair).
+
+Arrows do not follow the shapes they are bound to: moving or resizing a shape leaves its
+bound arrows exactly where they were. After an `update` that moves or resizes a shape, send
+a separate `update` for each of its arrows' `points`/`x`/`y` so they still meet the shape.
 
 None of these accept a `label` except the three shape types above (arrows and lines don't
 get napkin-managed labels — add a separate `text` element instead).

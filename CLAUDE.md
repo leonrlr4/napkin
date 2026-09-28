@@ -13,7 +13,7 @@ napkin 是常駐的原生 Rust 手繪白板，存檔格式就是 `.excalidraw`�
 
 程式碼、註解、commit message、PR 描述用英文；`docs/decisions/` 底下的文件用中文。這條 repo 慣例壓過全域「個人專案用中文」的規則。
 
-程式碼註解裡的「spec §N」指 `docs/decisions/specs/2026-09-13-napkin-design.md`。那是凍結的決策紀錄，只拿來解讀引用，不當現況看。
+程式碼註解裡的「spec §N」指 `docs/decisions/specs/2026-09-13-napkin-design.md`；「AI spec §N」指 `docs/decisions/specs/2026-09-26-napkin-ai-design.md`。兩份都是凍結的決策紀錄，只拿來解讀引用，不當現況看。
 
 ## 指令
 
