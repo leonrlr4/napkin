@@ -7,11 +7,15 @@ use app::control::server;
 use app::storage::{self, Content};
 use eframe::egui;
 
-/// The file stem, or the whole path when it has none.
-fn name_of(path: &Path) -> String {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+/// `path`'s [`storage::DisplayPath`], or `dir` empty and `name` "untitled" when there is none.
+fn name_of(path: Option<&Path>, home: Option<&Path>) -> storage::DisplayPath {
+    match path {
+        Some(path) => storage::display_path(path, home),
+        None => storage::DisplayPath {
+            dir: String::new(),
+            name: "untitled".to_string(),
+        },
+    }
 }
 
 /// [`storage::load`] translated into the same [`Content`] `storage::open_at_startup` produces,
@@ -30,19 +34,36 @@ fn content_from_load(loaded: storage::Loaded) -> Content {
     }
 }
 
-/// `(name, path, content, notice)`. `path` is `None` when nothing should be written: `--bench`
-/// (spec §9.3, never writes anything, not even `last`), and no file argument with no `$HOME`.
-fn open(file: Option<&Path>, bench: bool) -> (String, Option<PathBuf>, Content, Option<String>) {
+/// `$HOME`, when it is set and non-empty (the same check [`storage::Paths::from_env`] makes).
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `(display, path, content, notice)`. `path` is `None` when nothing should be written:
+/// `--bench` (spec §9.3, never writes anything, not even `last`), and no file argument with no
+/// `$HOME`.
+fn open(
+    file: Option<&Path>,
+    bench: bool,
+) -> (
+    storage::DisplayPath,
+    Option<PathBuf>,
+    Content,
+    Option<String>,
+) {
+    let home = home_dir();
     if bench {
         return match file {
             Some(path) => (
-                name_of(path),
+                name_of(Some(path), home.as_deref()),
                 None,
                 content_from_load(storage::load(path)),
                 None,
             ),
             None => (
-                "untitled".to_string(),
+                name_of(None, home.as_deref()),
                 None,
                 Content::Editable {
                     file: scene::SceneFile::new(),
@@ -62,7 +83,7 @@ fn open(file: Option<&Path>, bench: bool) -> (String, Option<PathBuf>, Content, 
                 eprintln!("napkin: {}: {error}", paths.last.display());
             }
             (
-                opened.name,
+                name_of(Some(&opened.path), home.as_deref()),
                 Some(opened.path),
                 opened.content,
                 opened.notice,
@@ -70,13 +91,13 @@ fn open(file: Option<&Path>, bench: bool) -> (String, Option<PathBuf>, Content, 
         }
         None => match file {
             Some(path) => (
-                name_of(path),
+                name_of(Some(path), home.as_deref()),
                 Some(path.to_path_buf()),
                 content_from_load(storage::load(path)),
                 None,
             ),
             None => (
-                "untitled".to_string(),
+                name_of(None, home.as_deref()),
                 None,
                 Content::Editable {
                     file: scene::SceneFile::new(),
@@ -166,11 +187,11 @@ fn main() -> eframe::Result {
         cli::Command::Gui { file, bench } => (file, bench),
         cli::Command::Control(control_command) => run_control(control_command),
     };
-    let (name, path, content, notice) = open(file.as_deref(), bench);
+    let (display, path, content, notice) = open(file.as_deref(), bench);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("napkin")
-            .with_title(format!("{name} - napkin")),
+            .with_title(format!("{}{} - napkin", display.dir, display.name)),
         renderer: eframe::Renderer::Wgpu,
         multisampling: 4,
         stencil_buffer: 8,
@@ -181,7 +202,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             Ok(Box::new(app::napkin_app::NapkinApp::new(
-                cc, name, path, content, notice, bench,
+                cc, display, path, content, notice, bench,
             )))
         }),
     )

@@ -2,6 +2,7 @@
 //! scene editor's input routing and overlay, and the egui app with its wgpu canvas
 //! (tessellation, text and the render pipelines).
 
+pub mod agent;
 pub mod autosave;
 pub mod bench;
 pub mod camera;

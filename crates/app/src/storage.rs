@@ -99,6 +99,37 @@ fn name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// A path split for display: the folder (with a trailing `/`) and the file name, so the file
+/// name can be shown in a different weight than the folder it sits in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayPath {
+    /// The folder with a trailing `/`, `~`-abbreviated under `home`.
+    pub dir: String,
+    pub name: String,
+}
+
+/// Splits `path` into a [`DisplayPath`]. The folder is abbreviated to `~` when it is `home` or a
+/// descendant of it (matched by whole path components, not by string prefix); otherwise it is
+/// shown in full. A path with no file name (for example `/`) puts the whole path in `name` and
+/// leaves `dir` empty.
+pub fn display_path(path: &Path, home: Option<&Path>) -> DisplayPath {
+    let Some(file_name) = path.file_name() else {
+        return DisplayPath {
+            dir: String::new(),
+            name: path.display().to_string(),
+        };
+    };
+    let name = file_name.to_string_lossy().into_owned();
+    let folder = path.parent().unwrap_or_else(|| Path::new(""));
+    let dir = match home.and_then(|home| folder.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~/".to_string(),
+        Some(rest) => format!("~/{}/", rest.display()),
+        None if folder.as_os_str().is_empty() => String::new(),
+        None => format!("{}/", folder.display()),
+    };
+    DisplayPath { dir, name }
+}
+
 fn open_scratch(paths: &Paths, notice: Option<String>) -> Opened {
     let path = paths.scratch();
     let content = match load(&path) {
@@ -299,6 +330,33 @@ mod tests {
     }
 
     const VALID: &str = r#"{"type":"excalidraw","version":2,"elements":[],"appState":{}}"#;
+
+    #[test]
+    fn display_path_abbreviates_home() {
+        let home = Path::new("/home/leon");
+        assert_eq!(
+            display_path(
+                Path::new("/home/leon/Documents/napkin/scratch.excalidraw"),
+                Some(home)
+            ),
+            DisplayPath {
+                dir: "~/Documents/napkin/".into(),
+                name: "scratch.excalidraw".into()
+            }
+        );
+        assert_eq!(
+            display_path(Path::new("/tmp/a.excalidraw"), Some(home)),
+            DisplayPath {
+                dir: "/tmp/".into(),
+                name: "a.excalidraw".into()
+            }
+        );
+        assert_eq!(
+            display_path(Path::new("/home/leonard/x.excalidraw"), Some(home)).dir,
+            "/home/leonard/",
+            "only whole path components match"
+        );
+    }
 
     #[test]
     fn paths_follow_the_spec() {

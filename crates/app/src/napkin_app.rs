@@ -10,6 +10,7 @@ use scene::editor::{Editor, Modifiers, PointerEvent, Tool};
 use scene::env::SystemEnv;
 use scene::file::NapkinView;
 
+use crate::agent;
 use crate::autosave::{Autosave, DocumentState, Trigger};
 use crate::bench;
 use crate::camera::{Camera, SceneRect, normalized_zoom};
@@ -69,7 +70,8 @@ enum BenchState {
 }
 
 pub struct NapkinApp {
-    name: String,
+    /// The open canvas's path, split for the corner label and the window title.
+    display: storage::DisplayPath,
     load_error: Option<String>,
     /// `Some` whenever `load_error` is `None`: the scene editor driving pointer and keyboard
     /// input, undo/redo and the selection overlay. `None` on a load error, same as M3's
@@ -186,7 +188,7 @@ impl NapkinApp {
     /// so the rarer, more actionable message isn't hidden by a startup one.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        name: String,
+        display: storage::DisplayPath,
         path: Option<PathBuf>,
         content: Content,
         notice: Option<String>,
@@ -222,7 +224,7 @@ impl NapkinApp {
             SaveWorker::spawn(move || ctx.request_repaint())
         });
         NapkinApp {
-            name,
+            display,
             load_error,
             editor,
             capture: PointerCapture::default(),
@@ -402,6 +404,13 @@ fn initial_camera(file: &scene::SceneFile, view_size: [f64; 2]) -> Option<Camera
             max: [0.0, 0.0],
         });
     Some(Camera::centered_on(bounds, view_size))
+}
+
+/// `$HOME`, when it is set and non-empty (the same check [`storage::Paths::from_env`] makes).
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Reads the omarchy theme file, falling back to [`Theme::builtin`] and logging the reason
@@ -772,6 +781,14 @@ impl eframe::App for NapkinApp {
                         } else {
                             edit_input::cursor_icon(editor.cursor())
                         });
+
+                        if !ui.ctx().egui_wants_keyboard_input()
+                            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K))
+                            && let Some(home) = home_dir()
+                            && let Err(error) = agent::open(&home)
+                        {
+                            self.notice = Some((error, Instant::now()));
+                        }
                     }
 
                     // Serving requests here, after this frame's input and reload check but
@@ -909,7 +926,25 @@ impl eframe::App for NapkinApp {
         egui::Area::new(egui::Id::new("napkin-document-name"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
             .show(ui.ctx(), |ui| {
-                ui.label(&self.name);
+                ui.horizontal(|ui| {
+                    // No gap between the two labels: together they read as one path.
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let dir = ui.add(
+                        egui::Label::new(egui::RichText::new(&self.display.dir).weak())
+                            .sense(egui::Sense::click()),
+                    );
+                    let name = ui.add(
+                        egui::Label::new(egui::RichText::new(&self.display.name))
+                            .sense(egui::Sense::click()),
+                    );
+                    if (dir.clicked() || name.clicked())
+                        && let Some(path) = &self.path
+                    {
+                        let absolute = path.display().to_string();
+                        ui.ctx().copy_text(absolute.clone());
+                        self.notice = Some((format!("Copied {absolute}"), Instant::now()));
+                    }
+                });
             });
 
         if let Some(error) = self.autosave.error() {
