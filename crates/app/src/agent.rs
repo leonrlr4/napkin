@@ -1,7 +1,7 @@
 //! Opening or focusing the terminal Ctrl+K runs a Claude Code session in, rooted at the
 //! canvas's napkin folder.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The app-id `xdg-terminal-exec` launches the agent terminal with, and the id `hyprctl` looks
@@ -33,30 +33,57 @@ pub fn action(clients_json: &str) -> Action {
     }
 }
 
+/// Claude Code's per-project conversation directory for `folder`, under `config` (its config
+/// directory: `$CLAUDE_CONFIG_DIR` if set, else `$HOME/.claude`). Claude Code encodes the
+/// absolute folder path by replacing every character that is not ASCII alphanumeric with `-`.
+pub fn conversation_dir(config: &Path, folder: &Path) -> PathBuf {
+    let encoded: String = folder
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    config.join("projects").join(encoded)
+}
+
+/// Whether `dir` contains at least one `*.jsonl` conversation file. A missing directory counts
+/// as no conversation.
+pub fn has_conversation(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+}
+
 /// `xdg-terminal-exec` and its arguments to open Claude Code in `home`'s napkin folder.
-pub fn launch_command(home: &Path) -> (String, Vec<String>) {
+/// `continue_conversation` should be true only when a previous conversation exists for that
+/// folder; `claude --continue` prints an error and exits immediately when there is none, so it
+/// must be omitted in that case rather than passed unconditionally.
+pub fn launch_command(home: &Path, continue_conversation: bool) -> (String, Vec<String>) {
     let napkin_dir = home.join("Documents").join("napkin");
-    (
-        "xdg-terminal-exec".to_string(),
-        vec![
-            format!("--app-id={APP_ID}"),
-            format!("--dir={}", napkin_dir.display()),
-            "--".to_string(),
-            "claude".to_string(),
-            "--continue".to_string(),
-            "--dangerously-skip-permissions".to_string(),
-            "--model".to_string(),
-            "sonnet".to_string(),
-        ],
-    )
+    let mut args = vec![
+        format!("--app-id={APP_ID}"),
+        format!("--dir={}", napkin_dir.display()),
+        "--".to_string(),
+        "claude".to_string(),
+    ];
+    if continue_conversation {
+        args.push("--continue".to_string());
+    }
+    args.push("--dangerously-skip-permissions".to_string());
+    args.push("--model".to_string());
+    args.push("sonnet".to_string());
+    ("xdg-terminal-exec".to_string(), args)
 }
 
 /// Focuses an already-open agent terminal, or launches a new one in `home`'s napkin folder
 /// (creating it first). A `hyprctl clients -j` that fails to run is treated as no window open,
 /// so a launch is attempted instead.
 pub fn open(home: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(home.join("Documents").join("napkin"))
-        .map_err(|error| error.to_string())?;
+    let napkin_dir = home.join("Documents").join("napkin");
+    std::fs::create_dir_all(&napkin_dir).map_err(|error| error.to_string())?;
 
     let clients_json = Command::new("hyprctl")
         .args(["clients", "-j"])
@@ -78,7 +105,11 @@ pub fn open(home: &Path) -> Result<(), String> {
             Ok(())
         }
         Action::Launch => {
-            let (program, args) = launch_command(home);
+            let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".claude"));
+            let continue_conversation = has_conversation(&conversation_dir(&config, &napkin_dir));
+            let (program, args) = launch_command(home, continue_conversation);
             let mut child = Command::new(&program)
                 .args(&args)
                 .spawn()
@@ -106,8 +137,8 @@ mod tests {
     }
 
     #[test]
-    fn launches_claude_in_the_napkin_folder() {
-        let (program, args) = launch_command(Path::new("/home/leon"));
+    fn launches_claude_in_the_napkin_folder_continuing_a_conversation() {
+        let (program, args) = launch_command(Path::new("/home/leon"), true);
         assert_eq!(program, "xdg-terminal-exec");
         assert_eq!(
             args,
@@ -122,5 +153,55 @@ mod tests {
                 "sonnet",
             ]
         );
+    }
+
+    #[test]
+    fn launches_claude_in_the_napkin_folder_without_continuing() {
+        let (program, args) = launch_command(Path::new("/home/leon"), false);
+        assert_eq!(program, "xdg-terminal-exec");
+        assert_eq!(
+            args,
+            [
+                "--app-id=org.napkin.agent",
+                "--dir=/home/leon/Documents/napkin",
+                "--",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                "sonnet",
+            ]
+        );
+    }
+
+    #[test]
+    fn encodes_the_folder_path_like_claude_code_does() {
+        let dir = conversation_dir(
+            Path::new("/home/leon/.claude"),
+            Path::new("/home/leon/Documents/napkin"),
+        );
+        assert_eq!(
+            dir,
+            Path::new("/home/leon/.claude/projects/-home-leon-Documents-napkin")
+        );
+    }
+
+    #[test]
+    fn has_conversation_is_false_for_a_missing_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("napkin-agent-test-missing-{}", std::process::id()));
+        assert!(!has_conversation(&dir));
+    }
+
+    #[test]
+    fn has_conversation_is_false_for_an_empty_directory_and_true_once_a_jsonl_file_exists() {
+        let dir = std::env::temp_dir().join(format!("napkin-agent-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        assert!(!has_conversation(&dir));
+
+        std::fs::write(dir.join("session.jsonl"), "{}").expect("write conversation file");
+        assert!(has_conversation(&dir));
+
+        std::fs::remove_dir_all(&dir).expect("clean up temp dir");
     }
 }
