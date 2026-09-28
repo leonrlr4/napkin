@@ -406,13 +406,6 @@ fn initial_camera(file: &scene::SceneFile, view_size: [f64; 2]) -> Option<Camera
     Some(Camera::centered_on(bounds, view_size))
 }
 
-/// `$HOME`, when it is set and non-empty (the same check [`storage::Paths::from_env`] makes).
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
 /// Reads the omarchy theme file, falling back to [`Theme::builtin`] and logging the reason
 /// when it is missing or invalid (spec §7.6, spec §8).
 fn load_theme() -> Theme {
@@ -784,7 +777,7 @@ impl eframe::App for NapkinApp {
 
                         if !ui.ctx().egui_wants_keyboard_input()
                             && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K))
-                            && let Some(home) = home_dir()
+                            && let Some(home) = storage::home_dir()
                             && let Err(error) = agent::open(&home)
                         {
                             self.notice = Some((error, Instant::now()));

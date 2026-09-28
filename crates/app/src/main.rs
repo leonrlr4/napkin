@@ -34,16 +34,11 @@ fn content_from_load(loaded: storage::Loaded) -> Content {
     }
 }
 
-/// `$HOME`, when it is set and non-empty (the same check [`storage::Paths::from_env`] makes).
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
 /// `(display, path, content, notice)`. `path` is `None` when nothing should be written:
 /// `--bench` (spec §9.3, never writes anything, not even `last`), and no file argument with no
-/// `$HOME`.
+/// `$HOME`. A file argument is made absolute first ([`storage::absolute`]), so every path this
+/// returns (and everything napkin later reports or copies from it) is absolute regardless of how
+/// it was spelled on the command line.
 fn open(
     file: Option<&Path>,
     bench: bool,
@@ -53,7 +48,9 @@ fn open(
     Content,
     Option<String>,
 ) {
-    let home = home_dir();
+    let home = storage::home_dir();
+    let file = file.map(|path| storage::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+    let file = file.as_deref();
     if bench {
         return match file {
             Some(path) => (
