@@ -54,3 +54,4 @@ port 的時候看的是 JS 原始碼（rough：npm 套件的 `bin/*.js`；scene�
 - **JS 數值語意一律走 `rough::js`**：`math_round`（`Math.round` 的 .5 往正無限大）、`to_int32`（`Math.imul` 與位元運算）、`truthy`、`to_fixed`、`atan2`、`hypot`。Rust 的 `f64::round`、`as i32`、`f64::min/max` 在邊界值上跟 JS 不同，基準抓得到，但只在基準恰好涵蓋那個邊界時。
 - **元件只在能無損寫回時才用型別化結構**：`Element::from_value` 把 JSON 解析成 struct 後再序列化一次，語意不相等就整個退回 `Element::Raw`。所以 schema 寫錯的結果是元件變成佔位框，不是檔案被改寫。新增欄位時，`Slot<T>` 區分「沒有」「null」「有值」，`Option<T>` 不區分前兩者；Excalidraw 舊檔沒有的 key 新檔會寫 `null`，選錯會讓元件在 corpus 測試裡退回 Raw。`crates/scene/tests/corpus.rs` 檢查七種型別化元件在語料裡都不會退回 Raw。
 - **亂數與時間走 `scene::env::Env`**，測試用固定實作釘住；不要在 scene 裡直接呼叫 `getrandom` 或 `SystemTime`。
+- **`skills/napkin/SKILL.md` 描述 `napkin` 子指令的輸出與 `apply` 格式**：改 `crates/app/src/control/summary.rs` 的摘要格式或 `scene::batch` 接受的欄位時要一起改它。`crates/app/tests/skill_examples.rs` 只驗證其中的 `apply` 例子能套用，摘要格式的描述沒有測試。
