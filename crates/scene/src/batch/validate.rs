@@ -20,6 +20,22 @@ pub(crate) fn positive(value: &Value) -> Result<f64, String> {
     }
 }
 
+/// A generous upper bound on `fontSize`: nothing legitimate needs a font this large, and it
+/// catches a stray unit mixup (e.g. passing hundredths or a raw pixel count meant for
+/// something else) before it produces an oversized label.
+const MAX_FONT_SIZE: f64 = 1000.0;
+
+pub(crate) fn font_size(value: &Value) -> Result<f64, String> {
+    let n = positive(value)?;
+    if n <= MAX_FONT_SIZE {
+        Ok(n)
+    } else {
+        Err(format!(
+            "must be a number greater than 0 and at most {MAX_FONT_SIZE}"
+        ))
+    }
+}
+
 pub(crate) fn string(value: &Value) -> Result<String, String> {
     value
         .as_str()

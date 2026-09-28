@@ -97,8 +97,11 @@ struct ParsedOp {
     points: Option<Vec<[f64; 2]>>,
     start: Option<RawEnd>,
     end: Option<RawEnd>,
-    start_arrowhead: Option<String>,
-    end_arrowhead: Option<String>,
+    /// `None` when the op did not give this field at all, so the arrow falls back to
+    /// `ItemStyle`'s default; `Some(None)` for an explicit JSON `null`, meaning no arrowhead
+    /// (JS allows this to turn off the default); `Some(Some(kind))` for a named arrowhead.
+    start_arrowhead: Option<Option<String>>,
+    end_arrowhead: Option<Option<String>>,
 }
 
 const SUPPORTED_TYPES: &[&str] = &[
@@ -185,7 +188,9 @@ fn parse_label(pos: usize, value: &Value) -> Result<LabelSpec, OpError> {
             validate::non_empty_string(v).map_err(|m| op_err(pos, Some("label.text"), m))
         })?;
     let font_size = match obj.get("fontSize") {
-        Some(v) => Some(validate::finite(v).map_err(|m| op_err(pos, Some("label.fontSize"), m))?),
+        Some(v) => {
+            Some(validate::font_size(v).map_err(|m| op_err(pos, Some("label.fontSize"), m))?)
+        }
         None => None,
     };
     let font_family = match obj.get("fontFamily") {
@@ -343,7 +348,9 @@ fn parse_op(pos: usize, value: &Value) -> Result<ParsedOp, OpError> {
                 .ok_or_else(|| op_err(pos, Some("text"), "must be a string"))
                 .and_then(|v| validate::string(v).map_err(|m| op_err(pos, Some("text"), m)))?;
             let font_size = match obj.get("fontSize") {
-                Some(v) => Some(validate::finite(v).map_err(|m| op_err(pos, Some("fontSize"), m))?),
+                Some(v) => {
+                    Some(validate::font_size(v).map_err(|m| op_err(pos, Some("fontSize"), m))?)
+                }
                 None => None,
             };
             let font_family = match obj.get("fontFamily") {
@@ -404,16 +411,24 @@ fn parse_op(pos: usize, value: &Value) -> Result<ParsedOp, OpError> {
                 parsed.end = Some(parse_end(pos, "end", v)?);
             }
             if let Some(v) = obj.get("startArrowhead") {
-                parsed.start_arrowhead = Some(
-                    validate::one_of(v, validate::ARROWHEADS)
-                        .map_err(|m| op_err(pos, Some("startArrowhead"), m))?,
-                );
+                parsed.start_arrowhead = Some(if v.is_null() {
+                    None
+                } else {
+                    Some(
+                        validate::one_of(v, validate::ARROWHEADS)
+                            .map_err(|m| op_err(pos, Some("startArrowhead"), m))?,
+                    )
+                });
             }
             if let Some(v) = obj.get("endArrowhead") {
-                parsed.end_arrowhead = Some(
-                    validate::one_of(v, validate::ARROWHEADS)
-                        .map_err(|m| op_err(pos, Some("endArrowhead"), m))?,
-                );
+                parsed.end_arrowhead = Some(if v.is_null() {
+                    None
+                } else {
+                    Some(
+                        validate::one_of(v, validate::ARROWHEADS)
+                            .map_err(|m| op_err(pos, Some("endArrowhead"), m))?,
+                    )
+                });
             }
         }
         "freedraw" => {
@@ -525,7 +540,7 @@ fn line_or_arrow_points(p: &ParsedOp) -> ([f64; 2], Vec<[f64; 2]>) {
 /// selection and bounding box need accurate numbers, so it derives them from the points instead,
 /// except in the one case that would throw away information `size_from_points`'s bounding box
 /// cannot represent: a synthetic two-point line from a *given* negative `width` or `height`
-/// (spec deviation 4) keeps that literal value (sign included) rather than its absolute size.
+/// keeps that literal value (sign included) rather than its absolute size.
 fn line_points_and_size(p: &ParsedOp) -> ([f64; 2], Vec<[f64; 2]>, f64, f64) {
     match &p.points {
         Some(points) => {
@@ -612,11 +627,11 @@ fn create_element(
             let start_arrowhead = p
                 .start_arrowhead
                 .clone()
-                .or_else(|| style.start_arrowhead.clone());
+                .unwrap_or_else(|| style.start_arrowhead.clone());
             let end_arrowhead = p
                 .end_arrowhead
                 .clone()
-                .or_else(|| style.end_arrowhead.clone());
+                .unwrap_or_else(|| style.end_arrowhead.clone());
             new_arrow_element(props, points, start_arrowhead, end_arrowhead, env)
         }
         "freedraw" => {
@@ -746,7 +761,7 @@ pub fn add_elements(
     let mut aliases: BTreeMap<String, String> = BTreeMap::new();
     let mut moved: HashSet<String> = HashSet::new();
 
-    for (i, p) in parsed.iter().enumerate() {
+    for p in &parsed {
         let p = p.as_ref().expect("validated above");
         let element = create_element(p, style, measure, env);
         let id = element
@@ -760,7 +775,6 @@ pub fn add_elements(
         ids.push(id);
         file.elements.push(element);
         op_positions.push(file.elements.len() - 1);
-        let _ = i;
     }
 
     let mut warnings: Vec<String> = Vec::new();
@@ -995,6 +1009,43 @@ mod tests {
     }
 
     #[test]
+    fn font_size_must_be_positive_and_not_absurdly_large() {
+        let mut file = SceneFile::new();
+        let ops = [
+            json!({"type": "text", "x": 0, "y": 0, "text": "a", "fontSize": 0}),
+            json!({"type": "text", "x": 0, "y": 0, "text": "a", "fontSize": -20}),
+            json!({"type": "text", "x": 0, "y": 0, "text": "a", "fontSize": 1001}),
+            json!({"type": "rectangle", "x": 0, "y": 0, "width": 10, "height": 10,
+                   "label": {"text": "a", "fontSize": 0}}),
+            json!({"type": "rectangle", "x": 0, "y": 0, "width": 10, "height": 10,
+                   "label": {"text": "a", "fontSize": 1001}}),
+        ];
+        let ops = pairs(&ops);
+        let errors = add_elements(
+            &mut file,
+            &ops,
+            &ItemStyle::default(),
+            &mut CharWidthMeasure,
+            &mut env(),
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 5);
+        assert_eq!(errors[0].field.as_deref(), Some("fontSize"));
+        assert_eq!(errors[3].field.as_deref(), Some("label.fontSize"));
+
+        let ops = [json!({"type": "text", "x": 0, "y": 0, "text": "a", "fontSize": 1000})];
+        let ops = pairs(&ops);
+        add_elements(
+            &mut file,
+            &ops,
+            &ItemStyle::default(),
+            &mut CharWidthMeasure,
+            &mut env(),
+        )
+        .expect("1000 is still within the cap");
+    }
+
+    #[test]
     fn aliases_and_ids_track_batch_order() {
         let mut file = SceneFile::new();
         let ops = [
@@ -1122,6 +1173,50 @@ mod tests {
         // binding-point shift moves the endpoints along the axis that changed.
         assert_eq!(l.points[0][0], l.points[1][0]);
         assert_ne!(l.points[0][1], l.points[1][1]);
+    }
+
+    #[test]
+    fn arrowheads_default_when_omitted_and_turn_off_on_explicit_null() {
+        let mut file = SceneFile::new();
+        let ops = [
+            // Omitted: falls back to `ItemStyle`'s default (start none, end arrow).
+            json!({"type": "arrow", "x": 0, "y": 0, "points": [[0, 0], [10, 0]]}),
+            // Explicit null: no arrowhead at that end, overriding the style default.
+            json!({"type": "arrow", "x": 0, "y": 0, "points": [[0, 0], [10, 0]],
+                   "startArrowhead": null, "endArrowhead": null}),
+            // Explicit kind.
+            json!({"type": "arrow", "x": 0, "y": 0, "points": [[0, 0], [10, 0]],
+                   "startArrowhead": "triangle", "endArrowhead": "bar"}),
+        ];
+        let ops = pairs(&ops);
+        add_elements(
+            &mut file,
+            &ops,
+            &ItemStyle::default(),
+            &mut CharWidthMeasure,
+            &mut env(),
+        )
+        .expect("valid batch");
+
+        let heads: Vec<(Option<&str>, Option<&str>)> = file
+            .elements
+            .iter()
+            .map(|e| match e {
+                Element::Arrow(a) => (
+                    a.start_arrowhead.value().map(String::as_str),
+                    a.end_arrowhead.value().map(String::as_str),
+                ),
+                _ => panic!("arrow"),
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            vec![
+                (None, Some("arrow")),
+                (None, None),
+                (Some("triangle"), Some("bar")),
+            ]
+        );
     }
 
     #[test]

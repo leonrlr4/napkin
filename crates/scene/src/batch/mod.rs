@@ -4,7 +4,7 @@
 mod add;
 mod validate;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
@@ -14,6 +14,7 @@ use crate::editor::ItemStyle;
 use crate::element::{Element, LinearEnd};
 use crate::env::Env;
 use crate::file::SceneFile;
+use crate::fractional_index::sync_moved_indices;
 use crate::geometry::size_from_points;
 use crate::new_element::bump_version;
 use crate::selection::Selection;
@@ -279,8 +280,8 @@ fn refresh_fixed_point(
 }
 
 /// For every live arrow in `container_index`'s `boundElements`, refreshes whichever end(s) are
-/// bound to it (deviation 8: a shape's move or resize keeps its bound arrows' `fixedPoint`s
-/// current, even though napkin does not make the arrow itself follow the shape).
+/// bound to it: a shape's move or resize keeps its bound arrows' `fixedPoint`s current, even
+/// though napkin does not make the arrow itself follow the shape.
 fn refresh_bound_arrow_fixed_points(
     next: &mut SceneFile,
     container_index: usize,
@@ -425,7 +426,8 @@ impl StyleSet {
 }
 
 /// Dispatches one `update` op's already-resolved `set` to the handler for `next.elements[index]`'s
-/// kind (the table in AI spec §4.3, plus deviation 8).
+/// kind (the table in AI spec §4.3), which also refreshes bound arrows' `fixedPoint`s when a
+/// move or resize changes their geometry.
 fn apply_update(
     next: &mut SceneFile,
     pos: usize,
@@ -488,7 +490,9 @@ fn apply_generic_update(
                 new_text = Some(s);
             }
             key if validate::STYLE_KEYS.contains(&key) => style.parse(pos, key, v)?,
-            other => return Err(op_err(pos, Some(other), "unknown field")),
+            other => {
+                return Err(op_err(pos, Some(&format!("set.{other}")), "unknown field"));
+            }
         }
     }
 
@@ -543,7 +547,12 @@ fn apply_generic_update(
                 text_align: None,
                 vertical_align: None,
             };
-            add::bind_label(next, index, &label, &name, measure, env, warnings);
+            let label_index = add::bind_label(next, index, &label, &name, measure, env, warnings);
+            let label_id = next.elements[label_index]
+                .id()
+                .expect("label has an id")
+                .to_owned();
+            sync_moved_indices(&mut next.elements, &HashSet::from([label_id]), env);
         }
         (None, None) => {}
     }
@@ -581,10 +590,16 @@ fn apply_bound_text_update(
                 ));
             }
             "text" => {
-                new_text = Some(validate::string(v).map_err(|m| op_err(pos, Some("set.text"), m))?)
+                let s = validate::string(v).map_err(|m| op_err(pos, Some("set.text"), m))?;
+                if s.is_empty() {
+                    return Err(op_err(pos, Some("set.text"), "text must not be empty"));
+                }
+                new_text = Some(s);
             }
             key if validate::STYLE_KEYS.contains(&key) => style.parse(pos, key, v)?,
-            other => return Err(op_err(pos, Some(other), "unknown field")),
+            other => {
+                return Err(op_err(pos, Some(&format!("set.{other}")), "unknown field"));
+            }
         }
     }
 
@@ -631,10 +646,16 @@ fn apply_text_update(
             "x" => new_x = Some(validate::finite(v).map_err(|m| op_err(pos, Some("set.x"), m))?),
             "y" => new_y = Some(validate::finite(v).map_err(|m| op_err(pos, Some("set.y"), m))?),
             "text" => {
-                new_text = Some(validate::string(v).map_err(|m| op_err(pos, Some("set.text"), m))?)
+                let s = validate::string(v).map_err(|m| op_err(pos, Some("set.text"), m))?;
+                if s.is_empty() {
+                    return Err(op_err(pos, Some("set.text"), "text must not be empty"));
+                }
+                new_text = Some(s);
             }
             key if validate::STYLE_KEYS.contains(&key) => style.parse(pos, key, v)?,
-            other => return Err(op_err(pos, Some(other), "unknown field")),
+            other => {
+                return Err(op_err(pos, Some(&format!("set.{other}")), "unknown field"));
+            }
         }
     }
 
@@ -659,7 +680,7 @@ fn apply_text_update(
 
 /// `x`, `y`, `points` (>=2), `STYLE_KEYS` for a line or arrow; `text` errors. An arrow also
 /// translates its own bound label and refreshes its bound ends' `fixedPoint`s when its
-/// position or points change (deviation 8).
+/// position or points change.
 fn apply_linear_update(
     next: &mut SceneFile,
     pos: usize,
@@ -690,7 +711,9 @@ fn apply_linear_update(
                 ));
             }
             key if validate::STYLE_KEYS.contains(&key) => style.parse(pos, key, v)?,
-            other => return Err(op_err(pos, Some(other), "unknown field")),
+            other => {
+                return Err(op_err(pos, Some(&format!("set.{other}")), "unknown field"));
+            }
         }
     }
 
@@ -766,7 +789,9 @@ fn apply_freedraw_update(
             "x" => new_x = Some(validate::finite(v).map_err(|m| op_err(pos, Some("set.x"), m))?),
             "y" => new_y = Some(validate::finite(v).map_err(|m| op_err(pos, Some("set.y"), m))?),
             key if validate::STYLE_KEYS.contains(&key) => style.parse(pos, key, v)?,
-            other => return Err(op_err(pos, Some(other), "unknown field")),
+            other => {
+                return Err(op_err(pos, Some(&format!("set.{other}")), "unknown field"));
+            }
         }
     }
     let before = next.elements[index].clone();
@@ -812,9 +837,13 @@ fn apply_raw_update(
     }
     let before = next.elements[index].clone();
     if new_x.is_some() || new_y.is_some() {
-        let placement = before
-            .placement()
-            .expect("resolved as a Raw with a placement");
+        let placement = before.placement().ok_or_else(|| {
+            op_err(
+                pos,
+                Some("id"),
+                format!("{id} has no position napkin can change"),
+            )
+        })?;
         next.elements[index]
             .set_position(new_x.unwrap_or(placement.x), new_y.unwrap_or(placement.y));
     }
@@ -989,6 +1018,18 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_update_field_is_reported_as_set_dot_key() {
+        let errors = apply(
+            &scene(),
+            json!({"ops": [
+                {"op": "update", "id": "r", "set": {"nope": 1}},
+            ]}),
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].field.as_deref(), Some("set.nope"));
+    }
+
+    #[test]
     fn moving_a_container_recenters_its_label_and_refreshes_arrow_bindings() {
         let (next, report) = apply(
             &scene(),
@@ -1005,6 +1046,33 @@ mod tests {
         let binding = get(&next, "a").to_value()["startBinding"].clone();
         assert_eq!(binding["fixedPoint"], json!([0.525, -1.1666666666666667]));
         assert_eq!(binding["mode"], json!("orbit"));
+    }
+
+    #[test]
+    fn setting_text_to_empty_errors_for_a_bound_label_and_an_unbound_text() {
+        let errors = apply(
+            &scene(),
+            json!({"ops": [
+                {"op": "update", "id": "t", "set": {"text": ""}},
+            ]}),
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].message, "text must not be empty");
+
+        let file = sample::file(vec![sample::text(
+            "free",
+            [0.0, 0.0, 40.0, 25.0],
+            "hello",
+            None,
+        )]);
+        let errors = apply(
+            &file,
+            json!({"ops": [
+                {"op": "update", "id": "free", "set": {"text": ""}},
+            ]}),
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].message, "text must not be empty");
     }
 
     #[test]
@@ -1037,6 +1105,35 @@ mod tests {
     }
 
     #[test]
+    fn a_label_created_via_update_gets_a_real_index_ordered_after_the_rest() {
+        let (next, report) = apply(
+            &scene(),
+            json!({"ops": [
+                {"op": "add", "type": "ellipse", "id": "e", "x": 0, "y": 200, "width": 120, "height": 60},
+                {"op": "update", "id": "e", "set": {"text": "later"}},
+            ]}),
+        )
+        .unwrap();
+        let e = report.created["e"].clone();
+        let (label_id, _) = get(&next, &e).bound_elements()[0];
+        let label_id = label_id.to_owned();
+        let label_index = get(&next, &label_id)
+            .index()
+            .expect("a label created via update must get a real index, not null");
+        let max_other_index = next
+            .elements
+            .iter()
+            .filter(|el| el.id() != Some(label_id.as_str()))
+            .filter_map(Element::index)
+            .max()
+            .expect("the scene has other indexed elements");
+        assert!(
+            label_index > max_other_index,
+            "label index {label_index:?} should sort after {max_other_index:?}"
+        );
+    }
+
+    #[test]
     fn raw_elements_only_move_and_labels_do_not_move_alone() {
         let (next, _) = apply(
             &scene(),
@@ -1054,6 +1151,19 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(errors[0].field.as_deref(), Some("set.x"));
+    }
+
+    #[test]
+    fn moving_a_raw_element_without_a_numeric_placement_errors_instead_of_panicking() {
+        let file = sample::file(vec![json!({"id": "w", "type": "weird", "x": "a"})]);
+        let errors = apply(
+            &file,
+            json!({"ops": [
+                {"op": "update", "id": "w", "set": {"x": 5}},
+            ]}),
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].message, "w has no position napkin can change");
     }
 
     #[test]
