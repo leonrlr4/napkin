@@ -9,6 +9,7 @@ use eframe::egui;
 use scene::editor::{Editor, Modifiers, PointerEvent, Tool};
 use scene::env::SystemEnv;
 use scene::file::NapkinView;
+use scene::text::TextMeasure;
 
 use crate::agent;
 use crate::autosave::{Autosave, DocumentState, Trigger};
@@ -33,8 +34,8 @@ use crate::theme::{self, Theme};
 use crate::writer::{SaveJob, SaveWorker};
 
 /// How often a mutating request at the front of the queue re-checks `Editor::is_idle` while a
-/// user gesture is in progress (spec deviation 9): frequent enough that the request runs soon
-/// after the gesture ends, without polling on every single frame.
+/// user gesture is in progress: frequent enough that the request runs soon after the gesture
+/// ends, without polling on every single frame.
 const PENDING_REQUEST_RETRY: Duration = Duration::from_millis(50);
 
 /// How long a notice stays on screen (spec §8).
@@ -142,6 +143,17 @@ pub struct NapkinApp {
 /// A [`Rasterize`] for a `render` request that arrives before the first frame has a GPU render
 /// state (`frame.wgpu_render_state()` is `None` until eframe's wgpu backend is ready).
 struct NoGpu;
+
+/// Stands in for `Session::measure` on a request that never reads it, so building the real
+/// `FontMeasure` (which sets up its own `cosmic_text::FontSystem`) can wait for a request
+/// that actually needs to lay out text.
+struct NoMeasure;
+
+impl TextMeasure for NoMeasure {
+    fn line_width(&mut self, _line: &str, _font_family: f64, _font_size: f64) -> f64 {
+        unreachable!("only `apply` measures text, and it always gets the real FontMeasure")
+    }
+}
 
 impl Rasterize for NoGpu {
     fn rasterize(
@@ -272,16 +284,22 @@ impl NapkinApp {
 
     /// Serves requests from the front of `self.pending`, in the order they arrived, until the
     /// queue is empty or the front one has to wait. A mutating request (`apply`) on a
-    /// read-write canvas waits for `editor.is_idle()` (spec deviation 9) rather than running
-    /// mid-gesture or being skipped over: it is left at the front, a repaint is requested after
-    /// [`PENDING_REQUEST_RETRY`] so the wait is retried without new input, and nothing behind it
-    /// runs out of order. Every request actually served gets a fresh `Session` built from the
-    /// current editor, save and camera state.
+    /// read-write canvas waits for `editor.is_idle()` rather than running mid-gesture or being
+    /// skipped over, so it never interrupts something the user is dragging: it is left at the
+    /// front, a repaint is requested after [`PENDING_REQUEST_RETRY`] so the wait is retried
+    /// without new input, and nothing behind it runs out of order. Every request actually
+    /// served gets a fresh `Session` built from the current editor, save and camera state.
     fn serve_requests(&mut self, frame: &eframe::Frame, ctx: &egui::Context, camera: Camera) {
         loop {
             let Some(incoming) = self.pending.front() else {
                 return;
             };
+            if incoming.is_expired(Instant::now()) {
+                // The client already gave up and read a timeout error off the socket, and may
+                // have retried by now; running this late reply would apply it a second time.
+                self.pending.pop_front();
+                continue;
+            }
             let Some(editor) = self.editor.as_ref() else {
                 // No `Editor` at all: `ui`'s load-error branch already drains `self.pending`
                 // every frame in that case, so this is never actually reached; kept as a guard
@@ -306,7 +324,12 @@ impl NapkinApp {
             let save_error = self.autosave.error();
             let editor = self.editor.as_mut().expect(EDITOR_INVARIANT);
             let unsaved = self.autosave.has_unsaved_changes(editor.revision());
-            let measure = self.measure.get_or_insert_with(FontMeasure::new);
+            let mut no_measure = NoMeasure;
+            let measure: &mut dyn TextMeasure = if handler::is_mutating(&incoming.request) {
+                self.measure.get_or_insert_with(FontMeasure::new)
+            } else {
+                &mut no_measure
+            };
             let mut no_gpu = NoGpu;
             let render_state = frame.wgpu_render_state();
             let mut gpu_rasterizer;
@@ -337,6 +360,24 @@ impl NapkinApp {
             incoming.reply(response);
         }
     }
+}
+
+/// Whether `events` holds a fresh (non-repeat) `Ctrl+K`/`Cmd+K` press this frame. Only the
+/// initial press opens a terminal; holding the key down must not launch a second one from the
+/// OS's key-repeat events.
+fn ctrl_k_just_pressed(events: &[egui::Event]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::K,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } if modifiers.command
+        )
+    })
 }
 
 /// The tool's lowercase name, as shown above the canvas.
@@ -791,7 +832,7 @@ impl eframe::App for NapkinApp {
 
                         if !ui.ctx().egui_wants_keyboard_input()
                             && !super_held
-                            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K))
+                            && ui.input(|i| ctrl_k_just_pressed(&i.events))
                             && let Some(home) = storage::home_dir()
                             && let Err(error) = agent::open(&home)
                         {
@@ -1016,6 +1057,40 @@ mod tests {
 
     use super::*;
     use crate::camera::MAX_ZOOM;
+
+    #[test]
+    fn ctrl_k_ignores_key_repeat_but_not_a_fresh_press() {
+        let key_event =
+            |pressed: bool, repeat: bool, modifiers: egui::Modifiers| egui::Event::Key {
+                key: egui::Key::K,
+                physical_key: None,
+                pressed,
+                repeat,
+                modifiers,
+            };
+        assert!(ctrl_k_just_pressed(&[key_event(
+            true,
+            false,
+            egui::Modifiers::COMMAND
+        )]));
+        assert!(!ctrl_k_just_pressed(&[key_event(
+            true,
+            true,
+            egui::Modifiers::COMMAND
+        )]));
+        assert!(!ctrl_k_just_pressed(&[]));
+        // A release, or the same key without the command modifier, isn't a press either.
+        assert!(!ctrl_k_just_pressed(&[key_event(
+            false,
+            false,
+            egui::Modifiers::COMMAND
+        )]));
+        assert!(!ctrl_k_just_pressed(&[key_event(
+            true,
+            false,
+            egui::Modifiers::NONE
+        )]));
+    }
 
     #[test]
     fn reload_check_waits_out_an_in_flight_save() {
