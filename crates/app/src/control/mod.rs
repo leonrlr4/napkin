@@ -1,10 +1,13 @@
 //! The napkin control protocol: one JSON request per line in, one JSON response per line out.
 //! [`handler`] turns a [`Request`] into a [`Response`] without touching the socket or the GUI;
 //! [`summary`] formats the `scene` and `selection` listings a `Response::output` carries;
-//! [`render`] plans the region and encodes the PNG for a `render` request.
+//! [`render`] plans the region and encodes the PNG for a `render` request; [`server`] listens on
+//! the Unix socket and [`client`] is the `napkin` subcommands' half of the same protocol.
 
+pub mod client;
 pub mod handler;
 pub mod render;
+pub mod server;
 pub mod summary;
 
 use serde::{Deserialize, Serialize};
