@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::control::{Request, Response};
 
@@ -39,6 +39,10 @@ pub fn socket_path() -> Option<PathBuf> {
 pub struct Incoming {
     pub request: Request,
     reply: mpsc::Sender<Response>,
+    /// The instant `dispatch` gives up waiting and answers its client with a timeout error.
+    /// Past this point the client already has a response, and may already have retried the
+    /// request; running this one anyway would apply it a second time on top of that retry.
+    deadline: Instant,
 }
 
 impl Incoming {
@@ -46,6 +50,12 @@ impl Incoming {
         // The connection may already be gone (client timed out and disconnected); nothing to
         // do about that here.
         let _ = self.reply.send(response);
+    }
+
+    /// Whether `now` is at or past the point `dispatch` stopped waiting for this request's
+    /// reply. The queue drops an expired request unexecuted instead of applying it late.
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now >= self.deadline
     }
 }
 
@@ -190,9 +200,11 @@ fn dispatch(
     stop: &AtomicBool,
 ) -> Option<Response> {
     let (reply_tx, reply_rx) = mpsc::channel();
+    let deadline = Instant::now() + REPLY_TIMEOUT;
     tx.send(Incoming {
         request,
         reply: reply_tx,
+        deadline,
     })
     .ok()?;
     wake();
@@ -281,5 +293,24 @@ mod tests {
         let response: Response =
             serde_json::from_str(line.trim_end()).expect("the server still answers with JSON");
         assert!(!response.ok, "{response:?}");
+    }
+
+    #[test]
+    fn an_incoming_past_its_deadline_reports_itself_expired() {
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        let expired = Incoming {
+            request: Request::Status,
+            reply: reply_tx,
+            deadline: Instant::now() - Duration::from_secs(1),
+        };
+        assert!(expired.is_expired(Instant::now()));
+
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        let fresh = Incoming {
+            request: Request::Status,
+            reply: reply_tx,
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        assert!(!fresh.is_expired(Instant::now()));
     }
 }

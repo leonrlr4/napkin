@@ -1,7 +1,7 @@
-//! The `napkin scene` / `napkin selection` listing format (decision 6): a `file` header
-//! line, then one line per non-deleted element. A text element bound to a live container
-//! folds into that container's `label=`; every other element gets its own line with the
-//! fields that apply to it, in a fixed order.
+//! The `napkin scene` / `napkin selection` listing format: a `file` header line, then one
+//! line per non-deleted element. A text element bound to a live container folds into that
+//! container's `label=`; every other element gets its own line with the fields that apply
+//! to it, in a fixed order.
 
 use std::fmt::Write as _;
 
@@ -54,16 +54,22 @@ fn push_field(line: &mut String, name: &str, value: impl std::fmt::Display) {
     write!(line, " {name}={value}").expect("String writes are infallible");
 }
 
+/// Renders each point that is a two-element array as `[x,y]`; a malformed point (not an
+/// array, or fewer than two elements) is dropped rather than panicking, since this reads a
+/// `Raw` element's JSON, which napkin does not validate.
 fn format_points(points: &[Value]) -> String {
     let parts: Vec<String> = points
         .iter()
-        .map(|point| {
-            let coords = point.as_array().expect("a point is a two-element array");
-            format!(
+        .filter_map(|point| {
+            let coords = point.as_array()?;
+            if coords.len() < 2 {
+                return None;
+            }
+            Some(format!(
                 "[{},{}]",
                 format_number(coords[0].as_f64().unwrap_or(0.0)),
                 format_number(coords[1].as_f64().unwrap_or(0.0))
-            )
+            ))
         })
         .collect();
     format!("[{}]", parts.join(","))
@@ -223,6 +229,60 @@ mod tests {
                 r##"a arrow 165 35 100 0 stroke=#e03131 start=r points=[[0,0],[100,0]]"##,
                 r##"free text 0 100 80 25 text="note\nline""##,
             ]
+        );
+    }
+
+    #[test]
+    fn format_points_skips_malformed_points_instead_of_panicking() {
+        assert_eq!(
+            format_points(&[json!([1, 2]), json!([3, 4])]),
+            "[[1,2],[3,4]]"
+        );
+        // A point that is not a two-element array: not an array at all, and one with a
+        // single element. Both are dropped instead of panicking or indexing out of bounds.
+        assert_eq!(format_points(&[json!(1), json!([1, 2])]), "[[1,2]]");
+        assert_eq!(format_points(&[json!([1])]), "[]");
+    }
+
+    #[test]
+    fn a_raw_element_with_no_numeric_placement_shows_question_marks() {
+        let file = sample::file(vec![json!({"id": "w", "type": "weird", "x": "a"})]);
+        assert_eq!(element_lines(&file, &[0]), vec!["w weird ? ? ? ?"]);
+    }
+
+    #[test]
+    fn angle_and_locked_and_end_binding_each_show_up() {
+        let file = sample::file(vec![
+            sample::with(
+                sample::generic("rectangle", "r", [0.0, 0.0, 50.0, 50.0]),
+                json!({"angle": 1.5, "locked": true}),
+            ),
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [50.0, 50.0]]),
+                json!({"endBinding": {"elementId": "r", "mode": "orbit", "fixedPoint": [0.5, 0.5]}}),
+            ),
+        ]);
+        assert_eq!(
+            element_lines(&file, &[0, 1]),
+            vec![
+                "r rectangle 0 0 50 50 angle=1.5 locked",
+                "a arrow 0 0 50 50 end=r points=[[0,0],[50,50]]",
+            ]
+        );
+    }
+
+    #[test]
+    fn text_bound_to_a_dead_container_gets_its_own_line() {
+        let file = sample::file(vec![
+            sample::with(
+                sample::generic("rectangle", "r", [0.0, 0.0, 50.0, 50.0]),
+                json!({"isDeleted": true, "boundElements": [{"id": "t", "type": "text"}]}),
+            ),
+            sample::text("t", [0.0, 0.0, 40.0, 25.0], "orphan", Some("r")),
+        ]);
+        assert_eq!(
+            element_lines(&file, &[0, 1]),
+            vec![r##"t text 0 0 40 25 text="orphan""##]
         );
     }
 }

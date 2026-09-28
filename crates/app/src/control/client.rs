@@ -8,10 +8,12 @@ use std::time::Duration;
 
 use crate::control::{Request, Response};
 
-/// How long to wait for a reply after the request line is written. Matches the server's own
-/// wait for the UI thread to answer, so a request that is legitimately queued behind a user
-/// gesture (spec: modifying requests wait for `Editor::is_idle`) has time to complete.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long to wait for a reply after the request line is written. A mutating request waits
+/// behind a user gesture in progress until `Editor::is_idle`, so this has to give it as long
+/// as the server itself waits; it must also stay a little longer than the server's own reply
+/// timeout, so a request that times out server-side is read back as that error response
+/// instead of this client giving up first with a bare I/O error.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(125);
 
 #[derive(Debug)]
 pub enum ClientError {

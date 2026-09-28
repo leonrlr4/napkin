@@ -1,6 +1,6 @@
 //! Turns a [`Request`] into a [`Response`] against one [`Session`]: no socket I/O, no GPU
-//! rasterization. The caller (the socket server, or a test) builds a fresh `Session` per
-//! request and, for a mutating request, waits for `Editor::is_idle` first ([`is_mutating`]).
+//! rasterization. The caller (`NapkinApp`, or a test) builds a fresh `Session` per request
+//! and, for a mutating request, waits for `Editor::is_idle` first ([`is_mutating`]).
 
 use std::path::Path;
 use std::sync::Arc;
