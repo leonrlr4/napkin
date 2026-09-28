@@ -37,6 +37,10 @@ pub struct FrameInput<'a> {
     /// An egui widget has keyboard focus (`Context::wants_keyboard_input`).
     pub keyboard_taken: bool,
     pub focused: bool,
+    /// A Super key is down: Hyprland passes Super+letter combinations it does not bind to the
+    /// focused window, and egui-winit drops the Super modifier on Linux, so the letter alone
+    /// would reach the tool shortcuts.
+    pub super_held: bool,
 }
 
 /// `egui::Modifiers` to the editor's own type: `ctrl` covers both the physical Ctrl key and
@@ -134,7 +138,7 @@ pub fn translate(input: &FrameInput, capture: &mut PointerCapture) -> Vec<Editor
                 repeat: false,
                 modifiers,
                 ..
-            } if !input.keyboard_taken => {
+            } if !input.keyboard_taken && !input.super_held => {
                 if let Some(mapped) = key_input(*key, *modifiers) {
                     out.push(mapped);
                 }
@@ -190,6 +194,7 @@ mod tests {
             panning: false,
             keyboard_taken: false,
             focused: true,
+            super_held: false,
         }
     }
 
@@ -331,6 +336,25 @@ mod tests {
         let mut typing = frame(&events);
         typing.keyboard_taken = true;
         assert_eq!(translate(&typing, &mut PointerCapture::default()), vec![]);
+    }
+
+    #[test]
+    fn keys_are_ignored_while_super_is_held() {
+        let events = [egui::Event::Key {
+            key: egui::Key::H,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        let mut input = frame(&events);
+        input.super_held = true;
+        assert!(translate(&input, &mut PointerCapture::default()).is_empty());
+        input.super_held = false;
+        assert_eq!(
+            translate(&input, &mut PointerCapture::default()),
+            vec![EditorInput::Tool(Tool::Hand)]
+        );
     }
 
     #[test]

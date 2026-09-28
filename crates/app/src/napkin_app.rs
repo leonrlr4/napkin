@@ -455,6 +455,12 @@ pub fn should_reload(
     }
 }
 
+/// A read-only canvas (a failed reload) whose file has since been deleted becomes editable
+/// again: nothing on disk is left to protect, and the next save recreates the file.
+pub fn should_clear_unreadable(unreadable: bool, disk_mtime: Option<SystemTime>) -> bool {
+    unreadable && disk_mtime.is_none()
+}
+
 impl eframe::App for NapkinApp {
     /// Stops the pinch dispatch thread before eframe disconnects the Wayland display it
     /// borrows from (see [`PinchListener`]'s doc comment), finishes any queued save and hands
@@ -740,12 +746,19 @@ impl eframe::App for NapkinApp {
                                         }
                                         storage::Loaded::Missing => {}
                                     }
+                                } else if should_clear_unreadable(
+                                    self.unreadable.is_some(),
+                                    disk_mtime,
+                                ) {
+                                    self.unreadable = None;
+                                    self.known_mtime = None;
                                 }
                             } else if self.reload_check_pending {
                                 ui.ctx().request_repaint();
                             }
                         }
 
+                        let super_held = self.pinch.as_ref().is_some_and(PinchListener::super_held);
                         if self.unreadable.is_none() {
                             let events = ui.input(|i| i.events.clone());
                             let frame_input = edit_input::FrameInput {
@@ -756,6 +769,7 @@ impl eframe::App for NapkinApp {
                                 panning,
                                 keyboard_taken: ui.ctx().egui_wants_keyboard_input(),
                                 focused: self.focused,
+                                super_held,
                             };
                             for action in edit_input::translate(&frame_input, &mut self.capture) {
                                 match action {
@@ -776,6 +790,7 @@ impl eframe::App for NapkinApp {
                         });
 
                         if !ui.ctx().egui_wants_keyboard_input()
+                            && !super_held
                             && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K))
                             && let Some(home) = storage::home_dir()
                             && let Err(error) = agent::open(&home)
@@ -1031,6 +1046,14 @@ mod tests {
         );
         assert!(!should_reload(Some(t(10)), Some(t(11)), true, false));
         assert!(!should_reload(Some(t(10)), Some(t(11)), false, true));
+    }
+
+    #[test]
+    fn a_deleted_unreadable_file_makes_the_canvas_editable_again() {
+        let t = SystemTime::UNIX_EPOCH;
+        assert!(should_clear_unreadable(true, None));
+        assert!(!should_clear_unreadable(true, Some(t)));
+        assert!(!should_clear_unreadable(false, None));
     }
 
     #[test]
