@@ -7,9 +7,13 @@
 //! napkin has no "editing group" state (no equivalent of Excalidraw double-clicking into a
 //! group), so every place the JS reads `appState.editingGroupId` is ported with that value
 //! hardcoded to `null`; the branches that only trigger when it is set are dropped rather than
-//! kept as dead code. Frame bookkeeping (`containingFrame`, `getContiguousFrameRangeElements`)
-//! is ported in full even though napkin does not yet draw frame elements specially, since a
-//! loaded `.excalidraw` file can still contain `frameId`-tagged elements.
+//! kept as dead code. Frame bookkeeping (`containingFrame`, `getContiguousFrameRangeElements`,
+//! `getFrameChildren`) is ported in full even though napkin does not yet draw frame elements
+//! specially, since a loaded `.excalidraw` file can still contain `frameId`-tagged elements. One
+//! quirk carries over deliberately: `getFrameChildren` never filters `isDeleted` (its return type
+//! says `NonDeletedExcalidrawElement[]`, but nothing enforces that at runtime), so moving a
+//! selected frame drags its soft-deleted children along with the live ones; see
+//! [`expand_selected_ids`].
 
 use std::collections::HashSet;
 
@@ -158,7 +162,7 @@ fn get_target_index(
     let next_element = &elements[candidate_index];
 
     if containing_frame.is_none()
-        && (next_element.frame_id().is_some() || is_frame_like(next_element))
+        && (truthy(next_element.frame_id()).is_some() || is_frame_like(next_element))
     {
         let frame_id = truthy(next_element.frame_id()).or_else(|| next_element.id())?;
         let (range_start, range_end) = contiguous_frame_range(elements, frame_id)?;
@@ -192,8 +196,11 @@ fn get_target_index(
 
 /// Ids `getSelectedElements(elements, appState, { includeBoundTextElement: true,
 /// includeElementsInFrames: true })` would select, expanded from the raw ids in `selected`:
-/// non-deleted bound labels of a selected container join first, then the non-deleted children of
-/// any selected frame-like element.
+/// non-deleted bound labels of a selected container join first, then the children (`getFrameChildren`,
+/// `packages/element/src/frame.ts`) of any selected frame-like element, deleted or not.
+/// `getFrameChildren` never filters `isDeleted` (its `NonDeletedExcalidrawElement[]` return
+/// type is an unchecked cast), so a soft-deleted child of a selected frame moves with it here
+/// too, same as the source.
 fn expand_selected_ids(elements: &[Element], selected: &Selection) -> HashSet<String> {
     let mut ids: HashSet<String> = HashSet::new();
     for element in elements {
@@ -214,21 +221,13 @@ fn expand_selected_ids(elements: &[Element], selected: &Selection) -> HashSet<St
 
     let frame_owners: Vec<&str> = elements
         .iter()
-        .filter(|e| {
-            !e.is_deleted() && e.id().is_some_and(|id| ids.contains(id)) && is_frame_like(e)
-        })
+        .filter(|e| e.id().is_some_and(|id| ids.contains(id)) && is_frame_like(e))
         .filter_map(Element::id)
         .collect();
     if !frame_owners.is_empty() {
         for element in elements {
-            if element.is_deleted() {
-                continue;
-            }
             let Some(id) = element.id() else { continue };
-            if element
-                .frame_id()
-                .is_some_and(|f| frame_owners.contains(&f))
-            {
+            if truthy(element.frame_id()).is_some_and(|f| frame_owners.contains(&f)) {
                 ids.insert(id.to_owned());
             }
         }
@@ -340,13 +339,11 @@ pub fn move_one(
         };
 
         let containing_frame: Option<String> = if indices.iter().any(|&idx| {
-            working[idx]
-                .frame_id()
-                .is_some_and(|f| selected_frame_ids.contains(f))
+            truthy(working[idx].frame_id()).is_some_and(|f| selected_frame_ids.contains(f))
         }) {
             None
         } else {
-            working[boundary_index].frame_id().map(String::from)
+            truthy(working[boundary_index].frame_id()).map(String::from)
         };
 
         let Some(target_index) = get_target_index(

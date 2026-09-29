@@ -271,7 +271,11 @@ export const indexScenarios = [
   ["movedWrong", ["a0", "a1", "a1V", "a1"], [0]],
 ];
 
-/** [case name, elements, selected ids, "left" | "right"] for moveOneLeft/moveOneRight. */
+/**
+ * [case name, elements, selected ids, "left" | "right"] for moveOneLeft/moveOneRight.
+ * `frame1` is a `frame` element; `fa`/`fb`/`fbDel` are its children (`frameId: "frame1"`,
+ * `fbDel` also `isDeleted: true`); every other id is a plain rectangle.
+ */
 export const zindexCases = [
   ["right/middle", ["a", "b", "c"], ["b"], "right"],
   ["left/middle", ["a", "b", "c"], ["b"], "left"],
@@ -281,6 +285,11 @@ export const zindexCases = [
   ["right/group", ["a", "g1", "g2", "b"], ["g1", "g2"], "right"],
   ["right/withLabel", ["r", "t", "x"], ["r"], "right"],
   ["right/skipsDeleted", ["a", "del", "b"], ["a"], "right"],
+  // Selecting the frame itself moves it and every child, including a deleted one, as a block.
+  ["right/frameMovesWithDeletedChild", ["out1", "frame1", "fa", "fbDel", "out2"], ["frame1"], "right"],
+  // Selecting a lone child restricts the target search to the frame's own children, jumping
+  // over a non-child element sitting between them.
+  ["right/withinFrameSkipsOutsider", ["frame1", "fa", "mid", "fb"], ["fa"], "right"],
 ];
 
 /** [case name, newElement.ts function, opts]; id and seed are fixed, everything else defaults. */

@@ -216,11 +216,13 @@ fn fractional_index() {
     });
 }
 
-/// A complete rectangle (or `t`'s text label) element for the zindex cases, mirroring
-/// `tools/baseline/scene/generate.mjs`'s `zindexElement`: `g1`/`g2` are in group `"G"`, `t` is
-/// `r`'s bound label, `del` is soft-deleted, and every other field but `index` (`a0`, `a1`, ...
-/// in array order) is a fixed default. Built from `sample`'s full-field JSON so it loads as a
-/// typed element, not `Raw`.
+/// A complete rectangle (or `t`'s text label, or the `frame1` frame) element for the zindex
+/// cases, mirroring `tools/baseline/scene/generate.mjs`'s `zindexElement`: `g1`/`g2` are in
+/// group `"G"`, `t` is `r`'s bound label, `del`/`fbDel` are soft-deleted, `frame1` is a `frame`
+/// element, `fa`/`fb`/`fbDel` are its children, and every other field but `index` (`a0`, `a1`,
+/// ... in array order) is a fixed default. Built from `sample`'s full-field JSON so it loads as
+/// a typed element, not `Raw` (`frame1` is the one exception: napkin has no typed frame
+/// element, so it falls back to `Raw` the same way it would loading a real `.excalidraw` file).
 fn zindex_element(id: &str, position: usize) -> Value {
     let mut value = if id == "t" {
         sample::text(id, [0.0, 0.0, 10.0, 10.0], "hi", Some("r"))
@@ -234,11 +236,17 @@ fn zindex_element(id: &str, position: usize) -> Value {
     if id == "g1" || id == "g2" {
         value["groupIds"] = json!(["G"]);
     }
-    if id == "del" {
+    if id == "del" || id == "fbDel" {
         value["isDeleted"] = json!(true);
     }
     if id == "r" {
         value["boundElements"] = json!([{"id": "t", "type": "text"}]);
+    }
+    if matches!(id, "fa" | "fb" | "fbDel") {
+        value["frameId"] = json!("frame1");
+    }
+    if id == "frame1" {
+        value["type"] = json!("frame");
     }
     value
 }

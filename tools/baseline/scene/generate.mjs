@@ -178,18 +178,24 @@ for (const [label, indices, moved] of indexScenarios) {
 }
 writeGroup(outDir, "fractional_index", source, indexCases);
 
+/** `fa`/`fb`/`fbDel`: children of the `frame1` frame element (see `zindexElement`). */
+const FRAME_CHILDREN = new Set(["fa", "fb", "fbDel"]);
+
 /**
- * A complete `rectangle` (or `text` label) element for the zindex cases: `id` and `index`
- * (`a0`, `a1`, ... in array order) are the only fields that vary by case; `g1`/`g2` are in
- * group `"G"`, `t` is `r`'s bound label, and `del` is soft-deleted.
+ * A complete `rectangle` (or `text` label, or `frame`) element for the zindex cases: `id` and
+ * `index` (`a0`, `a1`, ... in array order) are the only fields that vary by case; `g1`/`g2` are
+ * in group `"G"`, `t` is `r`'s bound label, `del`/`fbDel` are soft-deleted, `frame1` is a frame
+ * element, and `fa`/`fb`/`fbDel` are its children.
  */
 function zindexElement(id, position) {
   const el = {
     id, type: "rectangle", x: 0, y: 0, width: 10, height: 10, angle: 0,
     strokeColor: "#1e1e1e", backgroundColor: "transparent", fillStyle: "solid",
     strokeWidth: 2, strokeStyle: "solid", roughness: 1, opacity: 100,
-    groupIds: id === "g1" || id === "g2" ? ["G"] : [], frameId: null, index: `a${position}`,
-    roundness: null, seed: 1, version: 1, versionNonce: 0, isDeleted: id === "del",
+    groupIds: id === "g1" || id === "g2" ? ["G"] : [],
+    frameId: FRAME_CHILDREN.has(id) ? "frame1" : null, index: `a${position}`,
+    roundness: null, seed: 1, version: 1, versionNonce: 0,
+    isDeleted: id === "del" || id === "fbDel",
     boundElements: id === "r" ? [{ id: "t", type: "text" }] : null, updated: 1,
   };
   if (id === "t") {
@@ -198,6 +204,9 @@ function zindexElement(id, position) {
       fontFamily: 5, textAlign: "center", verticalAlign: "middle", originalText: "hi",
       autoResize: true, lineHeight: 1.25, boundElements: null,
     });
+  }
+  if (id === "frame1") {
+    el.type = "frame";
   }
   return el;
 }
