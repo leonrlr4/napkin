@@ -24,6 +24,7 @@ use crate::edit_input::{self, EditorInput, PointerCapture};
 use crate::input::{self, CanvasInput};
 use crate::overlay::{self, OverlayColors};
 use crate::pinch::{PinchListener, PinchTracker};
+use crate::properties_panel::{self, PanelColors};
 use crate::render::callback::{self, CanvasCallback};
 use crate::render::color::render_color;
 use crate::render::gpu::{CanvasFrame, CanvasRenderer};
@@ -970,6 +971,19 @@ impl eframe::App for NapkinApp {
                         && self.unreadable.is_none()
                     {
                         editor.set_tool(tool);
+                    }
+
+                    let panel_colors = PanelColors::from_theme(&self.theme);
+                    let panel_state = editor.panel();
+                    if let Some(property) = properties_panel::show(
+                        ui.ctx(),
+                        &panel_state,
+                        panel_colors,
+                        self.theme.dark,
+                    ) && self.unreadable.is_none()
+                    {
+                        let measure = self.measure.get_or_insert_with(FontMeasure::new);
+                        editor.set_property(property, measure);
                     }
 
                     if let Some(message) = &self.unreadable {

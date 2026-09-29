@@ -15,6 +15,7 @@ pub mod input;
 pub mod napkin_app;
 pub mod overlay;
 pub mod pinch;
+pub mod properties_panel;
 pub mod render;
 pub mod stats;
 pub mod storage;
