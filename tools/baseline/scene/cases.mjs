@@ -363,3 +363,54 @@ export const skeletonBatches = [
     { type: "arrow", x: 50, y: 10, points: [[0, 0], [-45, 0]], end: { id: "dot" } },
   ]],
 ];
+
+/** A bound text label's full field set, matching `element("text", ...)`'s shape. */
+function label(overrides) {
+  return element("text", {
+    text: "hi", fontSize: 20, fontFamily: 5, textAlign: "center", verticalAlign: "middle",
+    containerId: null, originalText: "hi", autoResize: true, lineHeight: 1.25,
+    ...overrides,
+  });
+}
+
+/**
+ * [case name, elements, ids of elements to duplicate, "in-place" | "everything"] for
+ * `duplicateElements`. `generate.mjs` runs each case with `randomizeSeed: true` and, for
+ * "in-place", `appState.selectedGroupIds` derived from the given ids (a group counts as
+ * selected when every one of its members is in `ids`) and `overrides` adding
+ * `DEFAULT_GRID_SIZE / 2` to `x`/`y` (`actionDuplicateSelection`).
+ */
+export const duplicateCases = [
+  ["singleRectangleInPlace", [element("rectangle", { id: "r" })], ["r"], "in-place"],
+  ["labeledContainerDuplicatesItsLabel", [
+    element("rectangle", { id: "r", boundElements: [{ id: "t", type: "text" }] }),
+    label({ id: "t", containerId: "r" }),
+  ], ["r"], "in-place"],
+  ["arrowOnlySelectedDropsItsBindings", [
+    element("rectangle", { id: "r1" }),
+    element("rectangle", { id: "r2", x: 200 }),
+    linear("arrow", [[0, 0], [70, 0]], {
+      id: "a", x: 130, y: 30,
+      startBinding: { elementId: "r1", focus: 0, gap: 5 },
+      endBinding: { elementId: "r2", focus: 0, gap: 5 },
+    }),
+  ], ["a"], "in-place"],
+  ["arrowAndBothTargetsSelectedRebindsToTheCopies", [
+    element("rectangle", { id: "r1", boundElements: [{ id: "a", type: "arrow" }] }),
+    element("rectangle", { id: "r2", x: 200, boundElements: [{ id: "a", type: "arrow" }] }),
+    linear("arrow", [[0, 0], [70, 0]], {
+      id: "a", x: 130, y: 30,
+      startBinding: { elementId: "r1", focus: 0, gap: 5 },
+      endBinding: { elementId: "r2", focus: 0, gap: 5 },
+    }),
+  ], ["r1", "r2", "a"], "in-place"],
+  ["fullySelectedGroupDuplicatesTogetherUnderANewGroupId", [
+    element("rectangle", { id: "g1", groupIds: ["g"] }),
+    element("rectangle", { id: "g2", x: 50, groupIds: ["g"] }),
+  ], ["g1", "g2"], "in-place"],
+  ["everythingDuplicatesEveryElementInOrder", [
+    element("rectangle", { id: "r", boundElements: [{ id: "t", type: "text" }] }),
+    label({ id: "t", containerId: "r" }),
+    element("ellipse", { id: "e", x: 300 }),
+  ], null, "everything"],
+];

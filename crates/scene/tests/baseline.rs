@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use scene::batch::add_elements;
 use scene::color::{apply_dark_mode_filter, is_transparent};
+use scene::duplicate::{DuplicateMode, duplicate_elements};
 use scene::editor::{ArrowType, EdgeStyle, ItemStyle};
 use scene::element::{Element, Roundness, StrokeOptions};
 use scene::env::Env;
@@ -407,7 +408,9 @@ fn freedraw_outline() {
 }
 
 /// `generate.mjs`'s `normalizeSkeletonOutput`: drops `seed` and `versionNonce`, renames ids to
-/// `e<position>` in order, references included.
+/// `e<position>` in order (references included), and renames every `groupId` to `g<n>`
+/// (1-based) in first-occurrence order, scanning each element's own `groupIds` in the same
+/// output-order pass. Shared by the `skeleton` and `duplicate` groups.
 fn normalize_skeleton_output(elements: &[Element]) -> Value {
     let values: Vec<Value> = elements.iter().map(Element::to_value).collect();
     let rename: HashMap<String, String> = values
@@ -422,6 +425,15 @@ fn normalize_skeleton_output(elements: &[Element]) -> Value {
                 .cloned()
                 .unwrap_or_default()
         )
+    };
+    let mut group_rename: HashMap<String, String> = HashMap::new();
+    let mut group_id = |raw: &str| -> String {
+        if let Some(existing) = group_rename.get(raw) {
+            return existing.clone();
+        }
+        let name = format!("g{}", group_rename.len() + 1);
+        group_rename.insert(raw.to_owned(), name.clone());
+        name
     };
     Value::Array(
         values
@@ -442,6 +454,13 @@ fn normalize_skeleton_output(elements: &[Element]) -> Value {
                 for key in ["startBinding", "endBinding"] {
                     if let Some(binding) = map.get_mut(key).filter(|b| b.is_object()) {
                         binding["elementId"] = id(&binding["elementId"]);
+                    }
+                }
+                if let Some(Value::Array(group_ids)) = map.get_mut("groupIds") {
+                    for g in group_ids.iter_mut() {
+                        if let Some(s) = g.as_str() {
+                            *g = json!(group_id(s));
+                        }
                     }
                 }
                 v
@@ -492,5 +511,40 @@ fn skeleton() {
         )
         .unwrap_or_else(|errors| panic!("{errors:?}"));
         normalize_skeleton_output(&file.elements)
+    });
+}
+
+#[test]
+fn duplicate() {
+    check_group(&dir(), "duplicate", |case| {
+        let elements: Vec<Element> = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .cloned()
+            .map(Element::from_value)
+            .collect();
+        let ids: Vec<String> = case.args[1]
+            .as_array()
+            .expect("ids")
+            .iter()
+            .map(|v| v.as_str().expect("id").to_owned())
+            .collect();
+        let selection = Selection::from_ids(ids);
+        let mode = match case.args[2].as_str().expect("mode") {
+            "in-place" => DuplicateMode::InPlace {
+                offset: [
+                    scene::duplicate::DEFAULT_GRID_SIZE / 2.0,
+                    scene::duplicate::DEFAULT_GRID_SIZE / 2.0,
+                ],
+            },
+            "everything" => DuplicateMode::Everything,
+            other => panic!("unknown mode {other}"),
+        };
+        let mut env = DistinctIdEnv::default();
+        let mut duplicated = duplicate_elements(&elements, &selection, mode, &mut env);
+        let moved: HashSet<String> = duplicated.new_ids.iter().cloned().collect();
+        sync_moved_indices(&mut duplicated.elements, &moved, &mut env);
+        normalize_skeleton_output(&duplicated.elements)
     });
 }

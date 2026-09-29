@@ -20,16 +20,22 @@ mod properties;
 mod select;
 mod style;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::batch::{self, BatchReport, OpError};
+use crate::clipboard::{self, Pasted};
+use crate::duplicate::{self, DEFAULT_GRID_SIZE, DuplicateMode};
 use crate::edit;
+use crate::element::Element;
 use crate::env::Env;
 use crate::file::SceneFile;
+use crate::fractional_index;
 use crate::geometry::{Bounds, GeometryCache, rotate_point};
 use crate::history::History;
+use crate::new_element::{self, ElementProps, TextProps};
 use crate::selection::{self, Selection};
 use crate::text::TextMeasure;
 use crate::transform;
@@ -88,6 +94,8 @@ pub enum Command {
     SendBackward,
     /// `Ctrl+]`: `moveOneRight`.
     BringForward,
+    /// `Ctrl+D`: `actionDuplicateSelection`.
+    Duplicate,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -343,6 +351,26 @@ impl<E: Env> Editor<E> {
                 file.elements = next_elements;
                 self.finish_edit(&before, &selection_before)
             }
+            Command::Duplicate => {
+                if !self.is_idle() || self.selection.is_empty() {
+                    return false;
+                }
+                let before = Arc::clone(&self.file);
+                let selection_before = self.selection.clone();
+                let offset = [DEFAULT_GRID_SIZE / 2.0, DEFAULT_GRID_SIZE / 2.0];
+                let file = clone_scene(&mut self.file, &mut self.scene_clones);
+                let duplicated = duplicate::duplicate_elements(
+                    &file.elements,
+                    &selection_before,
+                    DuplicateMode::InPlace { offset },
+                    &mut self.env,
+                );
+                file.elements = duplicated.elements;
+                let moved: HashSet<String> = duplicated.new_ids.iter().cloned().collect();
+                fractional_index::sync_moved_indices(&mut file.elements, &moved, &mut self.env);
+                self.selection = Selection::from_ids(duplicated.new_ids);
+                self.finish_edit(&before, &selection_before)
+            }
         }
     }
 
@@ -367,6 +395,105 @@ impl<E: Env> Editor<E> {
         let selection = self.selection.clone();
         self.finish_edit(&before, &selection);
         Ok(report)
+    }
+
+    /// The clipboard JSON for the selection (`actionCopy`); `None` when nothing is selected.
+    pub fn copy_selection(&self) -> Option<String> {
+        clipboard::serialize(&self.file, &self.selection)
+    }
+
+    /// Pastes clipboard `text` at `at`, as one history step, and selects what was pasted.
+    /// Excalidraw data (`addElementsFromPasteOrLibrary`) is repaired the way loading a file
+    /// repairs it (`edit::repair_on_load`'s duplicate-id and index fixes), its deleted elements
+    /// dropped, and the rest centered on `at`; anything else becomes one new text element
+    /// (`addTextFromPaste`), also centered on `at`. Returns whether anything was pasted.
+    pub fn paste(&mut self, text: &str, at: [f64; 2], measure: &mut dyn TextMeasure) -> bool {
+        let Some(parsed) = clipboard::parse(text) else {
+            return false;
+        };
+        let before = Arc::clone(&self.file);
+        let selection_before = self.selection.clone();
+
+        let new_ids = match parsed {
+            Pasted::Elements(raw_elements) => {
+                let mut temp = SceneFile::new();
+                temp.elements = raw_elements;
+                edit::repair_on_load(&mut temp, &mut self.env);
+                let live: Vec<Element> = temp
+                    .elements
+                    .into_iter()
+                    .filter(|e| !e.is_deleted())
+                    .collect();
+                if live.is_empty() {
+                    return false;
+                }
+                let shift = self
+                    .geometry
+                    .common_bounds(live.iter())
+                    .map(|[x1, y1, x2, y2]| [at[0] - (x1 + x2) / 2.0, at[1] - (y1 + y2) / 2.0])
+                    .unwrap_or([0.0, 0.0]);
+                let shifted: Vec<Element> = live
+                    .into_iter()
+                    .map(|mut element| {
+                        if let Some(p) = element.placement() {
+                            element.set_position(p.x + shift[0], p.y + shift[1]);
+                        }
+                        element
+                    })
+                    .collect();
+                let duplicated = duplicate::duplicate_elements(
+                    &shifted,
+                    &Selection::new(),
+                    DuplicateMode::Everything,
+                    &mut self.env,
+                );
+                let file = clone_scene(&mut self.file, &mut self.scene_clones);
+                file.elements.extend(duplicated.elements);
+                let moved: HashSet<String> = duplicated.new_ids.iter().cloned().collect();
+                fractional_index::sync_moved_indices(&mut file.elements, &moved, &mut self.env);
+                duplicated.new_ids
+            }
+            Pasted::Text(text) => {
+                let props = ElementProps {
+                    x: at[0],
+                    y: at[1],
+                    width: 0.0,
+                    height: 0.0,
+                    angle: 0.0,
+                    stroke_color: self.style.stroke_color.clone(),
+                    background_color: self.style.background_color.clone(),
+                    fill_style: self.style.fill_style.clone(),
+                    stroke_width: self.style.stroke_width.value(false),
+                    stroke_style: self.style.stroke_style.clone(),
+                    roughness: self.style.roughness,
+                    opacity: self.style.opacity,
+                    group_ids: Vec::new(),
+                    roundness: None,
+                    locked: false,
+                };
+                let text_props = TextProps {
+                    text,
+                    font_size: Some(self.style.font_size),
+                    font_family: Some(self.style.font_family),
+                    text_align: Some("left".into()),
+                    vertical_align: Some("top".into()),
+                    container_id: None,
+                    line_height: None,
+                };
+                let mut element =
+                    new_element::new_text_element(props, text_props, measure, &mut self.env);
+                if let Some(p) = element.placement() {
+                    element.set_position(at[0] - p.width / 2.0, at[1] - p.height / 2.0);
+                }
+                let id = element.id().expect("new text element has an id").to_owned();
+                let file = clone_scene(&mut self.file, &mut self.scene_clones);
+                edit::append_element(file, element, &mut self.env);
+                vec![id]
+            }
+        };
+
+        self.selection = Selection::from_ids(new_ids);
+        self.finish_edit(&before, &selection_before)
     }
 
     /// For the latest pointer position.

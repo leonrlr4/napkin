@@ -3,8 +3,10 @@
 
 pub mod batch;
 pub mod binding;
+pub mod clipboard;
 pub mod collision;
 pub mod color;
+pub mod duplicate;
 pub mod edit;
 pub mod editor;
 pub mod element;
