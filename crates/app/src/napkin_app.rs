@@ -391,6 +391,8 @@ fn tool_label(tool: Tool) -> &'static str {
         Tool::Arrow => "arrow",
         Tool::Line => "line",
         Tool::Freedraw => "freedraw",
+        Tool::Text => "text",
+        Tool::Eraser => "eraser",
     }
 }
 

@@ -16,6 +16,7 @@
 //! other in-progress edit to cancel.
 
 mod create;
+mod properties;
 mod select;
 mod style;
 
@@ -33,6 +34,7 @@ use crate::selection::{self, Selection};
 use crate::text::TextMeasure;
 use crate::transform;
 
+pub use properties::{PanelState, Property, Section};
 pub use style::{ArrowType, EdgeStyle, ItemStyle, StrokeWidth};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,6 +48,12 @@ pub enum Tool {
     Arrow,
     Line,
     Freedraw,
+    /// Draws nothing yet: `create::pointer_down` and friends ignore it like
+    /// [`Tool::Selection`]/[`Tool::Hand`], but [`Editor::set_tool`] still clears the selection
+    /// for it, as for any other creation tool.
+    Text,
+    /// Erases nothing yet, the same way as [`Tool::Text`].
+    Eraser,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -216,6 +224,17 @@ impl<E: Env> Editor<E> {
     /// The style values (`currentItem*`) a newly created element takes.
     pub fn style(&self) -> &ItemStyle {
         &self.style
+    }
+
+    /// What the property panel shows for the current selection and tool.
+    pub fn panel(&self) -> PanelState {
+        properties::panel(self)
+    }
+
+    /// Applies `property` to the current selection (and to `style()`), as one history step.
+    /// Returns whether any element changed.
+    pub fn set_property(&mut self, property: Property, measure: &mut dyn TextMeasure) -> bool {
+        properties::set_property(self, property, measure)
     }
 
     /// No pointer gesture and no multi-point line in progress.
