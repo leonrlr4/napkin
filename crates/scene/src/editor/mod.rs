@@ -33,6 +33,7 @@ use crate::history::History;
 use crate::selection::{self, Selection};
 use crate::text::TextMeasure;
 use crate::transform;
+use crate::zindex;
 
 pub use properties::{PanelState, Property, Section};
 pub use style::{ArrowType, EdgeStyle, ItemStyle, StrokeWidth};
@@ -83,6 +84,10 @@ pub enum Command {
     Escape,
     /// Enter: finishes a multi-point line or arrow.
     Finalize,
+    /// `Ctrl+[`: `moveOneLeft`.
+    SendBackward,
+    /// `Ctrl+]`: `moveOneRight`.
+    BringForward,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -315,6 +320,29 @@ impl<E: Env> Editor<E> {
                 true
             }
             Command::Finalize => create::finalize_command(self),
+            Command::SendBackward | Command::BringForward => {
+                if !self.is_idle() || self.selection.is_empty() {
+                    return false;
+                }
+                let direction = if command == Command::BringForward {
+                    zindex::Direction::Right
+                } else {
+                    zindex::Direction::Left
+                };
+                let Some(next_elements) = zindex::move_one(
+                    &self.file.elements,
+                    &self.selection,
+                    direction,
+                    &mut self.env,
+                ) else {
+                    return false;
+                };
+                let before = Arc::clone(&self.file);
+                let selection_before = self.selection.clone();
+                let file = clone_scene(&mut self.file, &mut self.scene_clones);
+                file.elements = next_elements;
+                self.finish_edit(&before, &selection_before)
+            }
         }
     }
 

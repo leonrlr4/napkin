@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, runCase, writeGroup } from "../lib/harness.mjs";
-import { colors, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches } from "./cases.mjs";
+import { colors, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -24,6 +24,8 @@ const lib = await bundleExcalidraw(
   export { newElement, newLinearElement, newArrowElement, newFreeDrawElement, newTextElement } from "@excalidraw/element/newElement";
   export { setCustomTextMetricsProvider } from "@excalidraw/element/textMeasurements";
   export { syncMovedIndices, syncInvalidIndices } from "@excalidraw/element/fractionalIndex";
+  export { moveOneLeft, moveOneRight } from "@excalidraw/element/zindex";
+  export { Scene } from "@excalidraw/element/Scene";
   export { applyDarkModeFilter, isTransparent } from "@excalidraw/common";
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
@@ -175,6 +177,53 @@ for (const [label, indices, moved] of indexScenarios) {
   });
 }
 writeGroup(outDir, "fractional_index", source, indexCases);
+
+/**
+ * A complete `rectangle` (or `text` label) element for the zindex cases: `id` and `index`
+ * (`a0`, `a1`, ... in array order) are the only fields that vary by case; `g1`/`g2` are in
+ * group `"G"`, `t` is `r`'s bound label, and `del` is soft-deleted.
+ */
+function zindexElement(id, position) {
+  const el = {
+    id, type: "rectangle", x: 0, y: 0, width: 10, height: 10, angle: 0,
+    strokeColor: "#1e1e1e", backgroundColor: "transparent", fillStyle: "solid",
+    strokeWidth: 2, strokeStyle: "solid", roughness: 1, opacity: 100,
+    groupIds: id === "g1" || id === "g2" ? ["G"] : [], frameId: null, index: `a${position}`,
+    roundness: null, seed: 1, version: 1, versionNonce: 0, isDeleted: id === "del",
+    boundElements: id === "r" ? [{ id: "t", type: "text" }] : null, updated: 1,
+  };
+  if (id === "t") {
+    Object.assign(el, {
+      type: "text", containerId: "r", text: "hi", fontSize: 20, baseFontSize: 20,
+      fontFamily: 5, textAlign: "center", verticalAlign: "middle", originalText: "hi",
+      autoResize: true, lineHeight: 1.25, boundElements: null,
+    });
+  }
+  return el;
+}
+
+writeGroup(
+  outDir,
+  "zindex",
+  source,
+  zindexCases.map(([name, ids, selected, direction]) => {
+    const fn = direction === "right" ? "moveOneRight" : "moveOneLeft";
+    const appState = {
+      selectedElementIds: Object.fromEntries(selected.map((id) => [id, true])),
+      editingGroupId: null,
+    };
+    return {
+      name,
+      call: fn,
+      args: [ids, selected, direction],
+      ...runCase(name, () => {
+        const elements = ids.map((id, position) => zindexElement(id, position));
+        const scene = new lib.Scene(elements);
+        return lib[fn](elements, appState, scene).map(({ id, index, version }) => ({ id, index, version }));
+      }),
+    };
+  }),
+);
 
 // Canvas text metrics do not exist in node; every UTF-16 code unit is 0.6em wide. The Rust
 // side uses the same formula (`scene::sample::CharWidthMeasure`).

@@ -22,6 +22,7 @@ pub mod selection;
 pub mod shape;
 pub mod text;
 pub mod transform;
+pub mod zindex;
 
 pub use crate::element::{Element, Placement};
 pub use crate::file::SceneFile;

@@ -16,11 +16,13 @@ use scene::new_element::{
     ElementProps, GenericKind, TextProps, new_arrow_element, new_freedraw_element,
     new_generic_element, new_line_element, new_text_element,
 };
-use scene::sample::CharWidthMeasure;
+use scene::sample::{self, CharWidthMeasure};
+use scene::selection::Selection;
 use scene::shape::{
     ElementShape, PathOp, ShapeContext, freedraw_outline_points, generate_element_shape,
     generate_rough_options,
 };
+use scene::zindex::{self, Direction};
 use serde_json::{Value, json};
 use testkit::rough_json::{drawable_value, options_value};
 use testkit::{Case, check_group, num, numbers, point_value, points_from, throws};
@@ -211,6 +213,65 @@ fn fractional_index() {
             }
             other => panic!("unknown call {other}"),
         }
+    });
+}
+
+/// A complete rectangle (or `t`'s text label) element for the zindex cases, mirroring
+/// `tools/baseline/scene/generate.mjs`'s `zindexElement`: `g1`/`g2` are in group `"G"`, `t` is
+/// `r`'s bound label, `del` is soft-deleted, and every other field but `index` (`a0`, `a1`, ...
+/// in array order) is a fixed default. Built from `sample`'s full-field JSON so it loads as a
+/// typed element, not `Raw`.
+fn zindex_element(id: &str, position: usize) -> Value {
+    let mut value = if id == "t" {
+        sample::text(id, [0.0, 0.0, 10.0, 10.0], "hi", Some("r"))
+    } else {
+        sample::generic("rectangle", id, [0.0, 0.0, 10.0, 10.0])
+    };
+    value["index"] = json!(format!("a{position}"));
+    value["version"] = json!(1);
+    value["versionNonce"] = json!(0);
+    value["updated"] = json!(1);
+    if id == "g1" || id == "g2" {
+        value["groupIds"] = json!(["G"]);
+    }
+    if id == "del" {
+        value["isDeleted"] = json!(true);
+    }
+    if id == "r" {
+        value["boundElements"] = json!([{"id": "t", "type": "text"}]);
+    }
+    value
+}
+
+#[test]
+fn zindex() {
+    check_group(&dir(), "zindex", |case| {
+        let ids: Vec<&str> = case.args[0]
+            .as_array()
+            .expect("ids")
+            .iter()
+            .map(|v| v.as_str().expect("id"))
+            .collect();
+        let selected: Vec<&str> = case.args[1]
+            .as_array()
+            .expect("selected")
+            .iter()
+            .map(|v| v.as_str().expect("id"))
+            .collect();
+        let direction = match case.args[2].as_str().expect("direction") {
+            "left" => Direction::Left,
+            "right" => Direction::Right,
+            other => panic!("unknown direction {other}"),
+        };
+        let elements: Vec<Element> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| element_from(&zindex_element(id, i)))
+            .collect();
+        let selection = Selection::from_ids(selected);
+        let result =
+            zindex::move_one(&elements, &selection, direction, &mut FixedEnv).unwrap_or(elements);
+        index_summary(&result)
     });
 }
 

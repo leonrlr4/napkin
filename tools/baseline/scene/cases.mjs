@@ -271,6 +271,18 @@ export const indexScenarios = [
   ["movedWrong", ["a0", "a1", "a1V", "a1"], [0]],
 ];
 
+/** [case name, elements, selected ids, "left" | "right"] for moveOneLeft/moveOneRight. */
+export const zindexCases = [
+  ["right/middle", ["a", "b", "c"], ["b"], "right"],
+  ["left/middle", ["a", "b", "c"], ["b"], "left"],
+  ["right/top", ["a", "b", "c"], ["c"], "right"],
+  ["right/twoApart", ["a", "b", "c", "d", "e"], ["a", "c"], "right"],
+  ["left/block", ["a", "b", "c", "d"], ["c", "d"], "left"],
+  ["right/group", ["a", "g1", "g2", "b"], ["g1", "g2"], "right"],
+  ["right/withLabel", ["r", "t", "x"], ["r"], "right"],
+  ["right/skipsDeleted", ["a", "del", "b"], ["a"], "right"],
+];
+
 /** [case name, newElement.ts function, opts]; id and seed are fixed, everything else defaults. */
 export const newElementCalls = [
   ["rectangle/defaults", "newElement", { type: "rectangle", id: "r1", seed: 5, x: 10, y: 20 }],
