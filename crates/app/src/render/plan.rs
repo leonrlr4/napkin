@@ -107,9 +107,9 @@ pub struct View<'a> {
     /// through the offscreen path instead of glyphon's in-pass renderer.
     pub pixel_scale: f32,
     /// Ids drawn at [`ERASE_PENDING_ALPHA`] of their opacity (the eraser's pending set); a text
-    /// element bound to a faded container fades with it even when its own id is not listed
-    /// (`getRenderOpacity`'s `containingFrame` check, applied here to a container's label
-    /// instead of a frame's children).
+    /// element bound to a faded container fades with it even when its own id is not listed.
+    /// The eraser itself puts both a container and its label id in the set together, so this
+    /// only matters for whatever else populates `faded`.
     pub faded: &'a HashSet<String>,
     /// Ids not drawn at all (the text currently being edited); a faded or hidden container
     /// still draws normally, only its own label is affected.

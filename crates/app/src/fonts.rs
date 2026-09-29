@@ -8,8 +8,8 @@ use eframe::egui;
 use crate::render::text;
 
 /// Family names `fontdb` may report the system CJK font under, tried in this order: the same
-/// discovery mechanism `render::text::font_system` relies on for shaping (decision 6),
-/// whichever of Traditional, Simplified or Japanese Noto Sans CJK is actually installed.
+/// discovery mechanism `render::text::font_system` relies on for shaping, whichever of
+/// Traditional, Simplified or Japanese Noto Sans CJK is actually installed.
 const CJK_FAMILY_NAMES: [&str; 3] = ["Noto Sans CJK TC", "Noto Sans CJK SC", "Noto Sans CJK JP"];
 
 /// The egui font name the system CJK font (when found) is registered under.
