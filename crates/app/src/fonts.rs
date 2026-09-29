@@ -1,7 +1,7 @@
 //! Registers napkin's bundled fonts, and the system CJK font when one is installed, as egui
-//! font families: the upcoming `TextEdit` overlay needs napkin's own fonts to preview a text
-//! element's `fontFamily`, and needs a CJK font (for typed Chinese and IME candidates) since
-//! egui's own default fonts only cover Latin and Cyrillic.
+//! font families: `text_edit`'s overlay needs napkin's own fonts to preview a text element's
+//! `fontFamily`, and needs a CJK font (for typed Chinese and IME candidates) since egui's own
+//! default fonts only cover Latin and Cyrillic.
 
 use eframe::egui;
 
@@ -21,9 +21,10 @@ const BUNDLED_FAMILIES: [&str; 3] = ["napkin-hand", "napkin-sans", "napkin-code"
 /// Finds the system CJK font through `fontdb`: its raw bytes and face index (a `.ttc` file
 /// bundles several faces together, so the index says which one to use). `None` when no
 /// `CJK_FAMILY_NAMES` entry is installed; the caller then simply registers no CJK fallback.
-fn find_cjk_font() -> Option<(Vec<u8>, u32)> {
-    let mut db = glyphon::fontdb::Database::new();
-    db.load_system_fonts();
+/// `db` is expected to already have the system's fonts loaded (`cosmic_text::FontSystem::new`
+/// does this itself); scanning again here just to look one up would cost a second system font
+/// scan for no benefit.
+fn find_cjk_font(db: &glyphon::fontdb::Database) -> Option<(Vec<u8>, u32)> {
     for name in CJK_FAMILY_NAMES {
         let id = db
             .faces()
@@ -47,8 +48,9 @@ pub fn egui_family(font_family: f64) -> egui::FontFamily {
 /// Registers napkin-hand, napkin-sans and napkin-code as egui font families (named after
 /// themselves), each falling back to the system CJK font when one is found, and adds that CJK
 /// font as a fallback of egui's proportional family too, so IME candidates and typed Chinese
-/// show both in a `TextEdit` using a bundled family and in egui's own built-in UI text.
-pub fn install(ctx: &egui::Context) {
+/// show both in a `TextEdit` using a bundled family and in egui's own built-in UI text. `db` is
+/// an already-populated font database (see [`find_cjk_font`]) to look the CJK font up in.
+pub fn install(ctx: &egui::Context, db: &glyphon::fontdb::Database) {
     let mut fonts = egui::FontDefinitions::default();
 
     fonts.font_data.insert(
@@ -73,7 +75,7 @@ pub fn install(ctx: &egui::Context) {
         .into(),
     );
 
-    let cjk = find_cjk_font();
+    let cjk = find_cjk_font(db);
     if let Some((data, index)) = &cjk {
         let mut font_data = egui::FontData::from_owned(data.clone());
         font_data.index = *index;
@@ -122,7 +124,10 @@ mod tests {
     #[test]
     fn install_registers_the_three_bundled_families() {
         let ctx = egui::Context::default();
-        install(&ctx);
+        // Empty rather than a real system font scan: this only checks the bundled families
+        // themselves, not CJK discovery, and a real scan would make every run of this test pay
+        // for one.
+        install(&ctx, &glyphon::fontdb::Database::new());
         // Font definitions only take effect at the start of the next pass. `FullOutput` panics
         // on drop if its `textures_delta` (here, just the font atlas) is not explicitly cleared.
         let mut output = ctx.run_ui(Default::default(), |_| {});

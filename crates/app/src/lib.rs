@@ -19,6 +19,7 @@ pub mod properties_panel;
 pub mod render;
 pub mod stats;
 pub mod storage;
+pub mod text_edit;
 pub mod theme;
 pub mod toolbar;
 pub mod writer;

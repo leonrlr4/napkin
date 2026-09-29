@@ -1,7 +1,7 @@
 //! The eframe [`App`](eframe::App) that hosts the canvas: theme, document title, the camera,
 //! the scene editor and its overlay, the load-error banner and the GPU canvas itself.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -21,6 +21,7 @@ use crate::control::handler::{self, Session, handle};
 use crate::control::render::Rasterize;
 use crate::control::server::{BindError, Incoming, Server, socket_path};
 use crate::edit_input::{self, EditorInput, PointerCapture};
+use crate::fonts;
 use crate::input::{self, CanvasInput};
 use crate::overlay::{self, OverlayColors};
 use crate::pinch::{PinchListener, PinchTracker};
@@ -32,6 +33,7 @@ use crate::render::offscreen::GpuRasterizer;
 use crate::render::text::FontMeasure;
 use crate::stats::FrameStats;
 use crate::storage::{self, Content};
+use crate::text_edit::{self, TextEditOutcome};
 use crate::theme::{self, Theme};
 use crate::toolbar::{self, ToolbarColors};
 use crate::writer::{SaveJob, SaveWorker};
@@ -135,12 +137,20 @@ pub struct NapkinApp {
     control: Option<Server>,
     /// Requests in arrival order; a mutating one at the front waits for `Editor::is_idle`.
     pending: VecDeque<Incoming>,
-    /// Created on the first request that measures text.
+    /// Built at startup rather than lazily: `fonts::install` needs its font database to look up
+    /// the system CJK font, and building a second `FontSystem` just for that would scan system
+    /// fonts twice.
     measure: Option<FontMeasure>,
     /// The renderer `render` requests draw with (its own format, `offscreen::FORMAT`).
     offscreen: Option<CanvasRenderer>,
     /// The canvas size in points, from the latest laid-out frame.
     canvas_size: [f64; 2],
+    /// The text-edit overlay's live buffer, `Some` for exactly as long as
+    /// `Editor::text_editing()` is: created (from its `text`) the frame editing starts, mutated
+    /// in place by the `TextEdit` widget every frame after, and taken and committed whenever
+    /// editing ends, however it ends (the overlay's own Ctrl+Enter/Escape/blur, a canvas click
+    /// or tool change, losing window focus, or exiting).
+    text_edit_buffer: Option<String>,
 }
 
 /// A [`Rasterize`] for a `render` request that arrives before the first frame has a GPU render
@@ -212,6 +222,10 @@ impl NapkinApp {
         if let Some(render_state) = &cc.wgpu_render_state {
             callback::install(render_state);
         }
+        // Built here, and reused for `measure` below, so registering napkin's fonts in egui
+        // doesn't scan the system's fonts a second time just to find the CJK fallback.
+        let mut font_measure = FontMeasure::new();
+        fonts::install(&cc.egui_ctx, font_measure.db_mut());
         let (control, control_notice) = bind_control(cc, bench);
         let notice = control_notice.or(notice);
         let pinch = PinchListener::start(cc)
@@ -266,9 +280,10 @@ impl NapkinApp {
             reload_check_pending: false,
             control,
             pending: VecDeque::new(),
-            measure: None,
+            measure: Some(font_measure),
             offscreen: None,
             canvas_size: [0.0, 0.0],
+            text_edit_buffer: None,
         }
     }
 
@@ -491,6 +506,25 @@ pub fn should_clear_unreadable(unreadable: bool, disk_mtime: Option<SystemTime>)
     unreadable && disk_mtime.is_none()
 }
 
+/// Ends a text edit in progress by committing `buffer`'s current contents, if there is one: a
+/// no-op once `editor.text_editing()` is already `None`, so every caller below can run this
+/// unconditionally instead of checking first. Takes each field it needs rather than `&mut self`
+/// so it can run from inside a loop that already holds `self.editor` borrowed mutably.
+fn commit_pending_text_edit(
+    editor: &mut Editor<SystemEnv>,
+    buffer: &mut Option<String>,
+    measure: &mut Option<FontMeasure>,
+) {
+    if editor.text_editing().is_none() {
+        return;
+    }
+    let Some(text) = buffer.take() else {
+        return;
+    };
+    let measure = measure.get_or_insert_with(FontMeasure::new);
+    editor.commit_text(&text, measure);
+}
+
 impl eframe::App for NapkinApp {
     /// Stops the pinch dispatch thread before eframe disconnects the Wayland display it
     /// borrows from (see [`PinchListener`]'s doc comment), finishes any queued save and hands
@@ -522,8 +556,11 @@ impl eframe::App for NapkinApp {
         };
         // An in-progress multi-point line's cursor-following point is already in `file` but
         // not yet reflected in `revision`; without this, exiting would either save that
-        // uncommitted point as if confirmed, or drop it entirely (spec §8).
+        // uncommitted point as if confirmed, or drop it entirely (spec §8). A text edit in
+        // progress needs the same treatment: `finish_pending_gesture` does not touch it, so it
+        // is committed here directly instead of being dropped.
         editor.finish_pending_gesture();
+        commit_pending_text_edit(editor, &mut self.text_edit_buffer, &mut self.measure);
         let path = self.path.clone().expect("a writer implies a save path");
         let view = camera_view(camera);
         let state = DocumentState {
@@ -808,7 +845,19 @@ impl eframe::App for NapkinApp {
                             };
                             for action in edit_input::translate(&frame_input, &mut self.capture) {
                                 match action {
-                                    EditorInput::Down(event) => editor.pointer_down(event),
+                                    EditorInput::Down(event) => {
+                                        // A click on the canvas while editing text ends that
+                                        // edit first (its own commit paths never run: the click
+                                        // reached here instead of the overlay's `TextEdit`
+                                        // because `pointer_over_ui` was false), then proceeds
+                                        // as this tool's own pointer-down would otherwise.
+                                        commit_pending_text_edit(
+                                            editor,
+                                            &mut self.text_edit_buffer,
+                                            &mut self.measure,
+                                        );
+                                        editor.pointer_down(event);
+                                    }
                                     EditorInput::Move(event) => editor.pointer_move(event),
                                     EditorInput::Up(event) => editor.pointer_up(event),
                                     EditorInput::Tool(tool) => editor.set_tool(tool),
@@ -869,8 +918,15 @@ impl eframe::App for NapkinApp {
                             // See `on_exit`'s identical comment: a multi-point line's follow
                             // point must be committed before a focus-loss save, or the save
                             // would either capture that uncommitted point as if confirmed, or,
-                            // if nothing else changed, miss it entirely.
+                            // if nothing else changed, miss it entirely. A text edit in progress
+                            // needs the same treatment, since `finish_pending_gesture` does not
+                            // touch it.
                             editor.finish_pending_gesture();
+                            commit_pending_text_edit(
+                                editor,
+                                &mut self.text_edit_buffer,
+                                &mut self.measure,
+                            );
                         }
                         let view = camera_view(camera_for_requests);
                         let state = DocumentState {
@@ -945,8 +1001,17 @@ impl eframe::App for NapkinApp {
                             .clone(),
                     ),
                     // The text element being edited is hidden once the text-edit overlay
-                    // renders it as an egui `TextEdit` instead.
-                    hidden: Arc::new(HashSet::new()),
+                    // renders it as an egui `TextEdit` instead; empty while typing a brand new
+                    // text or label, which has no element yet to hide.
+                    hidden: Arc::new(
+                        self.editor
+                            .as_ref()
+                            .expect(EDITOR_INVARIANT)
+                            .text_editing()
+                            .and_then(|editing| editing.element_id.clone())
+                            .into_iter()
+                            .collect(),
+                    ),
                 };
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                     response.rect,
@@ -963,6 +1028,31 @@ impl eframe::App for NapkinApp {
                         colors,
                     ));
 
+                    if self.unreadable.is_none()
+                        && let Some(editing) = editor.text_editing().cloned()
+                    {
+                        let first_frame = self.text_edit_buffer.is_none();
+                        let buffer = self
+                            .text_edit_buffer
+                            .get_or_insert_with(|| editing.text.clone());
+                        let outcome = text_edit::show(
+                            ui,
+                            &editing,
+                            buffer,
+                            camera,
+                            response.rect.min,
+                            self.theme.dark,
+                            first_frame,
+                        );
+                        if matches!(outcome, TextEditOutcome::Commit(_)) {
+                            commit_pending_text_edit(
+                                editor,
+                                &mut self.text_edit_buffer,
+                                &mut self.measure,
+                            );
+                        }
+                    }
+
                     let toolbar_colors = ToolbarColors::from_theme(&self.theme);
                     // An unreadable file blocks every other edit (see the pointer/keyboard
                     // gate above); the toolbar still draws so the current tool stays visible,
@@ -970,6 +1060,14 @@ impl eframe::App for NapkinApp {
                     if let Some(tool) = toolbar::show(ui.ctx(), editor.tool(), toolbar_colors)
                         && self.unreadable.is_none()
                     {
+                        // A tool change ends a text edit in progress rather than abandoning it
+                        // (the toolbar itself is a click the canvas never sees, so the usual
+                        // click-commits-first path above never runs for it).
+                        commit_pending_text_edit(
+                            editor,
+                            &mut self.text_edit_buffer,
+                            &mut self.measure,
+                        );
                         editor.set_tool(tool);
                     }
 
