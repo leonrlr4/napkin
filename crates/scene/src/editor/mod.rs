@@ -21,6 +21,7 @@ mod erase;
 mod properties;
 mod select;
 mod style;
+mod text;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -45,6 +46,7 @@ use crate::zindex;
 
 pub use properties::{PanelState, Property, Section};
 pub use style::{ArrowType, EdgeStyle, ItemStyle, StrokeWidth};
+pub use text::TextEditing;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
@@ -57,9 +59,9 @@ pub enum Tool {
     Arrow,
     Line,
     Freedraw,
-    /// Draws nothing yet: `create::pointer_down` and friends ignore it like
-    /// [`Tool::Selection`]/[`Tool::Hand`], but [`Editor::set_tool`] still clears the selection
-    /// for it, as for any other creation tool.
+    /// Starts text editing on pointer-down (`text::pointer_down`); `create::pointer_down` and
+    /// friends ignore it like [`Tool::Selection`]/[`Tool::Hand`], but [`Editor::set_tool`]
+    /// still clears the selection for it, as for any other creation tool.
     Text,
     /// Drags out and deletes elements one pointer gesture at a time; see `erase`.
     Eraser,
@@ -138,6 +140,7 @@ pub struct Editor<E: Env> {
     select_gesture: select::Gesture,
     create_gesture: create::Gesture,
     erase_gesture: erase::Gesture,
+    text_editing: Option<TextEditing>,
     style: ItemStyle,
     history: History,
     geometry: GeometryCache,
@@ -158,6 +161,7 @@ impl<E: Env> Editor<E> {
             select_gesture: select::Gesture::None,
             create_gesture: create::Gesture::None,
             erase_gesture: erase::Gesture::None,
+            text_editing: None,
             style: ItemStyle::default(),
             history: History::default(),
             geometry: GeometryCache::default(),
@@ -172,7 +176,7 @@ impl<E: Env> Editor<E> {
     }
 
     /// Replaces the scene after an external change: repairs it, clears the selection, the
-    /// history and any gesture. Does not change [`Editor::revision`].
+    /// history, any gesture and any text edit in progress. Does not change [`Editor::revision`].
     pub fn replace_file(&mut self, mut file: SceneFile) {
         edit::repair_on_load(&mut file, &mut self.env);
         self.file = Arc::new(file);
@@ -181,6 +185,7 @@ impl<E: Env> Editor<E> {
         self.select_gesture = select::Gesture::None;
         self.create_gesture = create::Gesture::None;
         self.erase_gesture = erase::Gesture::None;
+        self.text_editing = None;
         self.geometry.clear();
     }
 
@@ -257,11 +262,17 @@ impl<E: Env> Editor<E> {
         properties::set_property(self, property, measure)
     }
 
-    /// No pointer gesture and no multi-point line in progress.
+    /// No pointer gesture, no multi-point line, and no text edit in progress.
     pub fn is_idle(&self) -> bool {
         matches!(self.select_gesture, select::Gesture::None)
             && matches!(self.create_gesture, create::Gesture::None)
             && matches!(self.erase_gesture, erase::Gesture::None)
+            && self.text_editing.is_none()
+    }
+
+    /// The text element currently being edited, if any (`state.editingTextElement`).
+    pub fn text_editing(&self) -> Option<&TextEditing> {
+        self.text_editing.as_ref()
     }
 
     /// Ids of the elements the current eraser stroke will delete, drawn faded
@@ -275,6 +286,7 @@ impl<E: Env> Editor<E> {
         select::pointer_down(self, event);
         create::pointer_down(self, event);
         erase::pointer_down(self, event);
+        text::pointer_down(self, event);
     }
 
     pub fn pointer_move(&mut self, event: PointerEvent) {
@@ -515,6 +527,18 @@ impl<E: Env> Editor<E> {
 
         self.selection = Selection::from_ids(new_ids);
         self.finish_edit(&before, &selection_before)
+    }
+
+    /// Writes the text being edited back as one history step and ends editing; see
+    /// `text::commit_text`. Ignored (returning `false`) when nothing is being edited.
+    pub fn commit_text(&mut self, text: &str, measure: &mut dyn TextMeasure) -> bool {
+        text::commit_text(self, text, measure)
+    }
+
+    /// The selection tool's double click: starts editing the text or container label under the
+    /// pointer, or a new one; see `text::double_click`. Returns whether editing started.
+    pub fn double_click(&mut self, event: PointerEvent) -> bool {
+        text::double_click(self, event)
     }
 
     /// For the latest pointer position.

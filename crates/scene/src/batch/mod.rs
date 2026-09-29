@@ -1,7 +1,10 @@
 //! One `napkin apply` batch (AI spec §4): parsing, the `add` skeleton conversion, `update` and
 //! `delete`, applied all-or-nothing.
 
-mod add;
+// `pub(crate)`, not private: the editor's own text tool (`editor::text`) reuses
+// `add::bind_label` to create a container label, the same primitive the AI batch interface
+// uses for a skeleton's `label`.
+pub(crate) mod add;
 mod validate;
 
 use std::collections::{BTreeMap, HashSet};
