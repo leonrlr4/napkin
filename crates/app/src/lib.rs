@@ -19,4 +19,5 @@ pub mod render;
 pub mod stats;
 pub mod storage;
 pub mod theme;
+pub mod toolbar;
 pub mod writer;

@@ -1,6 +1,6 @@
 //! Translates one frame's raw egui input into the scene editor's own vocabulary: pointer
-//! gestures gated on focus, panning state and the canvas rectangle, and keyboard shortcuts for
-//! tools and commands.
+//! gestures gated on focus, panning state, the canvas rectangle and the toolbar; keyboard
+//! shortcuts for tools and commands; and clipboard copy/paste.
 
 use eframe::egui;
 use scene::editor::{Command, Cursor, Modifiers, PointerEvent, Tool};
@@ -8,13 +8,17 @@ use scene::editor::{Command, Cursor, Modifiers, PointerEvent, Tool};
 use crate::camera::Camera;
 
 /// One editor input translated from an egui event.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EditorInput {
     Down(PointerEvent),
     Move(PointerEvent),
     Up(PointerEvent),
     Tool(Tool),
     Command(Command),
+    Copy,
+    /// `egui::Event::Paste`'s text (Ctrl+V, converted by egui itself).
+    Paste(String),
+    DoubleClick(PointerEvent),
 }
 
 /// A primary press that started on the canvas, and the last pointer position in scene
@@ -23,6 +27,14 @@ pub enum EditorInput {
 pub struct PointerCapture {
     pressed: bool,
     last: Option<[f64; 2]>,
+}
+
+impl PointerCapture {
+    /// The last pointer position in scene coordinates, from the most recent translated event.
+    /// Used to place a paste when the pointer has never moved this session.
+    pub fn last(&self) -> Option<[f64; 2]> {
+        self.last
+    }
 }
 
 pub struct FrameInput<'a> {
@@ -41,6 +53,12 @@ pub struct FrameInput<'a> {
     /// focused window, and egui-winit drops the Super modifier on Linux, so the letter alone
     /// would reach the tool shortcuts.
     pub super_held: bool,
+    /// The pointer is over an egui area such as the toolbar (`Context::is_pointer_over_egui`):
+    /// a primary press here must not reach the editor as `Down`.
+    pub pointer_over_ui: bool,
+    /// The primary button was double-clicked this frame
+    /// (`InputState::pointer::button_double_clicked`).
+    pub double_clicked: bool,
 }
 
 /// `egui::Modifiers` to the editor's own type: `ctrl` covers both the physical Ctrl key and
@@ -69,6 +87,10 @@ fn key_input(key: egui::Key, modifiers: egui::Modifiers) -> Option<EditorInput> 
             egui::Key::Z if modifiers.shift => Some(EditorInput::Command(Command::Redo)),
             egui::Key::Z => Some(EditorInput::Command(Command::Undo)),
             egui::Key::Y => Some(EditorInput::Command(Command::Redo)),
+            egui::Key::D => Some(EditorInput::Command(Command::Duplicate)),
+            egui::Key::CloseBracket => Some(EditorInput::Command(Command::BringForward)),
+            egui::Key::OpenBracket => Some(EditorInput::Command(Command::SendBackward)),
+            egui::Key::C => Some(EditorInput::Copy),
             _ => None,
         };
     }
@@ -83,6 +105,8 @@ fn key_input(key: egui::Key, modifiers: egui::Modifiers) -> Option<EditorInput> 
         egui::Key::A | egui::Key::Num5 => Some(EditorInput::Tool(Tool::Arrow)),
         egui::Key::L | egui::Key::Num6 => Some(EditorInput::Tool(Tool::Line)),
         egui::Key::P | egui::Key::X | egui::Key::Num7 => Some(EditorInput::Tool(Tool::Freedraw)),
+        egui::Key::T | egui::Key::Num8 => Some(EditorInput::Tool(Tool::Text)),
+        egui::Key::E | egui::Key::Num0 => Some(EditorInput::Tool(Tool::Eraser)),
         egui::Key::H => Some(EditorInput::Tool(Tool::Hand)),
         egui::Key::Delete | egui::Key::Backspace => Some(EditorInput::Command(Command::Delete)),
         egui::Key::Escape => Some(EditorInput::Command(Command::Escape)),
@@ -110,7 +134,11 @@ pub fn translate(input: &FrameInput, capture: &mut PointerCapture) -> Vec<Editor
                     zoom: input.camera.zoom,
                 };
                 if *pressed {
-                    if input.focused && !input.panning && input.canvas.contains(*pos) {
+                    if input.focused
+                        && !input.panning
+                        && !input.pointer_over_ui
+                        && input.canvas.contains(*pos)
+                    {
                         capture.pressed = true;
                         capture.last = Some(at);
                         out.push(EditorInput::Down(scene_event));
@@ -119,6 +147,9 @@ pub fn translate(input: &FrameInput, capture: &mut PointerCapture) -> Vec<Editor
                     capture.pressed = false;
                     capture.last = Some(at);
                     out.push(EditorInput::Up(scene_event));
+                    if input.double_clicked {
+                        out.push(EditorInput::DoubleClick(scene_event));
+                    }
                 }
             }
             egui::Event::PointerMoved(pos) => {
@@ -142,6 +173,11 @@ pub fn translate(input: &FrameInput, capture: &mut PointerCapture) -> Vec<Editor
                 if let Some(mapped) = key_input(*key, *modifiers) {
                     out.push(mapped);
                 }
+            }
+            // A focused `TextEdit` (editing a text element) takes this event itself; forwarding
+            // it here too would paste into the canvas at the same time.
+            egui::Event::Paste(text) if !input.keyboard_taken => {
+                out.push(EditorInput::Paste(text.clone()));
             }
             _ => {}
         }
@@ -195,6 +231,8 @@ mod tests {
             keyboard_taken: false,
             focused: true,
             super_held: false,
+            pointer_over_ui: false,
+            double_clicked: false,
         }
     }
 
@@ -336,6 +374,75 @@ mod tests {
         let mut typing = frame(&events);
         typing.keyboard_taken = true;
         assert_eq!(translate(&typing, &mut PointerCapture::default()), vec![]);
+    }
+
+    #[test]
+    fn new_shortcuts_map_to_tools_and_commands() {
+        let ctrl = egui::Modifiers::COMMAND;
+        let none = egui::Modifiers::NONE;
+        let events = [
+            key(egui::Key::T, none),
+            key(egui::Key::Num8, none),
+            key(egui::Key::E, none),
+            key(egui::Key::Num0, none),
+            key(egui::Key::D, ctrl),
+            key(egui::Key::CloseBracket, ctrl),
+            key(egui::Key::OpenBracket, ctrl),
+            key(egui::Key::C, ctrl),
+        ];
+        assert_eq!(
+            translate(&frame(&events), &mut PointerCapture::default()),
+            vec![
+                EditorInput::Tool(Tool::Text),
+                EditorInput::Tool(Tool::Text),
+                EditorInput::Tool(Tool::Eraser),
+                EditorInput::Tool(Tool::Eraser),
+                EditorInput::Command(Command::Duplicate),
+                EditorInput::Command(Command::BringForward),
+                EditorInput::Command(Command::SendBackward),
+                EditorInput::Copy,
+            ]
+        );
+    }
+
+    #[test]
+    fn paste_event_becomes_paste_input_unless_a_widget_has_keyboard_focus() {
+        let events = [egui::Event::Paste("hello".to_string())];
+        assert_eq!(
+            translate(&frame(&events), &mut PointerCapture::default()),
+            vec![EditorInput::Paste("hello".to_string())]
+        );
+
+        let mut typing = frame(&events);
+        typing.keyboard_taken = true;
+        assert_eq!(translate(&typing, &mut PointerCapture::default()), vec![]);
+    }
+
+    #[test]
+    fn pointer_over_ui_suppresses_down() {
+        let press = [button(30.0, 40.0, true, egui::Modifiers::NONE)];
+        let mut input = frame(&press);
+        input.pointer_over_ui = true;
+        assert_eq!(translate(&input, &mut PointerCapture::default()), vec![]);
+    }
+
+    #[test]
+    fn a_double_click_adds_double_click_after_up() {
+        let mut capture = PointerCapture::default();
+        translate(
+            &frame(&[button(30.0, 40.0, true, egui::Modifiers::NONE)]),
+            &mut capture,
+        );
+        let release = [button(30.0, 40.0, false, egui::Modifiers::NONE)];
+        let mut released = frame(&release);
+        released.double_clicked = true;
+        assert_eq!(
+            translate(&released, &mut capture),
+            vec![
+                EditorInput::Up(pointer(10.0, 10.0, Modifiers::default())),
+                EditorInput::DoubleClick(pointer(10.0, 10.0, Modifiers::default())),
+            ]
+        );
     }
 
     #[test]

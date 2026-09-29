@@ -32,6 +32,7 @@ use crate::render::text::FontMeasure;
 use crate::stats::FrameStats;
 use crate::storage::{self, Content};
 use crate::theme::{self, Theme};
+use crate::toolbar::{self, ToolbarColors};
 use crate::writer::{SaveJob, SaveWorker};
 
 /// How often a mutating request at the front of the queue re-checks `Editor::is_idle` while a
@@ -379,22 +380,6 @@ fn ctrl_k_just_pressed(events: &[egui::Event]) -> bool {
             } if modifiers.command
         )
     })
-}
-
-/// The tool's lowercase name, as shown above the canvas.
-fn tool_label(tool: Tool) -> &'static str {
-    match tool {
-        Tool::Selection => "selection",
-        Tool::Hand => "hand",
-        Tool::Rectangle => "rectangle",
-        Tool::Diamond => "diamond",
-        Tool::Ellipse => "ellipse",
-        Tool::Arrow => "arrow",
-        Tool::Line => "line",
-        Tool::Freedraw => "freedraw",
-        Tool::Text => "text",
-        Tool::Eraser => "eraser",
-    }
 }
 
 /// `file`'s stored view, when its `scrollX`/`scrollY`/`zoom` are all finite and `zoom` is
@@ -814,6 +799,11 @@ impl eframe::App for NapkinApp {
                                 keyboard_taken: ui.ctx().egui_wants_keyboard_input(),
                                 focused: self.focused,
                                 super_held,
+                                pointer_over_ui: ui.ctx().is_pointer_over_egui(),
+                                double_clicked: ui.input(|i| {
+                                    i.pointer
+                                        .button_double_clicked(egui::PointerButton::Primary)
+                                }),
                             };
                             for action in edit_input::translate(&frame_input, &mut self.capture) {
                                 match action {
@@ -823,6 +813,25 @@ impl eframe::App for NapkinApp {
                                     EditorInput::Tool(tool) => editor.set_tool(tool),
                                     EditorInput::Command(command) => {
                                         editor.command(command);
+                                    }
+                                    EditorInput::Copy => {
+                                        if let Some(text) = editor.copy_selection() {
+                                            ui.ctx().copy_text(text);
+                                        }
+                                    }
+                                    EditorInput::Paste(text) => {
+                                        let at = self.capture.last().unwrap_or_else(|| {
+                                            camera.view_to_scene([
+                                                self.canvas_size[0] / 2.0,
+                                                self.canvas_size[1] / 2.0,
+                                            ])
+                                        });
+                                        let measure =
+                                            self.measure.get_or_insert_with(FontMeasure::new);
+                                        editor.paste(&text, at, measure);
+                                    }
+                                    EditorInput::DoubleClick(event) => {
+                                        editor.double_click(event);
                                     }
                                 }
                             }
@@ -927,9 +936,15 @@ impl eframe::App for NapkinApp {
                     pixels_per_point,
                     dark: self.theme.dark,
                     generation: self.generation,
-                    // The eraser's pending set and the text element being edited are wired up
-                    // once the editor tracks them; until then nothing is faded or hidden.
-                    faded: Arc::new(HashSet::new()),
+                    faded: Arc::new(
+                        self.editor
+                            .as_ref()
+                            .expect(EDITOR_INVARIANT)
+                            .pending_erasure()
+                            .clone(),
+                    ),
+                    // The text element being edited is hidden once the text-edit overlay
+                    // renders it as an egui `TextEdit` instead.
                     hidden: Arc::new(HashSet::new()),
                 };
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -947,15 +962,14 @@ impl eframe::App for NapkinApp {
                         colors,
                     ));
 
-                    egui::Area::new(egui::Id::new("napkin-current-tool"))
-                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 8.0))
-                        .show(ui.ctx(), |ui| {
-                            ui.small(tool_label(editor.tool()));
-                        });
+                    let toolbar_colors = ToolbarColors::from_theme(&self.theme);
+                    if let Some(tool) = toolbar::show(ui.ctx(), editor.tool(), toolbar_colors) {
+                        editor.set_tool(tool);
+                    }
 
                     if let Some(message) = &self.unreadable {
                         egui::Area::new(egui::Id::new("napkin-unreadable"))
-                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 28.0))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 52.0))
                             .show(ui.ctx(), |ui| {
                                 ui.colored_label(egui::Color32::RED, message);
                             });
