@@ -1,5 +1,5 @@
 //! The top-centre toolbar (`Tools.tsx`): one button per tool, its icon drawn with the egui
-//! painter so the app needs no icon font or image (decision 8).
+//! painter so the app needs no icon font or image.
 
 use eframe::egui;
 use scene::editor::Tool;

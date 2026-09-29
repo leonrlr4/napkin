@@ -963,7 +963,12 @@ impl eframe::App for NapkinApp {
                     ));
 
                     let toolbar_colors = ToolbarColors::from_theme(&self.theme);
-                    if let Some(tool) = toolbar::show(ui.ctx(), editor.tool(), toolbar_colors) {
+                    // An unreadable file blocks every other edit (see the pointer/keyboard
+                    // gate above); the toolbar still draws so the current tool stays visible,
+                    // but a click must not change it.
+                    if let Some(tool) = toolbar::show(ui.ctx(), editor.tool(), toolbar_colors)
+                        && self.unreadable.is_none()
+                    {
                         editor.set_tool(tool);
                     }
 
