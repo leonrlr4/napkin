@@ -32,6 +32,10 @@
 //!   independently of which properties propagate to it on write.
 //! - `actionChangeSloppiness` also re-rolls the element's `seed`, so two shapes with the same
 //!   roughness value still look different after the change.
+//! - [`Section::FillStyle`]'s visibility (`predicates.fill`) is not just `hasFillStyle`: it
+//!   also requires a non-transparent background, on the tool's current item style or on a
+//!   target element (`!isTransparent(...)`, see [`fill_style_visible`]). The panel *value*
+//!   itself (`getFormValue`'s own predicate) has no such gate.
 //!
 //! `canChangeRoundness` (backing [`Section::Edges`]) lists rectangle, diamond, line, iframe,
 //! embeddable, stickynote and image, but not ellipse: an ellipse has no sharp/round corners to
@@ -42,6 +46,7 @@ use std::sync::Arc;
 
 use serde_json::Map;
 
+use crate::color::is_transparent;
 use crate::element::{Element, ElementBase, Roundness};
 use crate::env::{Env, random_integer};
 use crate::file::SceneFile;
@@ -123,8 +128,30 @@ fn has_background(kind: &str) -> bool {
 }
 
 /// `hasFillStyle`: `hasBackground(type) && type !== "stickynote"`; napkin has no sticky notes.
+/// This alone backs the panel *value* (`getFormValue`'s own predicate, ungated by
+/// transparency); [`fill_style_visible`] additionally gates *section visibility*.
 fn has_fill_style(kind: &str) -> bool {
     has_background(kind)
+}
+
+/// `predicates.fill`: `hasFillStyle(tool) && !isTransparent(currentItemBackgroundColor)`, or
+/// some target element with `hasFillStyle(type) && !isTransparent(backgroundColor)`. napkin has
+/// no bucket-fill tool, so that half of the JS predicate (which always shows fill style) does
+/// not apply here. A transparent fill has nothing to show a hachure/cross-hatch/solid pattern
+/// on, so the section only appears once there is a color to fill with.
+fn fill_style_visible(
+    tool_kind: Option<&str>,
+    target: &[&Element],
+    style_background: &str,
+) -> bool {
+    if tool_kind.is_some_and(has_fill_style) && !is_transparent(style_background) {
+        return true;
+    }
+    target.iter().any(|e| {
+        has_fill_style(e.kind())
+            && e.base()
+                .is_some_and(|b| !is_transparent(&b.background_color))
+    })
 }
 
 fn has_stroke_width(kind: &str) -> bool {
@@ -254,7 +281,7 @@ pub(super) fn panel<E: Env>(editor: &Editor<E>) -> PanelState {
     if shows(has_background) {
         sections.push(Section::BackgroundColor);
     }
-    if shows(has_fill_style) {
+    if fill_style_visible(tool_kind, &target, &editor.style.background_color) {
         sections.push(Section::FillStyle);
     }
     if shows(has_stroke_width) {
@@ -611,7 +638,11 @@ fn mutate(
             mutate_base(next, |b| b.stroke_style = style_value.clone())
         }
         Property::Roughness(roughness) => {
-            // `actionChangeSloppiness` also re-rolls the seed.
+            if next.base().is_none() {
+                return false;
+            }
+            // `actionChangeSloppiness` also re-rolls the seed; drawn only once we know there is
+            // a typed element to write it to, so a `Raw` element never perturbs the RNG stream.
             let seed = random_integer(env);
             mutate_base(next, |b| {
                 b.roughness = *roughness;

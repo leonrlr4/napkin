@@ -217,3 +217,27 @@ fn standalone_font_size_keeps_the_aligned_edge_and_recenters_vertically() {
         );
     }
 }
+
+/// `predicates.fill`: a transparent background (the default item style, or a selected
+/// element's own) hides the FillStyle section even where `hasFillStyle` would otherwise show
+/// it; a non-transparent background brings it back.
+#[test]
+fn fill_style_section_needs_a_non_transparent_background() {
+    let mut e = editor(vec![]);
+    e.set_tool(Tool::Rectangle);
+    assert!(!e.panel().sections.contains(&Section::FillStyle));
+
+    e.set_property(
+        Property::BackgroundColor("#a5d8ff".into()),
+        &mut CharWidthMeasure,
+    );
+    assert!(e.panel().sections.contains(&Section::FillStyle));
+
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 10.0, 10.0],
+    )]);
+    e.command(scene::editor::Command::SelectAll);
+    assert!(!e.panel().sections.contains(&Section::FillStyle));
+}
