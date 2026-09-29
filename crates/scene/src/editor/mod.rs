@@ -9,13 +9,15 @@
 //! `actionHistory.tsx`; and, for shape, line, arrow and freedraw creation, the sources listed
 //! in `create`'s own doc comment; all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
 //!
-//! The selection tool and the creation tools each keep their own gesture (`select_gesture`,
-//! `create_gesture`); at most one is active at a time, since [`Editor::set_tool`] finishes both
-//! before switching. `Command::Escape` clears the selection while idle, discards or finishes an
-//! active creation gesture (see `create::escape`), and otherwise does nothing: napkin has no
-//! other in-progress edit to cancel.
+//! The selection tool, the creation tools and the eraser each keep their own gesture
+//! (`select_gesture`, `create_gesture`, `erase_gesture`); at most one is active at a time, since
+//! [`Editor::set_tool`] finishes all three before switching. `Command::Escape` clears the
+//! selection while idle, discards or finishes an active creation gesture (see `create::escape`),
+//! abandons an in-progress eraser stroke (see `erase::escape`), and otherwise does nothing:
+//! napkin has no other in-progress edit to cancel.
 
 mod create;
+mod erase;
 mod properties;
 mod select;
 mod style;
@@ -59,7 +61,7 @@ pub enum Tool {
     /// [`Tool::Selection`]/[`Tool::Hand`], but [`Editor::set_tool`] still clears the selection
     /// for it, as for any other creation tool.
     Text,
-    /// Erases nothing yet, the same way as [`Tool::Text`].
+    /// Drags out and deletes elements one pointer gesture at a time; see `erase`.
     Eraser,
 }
 
@@ -135,6 +137,7 @@ pub struct Editor<E: Env> {
     selection: Selection,
     select_gesture: select::Gesture,
     create_gesture: create::Gesture,
+    erase_gesture: erase::Gesture,
     style: ItemStyle,
     history: History,
     geometry: GeometryCache,
@@ -154,6 +157,7 @@ impl<E: Env> Editor<E> {
             selection: Selection::new(),
             select_gesture: select::Gesture::None,
             create_gesture: create::Gesture::None,
+            erase_gesture: erase::Gesture::None,
             style: ItemStyle::default(),
             history: History::default(),
             geometry: GeometryCache::default(),
@@ -176,6 +180,7 @@ impl<E: Env> Editor<E> {
         self.history.clear();
         self.select_gesture = select::Gesture::None;
         self.create_gesture = create::Gesture::None;
+        self.erase_gesture = erase::Gesture::None;
         self.geometry.clear();
     }
 
@@ -206,6 +211,7 @@ impl<E: Env> Editor<E> {
     pub fn set_tool(&mut self, tool: Tool) {
         select::finish_gesture(self, None);
         create::finish_gesture(self, None);
+        erase::finish_gesture(self, None);
         if !matches!(tool, Tool::Selection | Tool::Hand) {
             self.selection = Selection::new();
             self.cursor = Cursor::Crosshair;
@@ -228,6 +234,7 @@ impl<E: Env> Editor<E> {
     pub fn finish_pending_gesture(&mut self) {
         select::finish_gesture(self, None);
         create::finish_gesture(self, None);
+        erase::finish_gesture(self, None);
     }
 
     pub fn selection(&self) -> &Selection {
@@ -254,21 +261,32 @@ impl<E: Env> Editor<E> {
     pub fn is_idle(&self) -> bool {
         matches!(self.select_gesture, select::Gesture::None)
             && matches!(self.create_gesture, create::Gesture::None)
+            && matches!(self.erase_gesture, erase::Gesture::None)
+    }
+
+    /// Ids of the elements the current eraser stroke will delete, drawn faded
+    /// (`ELEMENT_READY_TO_ERASE_OPACITY`) while it is in progress. Empty outside an eraser
+    /// stroke.
+    pub fn pending_erasure(&self) -> &HashSet<String> {
+        erase::pending(&self.erase_gesture)
     }
 
     pub fn pointer_down(&mut self, event: PointerEvent) {
         select::pointer_down(self, event);
         create::pointer_down(self, event);
+        erase::pointer_down(self, event);
     }
 
     pub fn pointer_move(&mut self, event: PointerEvent) {
         select::pointer_move(self, event);
         create::pointer_move(self, event);
+        erase::pointer_move(self, event);
     }
 
     pub fn pointer_up(&mut self, event: PointerEvent) {
         select::pointer_up(self, event);
         create::pointer_up(self, event);
+        erase::pointer_up(self, event);
     }
 
     /// Whether the command did anything. Commands are ignored while a pointer gesture is in
@@ -319,6 +337,9 @@ impl<E: Env> Editor<E> {
             }
             Command::Escape => {
                 if let Some(handled) = create::escape(self) {
+                    return handled;
+                }
+                if let Some(handled) = erase::escape(self) {
                     return handled;
                 }
                 if !self.is_idle() || self.selection.is_empty() {

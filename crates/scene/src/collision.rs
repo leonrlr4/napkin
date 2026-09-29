@@ -913,6 +913,178 @@ pub fn hit_element_itself(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Segment hit testing (the eraser: `eraser/index.ts`'s `eraserTest`)
+// ---------------------------------------------------------------------------
+
+/// Whether two straight segments cross, without computing the crossing point itself
+/// (`segmentsIntersectAt`'s existence check): the standard 2D parametric line test, requiring
+/// both `t` and `u` in `[0, 1)`. Parallel or collinear segments (`denominator == 0`) never
+/// count, matching `segmentsIntersectAt`'s own `null` return for that case.
+fn segments_intersect(a: LineSeg, b: LineSeg) -> bool {
+    let (rx, ry) = (a[1][0] - a[0][0], a[1][1] - a[0][1]);
+    let (sx, sy) = (b[1][0] - b[0][0], b[1][1] - b[0][1]);
+    let denominator = rx * sy - ry * sx;
+    if denominator == 0.0 {
+        return false;
+    }
+    let (ix, iy) = (b[0][0] - a[0][0], b[0][1] - a[0][1]);
+    let u = (ix * ry - iy * rx) / denominator;
+    let t = (ix * sy - iy * sx) / denominator;
+    (0.0..1.0).contains(&t) && (0.0..1.0).contains(&u) && u != 0.0
+}
+
+/// `lineSegmentsDistance`: 0 when the segments cross, else the minimum of each endpoint's
+/// distance to the other segment.
+fn segments_distance(a: LineSeg, b: LineSeg) -> f64 {
+    if segments_intersect(a, b) {
+        return 0.0;
+    }
+    distance_to_line_segment(a[0], b)
+        .min(distance_to_line_segment(a[1], b))
+        .min(distance_to_line_segment(b[0], a))
+        .min(distance_to_line_segment(b[1], a))
+}
+
+/// The minimum distance between `seg` and a cubic outline piece, flattened into 16 straight
+/// sub-segments (mirroring [`is_point_in_linear`]'s own flattening) since there is no closed
+/// form for a segment-to-Bezier distance.
+fn segment_to_curve_distance(seg: LineSeg, c: CurveSeg) -> f64 {
+    const SUBDIVISIONS: usize = 16;
+    let mut min = f64::INFINITY;
+    let mut prev = c[0];
+    for i in 1..=SUBDIVISIONS {
+        let p = bezier_point(c, i as f64 / SUBDIVISIONS as f64);
+        min = min.min(segments_distance(seg, [prev, p]));
+        prev = p;
+    }
+    min
+}
+
+/// The minimum distance between `seg` and an outline built from straight `sides` and curved
+/// `corners`, both already in the same frame as `seg` (rectanguloid and diamond deconstruction).
+fn segment_to_sides_and_corners(seg: LineSeg, sides: &[LineSeg], corners: &[CurveSeg]) -> f64 {
+    let mut min = f64::INFINITY;
+    for &side in sides {
+        min = min.min(segments_distance(seg, side));
+    }
+    for &corner in corners {
+        min = min.min(segment_to_curve_distance(seg, corner));
+    }
+    min
+}
+
+/// An ellipse's boundary approximated as a 32-sided polygon, in the element's own local frame:
+/// unlike a rectanguloid or diamond, an ellipse's outline has no finite Bezier decomposition to
+/// reuse here, and the eraser has no need for sub-pixel precision.
+fn segment_to_ellipse_distance(seg: LineSeg, placement: Placement) -> f64 {
+    const SIDES: usize = 32;
+    let (hw, hh) = (placement.width / 2.0, placement.height / 2.0);
+    let (cx, cy) = (placement.x + hw, placement.y + hh);
+    let point_at = |i: usize| {
+        let theta = i as f64 / SIDES as f64 * std::f64::consts::TAU;
+        [cx + hw * theta.cos(), cy + hh * theta.sin()]
+    };
+    let mut min = f64::INFINITY;
+    let mut prev = point_at(0);
+    for i in 1..=SIDES {
+        let p = point_at(i);
+        min = min.min(segments_distance(seg, [prev, p]));
+        prev = p;
+    }
+    min
+}
+
+/// The minimum distance between `seg` (in scene coordinates) and `element`'s outline.
+fn segment_distance_to_element(
+    geometry: &mut GeometryCache,
+    element: &Element,
+    from: [f64; 2],
+    to: [f64; 2],
+) -> f64 {
+    match element {
+        Element::Line(_) | Element::Arrow(_) | Element::Freedraw(_) => {
+            let pieces = geometry.linear_collision_shape(element);
+            let seg = [from, to];
+            let mut min = f64::INFINITY;
+            for piece in pieces.iter() {
+                let d = match piece {
+                    Segment::Line(l) => segments_distance(seg, *l),
+                    Segment::Cubic(c) => segment_to_curve_distance(seg, *c),
+                };
+                min = min.min(d);
+            }
+            min
+        }
+        Element::Diamond(g) => {
+            let Some((_, center)) = geometry.absolute_coords(element) else {
+                return f64::INFINITY;
+            };
+            let Some(placement) = element.placement() else {
+                return f64::INFINITY;
+            };
+            let seg = [
+                to_local_frame(from, center, placement),
+                to_local_frame(to, center, placement),
+            ];
+            let (sides, corners) = deconstruct_diamond(placement, &g.base.roundness);
+            segment_to_sides_and_corners(seg, &sides, &corners)
+        }
+        Element::Ellipse(_) => {
+            let Some((_, center)) = geometry.absolute_coords(element) else {
+                return f64::INFINITY;
+            };
+            let Some(placement) = element.placement() else {
+                return f64::INFINITY;
+            };
+            let seg = [
+                to_local_frame(from, center, placement),
+                to_local_frame(to, center, placement),
+            ];
+            segment_to_ellipse_distance(seg, placement)
+        }
+        Element::Rectangle(_) | Element::Text(_) | Element::Raw(_) => {
+            let Some((_, center)) = geometry.absolute_coords(element) else {
+                return f64::INFINITY;
+            };
+            let Some(placement) = element.placement() else {
+                return f64::INFINITY;
+            };
+            let seg = [
+                to_local_frame(from, center, placement),
+                to_local_frame(to, center, placement),
+            ];
+            let radius = rectanguloid_radius(element, placement.width.min(placement.height));
+            let (sides, corners) = deconstruct_rectanguloid(placement, radius);
+            segment_to_sides_and_corners(seg, &sides, &corners)
+        }
+    }
+}
+
+/// Whether the eraser segment from `from` to `to` touches `element`: either endpoint inside it
+/// (`shouldTestInside`; both ends are tested here rather than only `eraserTest`'s single
+/// `lastPoint`, so a segment that starts inside a filled shape and immediately leaves it still
+/// counts), or its outline within `threshold` (`eraserTest`'s `lineSegmentsDistance` calls,
+/// generalized here to every element kind rather than only freedraw/arrow/open-line:
+/// `intersectElementWithLineSegment`, which JS uses for the rest, needs
+/// `curveIntersectLineSegment`'s Newton solver, already out of scope for this module - see its
+/// own doc comment).
+pub fn segment_hits_element(
+    geometry: &mut GeometryCache,
+    element: &Element,
+    from: [f64; 2],
+    to: [f64; 2],
+    threshold: f64,
+) -> bool {
+    if should_test_inside(element)
+        && (is_point_in_element(geometry, element, from)
+            || is_point_in_element(geometry, element, to))
+    {
+        return true;
+    }
+    segment_distance_to_element(geometry, element, from, to) <= threshold
+}
+
 #[cfg(test)]
 mod tests {
     use std::f64::consts::FRAC_PI_2;
