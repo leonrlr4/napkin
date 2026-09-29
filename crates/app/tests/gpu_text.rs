@@ -38,6 +38,8 @@ fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixel
         pixels_per_point,
         dark: false,
         generation: 0,
+        faded: std::sync::Arc::new(std::collections::HashSet::new()),
+        hidden: std::sync::Arc::new(std::collections::HashSet::new()),
     };
     let prepared = renderer.prepare(&device, &queue, &frame);
     queue.submit(prepared);

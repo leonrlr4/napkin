@@ -159,6 +159,11 @@ pub struct CanvasFrame {
     /// every cache instead of trusting element ids and versions to tell an old scene's elements
     /// apart from an unrelated new scene's.
     pub generation: u64,
+    /// Elements drawn at `plan::ERASE_PENDING_ALPHA` of their opacity (the eraser's pending
+    /// set).
+    pub faded: Arc<HashSet<String>>,
+    /// Elements not drawn at all (the text being edited).
+    pub hidden: Arc<HashSet<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -782,6 +787,8 @@ impl CanvasRenderer {
             dark: frame.dark,
             bucket: frame.camera.bucket(f64::from(frame.pixels_per_point)),
             pixel_scale: scale,
+            faded: &frame.faded,
+            hidden: &frame.hidden,
         };
         let items = plan_frame(&frame.file, &mut self.cache, &view);
         let background = frame.file.view_background_color();

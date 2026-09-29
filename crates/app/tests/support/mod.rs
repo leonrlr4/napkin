@@ -124,6 +124,8 @@ pub fn render_sequence_with_ppp(
         pixels_per_point,
         dark,
         generation,
+        faded: std::sync::Arc::new(std::collections::HashSet::new()),
+        hidden: std::sync::Arc::new(std::collections::HashSet::new()),
     });
     let mut current = frames.next().expect("at least one file");
     for next in frames {
@@ -133,6 +135,38 @@ pub fn render_sequence_with_ppp(
     }
 
     let rgba = offscreen::render_rgba(&device, &queue, &mut renderer, &current);
+    Image {
+        width,
+        height,
+        rgba,
+    }
+}
+
+/// Like [`render`], but with explicit `faded`/`hidden` element id sets (the eraser's pending
+/// set and the text element being edited). Every other `render*` helper here passes empty sets.
+#[allow(dead_code)]
+pub fn render_with_faded_hidden(
+    file: scene::SceneFile,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    dark: bool,
+    faded: std::collections::HashSet<String>,
+    hidden: std::collections::HashSet<String>,
+) -> Image {
+    let (_gpu, device, queue) = gpu();
+    let mut renderer = CanvasRenderer::new(&device, &queue, FORMAT);
+    let frame = CanvasFrame {
+        file: std::sync::Arc::new(file),
+        camera,
+        size_px: [width, height],
+        pixels_per_point: 1.0,
+        dark,
+        generation: 0,
+        faded: std::sync::Arc::new(faded),
+        hidden: std::sync::Arc::new(hidden),
+    };
+    let rgba = offscreen::render_rgba(&device, &queue, &mut renderer, &frame);
     Image {
         width,
         height,

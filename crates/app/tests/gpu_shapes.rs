@@ -29,6 +29,42 @@ fn solid_fill_and_background() {
 }
 
 #[test]
+fn faded_and_hidden_elements_render_correctly() {
+    let solid = |id: &str, rect: [f64; 4]| {
+        sample::with(
+            sample::generic("rectangle", id, rect),
+            json!({
+                "roughness": 0, "backgroundColor": "#1971c2", "strokeColor": "#1971c2",
+                "fillStyle": "solid"
+            }),
+        )
+    };
+    let faded_rect = solid("faded", [20.0, 20.0, 60.0, 40.0]);
+    let hidden_rect = solid("hidden", [20.0, 80.0, 60.0, 40.0]);
+    let image = support::render_with_faded_hidden(
+        sample::file(vec![faded_rect, hidden_rect]),
+        Camera::default(),
+        100,
+        140,
+        false,
+        std::collections::HashSet::from(["faded".to_string()]),
+        std::collections::HashSet::from(["hidden".to_string()]),
+    );
+    let faded_pixel = image.pixel(50, 40);
+    // Full opacity would render #1971c2 (25, 113, 194); the faded pixel must sit far closer to
+    // the white background, at least 100 short of the fully opaque red channel value.
+    assert!(
+        0x19u8.abs_diff(faded_pixel[0]) > 100,
+        "faded element did not visibly lighten: {faded_pixel:?}"
+    );
+    assert!(
+        close(image.pixel(50, 100), [0xff, 0xff, 0xff], 0),
+        "hidden element was drawn: {:?}",
+        image.pixel(50, 100)
+    );
+}
+
+#[test]
 fn translucent_double_stroke_never_darkens_twice() {
     // roughness 2 draws two offset strokes that cross; at opacity 50 a crossing pixel must
     // look like a single stroke over the background.
@@ -150,6 +186,8 @@ fn sweeping_zoom_buckets_does_not_panic_and_caps_buffer_capacity() {
             pixels_per_point: 1.0,
             dark: false,
             generation: 0,
+            faded: std::sync::Arc::new(std::collections::HashSet::new()),
+            hidden: std::sync::Arc::new(std::collections::HashSet::new()),
         };
         let prepared = renderer.prepare(&device, &queue, &frame);
         queue.submit(prepared);

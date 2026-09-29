@@ -45,6 +45,8 @@ impl Rasterize for GpuRasterizer<'_> {
             pixels_per_point: 1.0,
             dark,
             generation: 0,
+            faded: Arc::new(std::collections::HashSet::new()),
+            hidden: Arc::new(std::collections::HashSet::new()),
         };
         Ok(offscreen::render_rgba(
             self.device,

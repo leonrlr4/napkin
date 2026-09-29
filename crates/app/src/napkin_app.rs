@@ -1,8 +1,9 @@
 //! The eframe [`App`](eframe::App) that hosts the canvas: theme, document title, the camera,
 //! the scene editor and its overlay, the load-error banner and the GPU canvas itself.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
@@ -926,6 +927,10 @@ impl eframe::App for NapkinApp {
                     pixels_per_point,
                     dark: self.theme.dark,
                     generation: self.generation,
+                    // The eraser's pending set and the text element being edited are wired up
+                    // once the editor tracks them; until then nothing is faded or hidden.
+                    faded: Arc::new(HashSet::new()),
+                    hidden: Arc::new(HashSet::new()),
                 };
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                     response.rect,
