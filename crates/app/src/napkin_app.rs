@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
@@ -137,10 +137,19 @@ pub struct NapkinApp {
     control: Option<Server>,
     /// Requests in arrival order; a mutating one at the front waits for `Editor::is_idle`.
     pending: VecDeque<Incoming>,
-    /// Built at startup rather than lazily: `fonts::install` needs its font database to look up
-    /// the system CJK font, and building a second `FontSystem` just for that would scan system
-    /// fonts twice.
+    /// `Some` once the background scan [`NapkinApp::new`] starts (or a fallback build; see
+    /// [`resolve_measure`]) has produced it. Never built synchronously on this thread at
+    /// startup: a `FontSystem` scans every installed font (spec §6.7's start-to-first-frame
+    /// budget has no room for that), so it is built on a spawned thread instead and picked up
+    /// from `measure_rx` once ready.
     measure: Option<FontMeasure>,
+    /// The other end of the background scan [`NapkinApp::new`] starts; taken (and the scan's
+    /// result installed into `measure`) either by [`NapkinApp::poll_measure`]'s non-blocking
+    /// check each frame, or by [`resolve_measure`] blocking on it the moment something needs a
+    /// `FontMeasure` before that poll has caught up (rare, and only possible in the first
+    /// fraction of a second after startup). `None` in `--bench`, which skips the scan
+    /// altogether, and once `measure` is `Some`.
+    measure_rx: Option<mpsc::Receiver<FontMeasure>>,
     /// The renderer `render` requests draw with (its own format, `offscreen::FORMAT`).
     offscreen: Option<CanvasRenderer>,
     /// The canvas size in points, from the latest laid-out frame.
@@ -222,10 +231,19 @@ impl NapkinApp {
         if let Some(render_state) = &cc.wgpu_render_state {
             callback::install(render_state);
         }
-        // Built here, and reused for `measure` below, so registering napkin's fonts in egui
-        // doesn't scan the system's fonts a second time just to find the CJK fallback.
-        let mut font_measure = FontMeasure::new();
-        fonts::install(&cc.egui_ctx, font_measure.db_mut());
+        // Scanning every installed font (`FontSystem::new`, ~0.2s) on this thread would blow
+        // spec §6.7's start-to-first-frame budget, so it runs on a spawned thread instead;
+        // `poll_measure` picks up the result (and only then calls `fonts::install`, from its own
+        // database, so that scan isn't repeated) once it is ready. `--bench` skips this
+        // entirely: nothing it does ever measures text, and a thread it never joins would only
+        // muddy its own timing.
+        let measure_rx = (!bench).then(|| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(FontMeasure::new());
+            });
+            rx
+        });
         let (control, control_notice) = bind_control(cc, bench);
         let notice = control_notice.or(notice);
         let pinch = PinchListener::start(cc)
@@ -280,7 +298,8 @@ impl NapkinApp {
             reload_check_pending: false,
             control,
             pending: VecDeque::new(),
-            measure: Some(font_measure),
+            measure: None,
+            measure_rx,
             offscreen: None,
             canvas_size: [0.0, 0.0],
             text_edit_buffer: None,
@@ -297,6 +316,30 @@ impl NapkinApp {
                 self.autosave.finished(now, Ok(()));
             }
             Err(message) => self.autosave.finished(now, Err(message)),
+        }
+    }
+
+    /// A non-blocking check for the background font scan `NapkinApp::new` started: once it has
+    /// produced a `FontMeasure`, registers its database with `fonts::install` and keeps the
+    /// measure. A no-op every other frame (`measure` already `Some`, the scan not done yet, or
+    /// `--bench`, which never started one). If the scan's thread died without sending anything,
+    /// stops polling it; whatever next needs a `FontMeasure` falls back to building one directly
+    /// (see [`resolve_measure`]).
+    fn poll_measure(&mut self, ctx: &egui::Context) {
+        if self.measure.is_some() {
+            return;
+        }
+        let Some(rx) = &self.measure_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(mut measure) => {
+                fonts::install(ctx, measure.db_mut());
+                self.measure = Some(measure);
+                self.measure_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.measure_rx = None,
         }
     }
 
@@ -344,7 +387,7 @@ impl NapkinApp {
             let unsaved = self.autosave.has_unsaved_changes(editor.revision());
             let mut no_measure = NoMeasure;
             let measure: &mut dyn TextMeasure = if handler::is_mutating(&incoming.request) {
-                self.measure.get_or_insert_with(FontMeasure::new)
+                resolve_measure(&mut self.measure, &mut self.measure_rx, Some(ctx))
             } else {
                 &mut no_measure
             };
@@ -476,11 +519,13 @@ fn camera_view(camera: Camera) -> NapkinView {
 }
 
 /// Whether a reload check queued by a focus gain ([`NapkinApp::reload_check_pending`]) should
-/// run this frame: only once no save is in flight. A pending check that finds a save running
-/// stays pending instead of being dropped, so the caller must keep asking (by requesting a
-/// repaint) until this returns `true`.
-fn reload_check_ready(pending: bool, saving: bool) -> bool {
-    pending && !saving
+/// run this frame: only once no save is in flight and no text edit is in progress (running it
+/// mid-edit could call `Editor::replace_file` out from under the element being edited, dropping
+/// the in-progress buffer with no way to recover it). A pending check that finds either stays
+/// pending instead of being dropped, so the caller must keep asking (by requesting a repaint)
+/// until this returns `true`.
+fn reload_check_ready(pending: bool, saving: bool, editing: bool) -> bool {
+    pending && !saving && !editing
 }
 
 /// Spec §5.6: reload when the file on disk changed since napkin last read or wrote it, no
@@ -506,6 +551,31 @@ pub fn should_clear_unreadable(unreadable: bool, disk_mtime: Option<SystemTime>)
     unreadable && disk_mtime.is_none()
 }
 
+/// `measure`, building it first if `NapkinApp::poll_measure` has not already: blocks on
+/// `measure_rx`'s background scan if there is one still running (only possible in the first
+/// fraction of a second after startup, before any frame's `poll_measure` had the chance to pick
+/// it up), or builds a fresh one on this thread if there is no scan to wait for (`--bench`, or
+/// the scan's thread having died). `ctx` gets `fonts::install`'d from whatever measure this
+/// resolves to, the same as `poll_measure` would have; `None` when there is no frame in progress
+/// to install into (`on_exit`, where it would be moot anyway).
+fn resolve_measure<'a>(
+    measure: &'a mut Option<FontMeasure>,
+    measure_rx: &mut Option<mpsc::Receiver<FontMeasure>>,
+    ctx: Option<&egui::Context>,
+) -> &'a mut FontMeasure {
+    if measure.is_none() {
+        let mut built = measure_rx
+            .take()
+            .and_then(|rx| rx.recv().ok())
+            .unwrap_or_default();
+        if let Some(ctx) = ctx {
+            fonts::install(ctx, built.db_mut());
+        }
+        *measure = Some(built);
+    }
+    measure.as_mut().expect("just ensured Some")
+}
+
 /// Ends a text edit in progress by committing `buffer`'s current contents, if there is one: a
 /// no-op once `editor.text_editing()` is already `None`, so every caller below can run this
 /// unconditionally instead of checking first. Takes each field it needs rather than `&mut self`
@@ -514,6 +584,8 @@ fn commit_pending_text_edit(
     editor: &mut Editor<SystemEnv>,
     buffer: &mut Option<String>,
     measure: &mut Option<FontMeasure>,
+    measure_rx: &mut Option<mpsc::Receiver<FontMeasure>>,
+    ctx: Option<&egui::Context>,
 ) {
     if editor.text_editing().is_none() {
         return;
@@ -521,7 +593,7 @@ fn commit_pending_text_edit(
     let Some(text) = buffer.take() else {
         return;
     };
-    let measure = measure.get_or_insert_with(FontMeasure::new);
+    let measure = resolve_measure(measure, measure_rx, ctx);
     editor.commit_text(&text, measure);
 }
 
@@ -560,7 +632,13 @@ impl eframe::App for NapkinApp {
         // progress needs the same treatment: `finish_pending_gesture` does not touch it, so it
         // is committed here directly instead of being dropped.
         editor.finish_pending_gesture();
-        commit_pending_text_edit(editor, &mut self.text_edit_buffer, &mut self.measure);
+        commit_pending_text_edit(
+            editor,
+            &mut self.text_edit_buffer,
+            &mut self.measure,
+            &mut self.measure_rx,
+            None,
+        );
         let path = self.path.clone().expect("a writer implies a save path");
         let view = camera_view(camera);
         let state = DocumentState {
@@ -583,6 +661,7 @@ impl eframe::App for NapkinApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let frame_start = Instant::now();
         self.stats.frame_started(frame_start);
+        self.poll_measure(ui.ctx());
 
         if let Some(control) = &self.control {
             while let Some(incoming) = control.try_recv() {
@@ -784,14 +863,16 @@ impl eframe::App for NapkinApp {
                         // Regaining focus: reread the file if it changed while napkin was away
                         // and nothing here would be lost (spec §5.6). The camera does not
                         // move; a failed reparse stops input and saving until a later reload
-                        // succeeds. A save in flight when focus returns defers the check
-                        // (`reload_check_pending` stays set) instead of skipping it outright,
-                        // and asks for a repaint so it runs again once the save finishes,
-                        // rather than waiting for the next focus gain and letting that save
-                        // (or the next autosave) overwrite the external change unnoticed.
+                        // succeeds. A save in flight, or a text edit in progress, when focus
+                        // returns defers the check (`reload_check_pending` stays set) instead of
+                        // skipping it outright, and asks for a repaint so it runs again once
+                        // that finishes, rather than waiting for the next focus gain and letting
+                        // that save (or the next autosave) overwrite the external change
+                        // unnoticed, or `replace_file` dropping the edit in progress.
                         if let Some(path) = self.path.clone() {
                             let saving = self.autosave.in_flight();
-                            if reload_check_ready(self.reload_check_pending, saving) {
+                            let editing = editor.text_editing().is_some();
+                            if reload_check_ready(self.reload_check_pending, saving, editing) {
                                 self.reload_check_pending = false;
                                 let disk_mtime = storage::modified(&path).unwrap_or_else(|error| {
                                     eprintln!("napkin: {}: {error}", path.display());
@@ -855,6 +936,8 @@ impl eframe::App for NapkinApp {
                                             editor,
                                             &mut self.text_edit_buffer,
                                             &mut self.measure,
+                                            &mut self.measure_rx,
+                                            Some(ui.ctx()),
                                         );
                                         editor.pointer_down(event);
                                     }
@@ -876,8 +959,11 @@ impl eframe::App for NapkinApp {
                                                 self.canvas_size[1] / 2.0,
                                             ])
                                         });
-                                        let measure =
-                                            self.measure.get_or_insert_with(FontMeasure::new);
+                                        let measure = resolve_measure(
+                                            &mut self.measure,
+                                            &mut self.measure_rx,
+                                            Some(ui.ctx()),
+                                        );
                                         editor.paste(&text, at, measure);
                                     }
                                     EditorInput::DoubleClick(event) => {
@@ -926,6 +1012,8 @@ impl eframe::App for NapkinApp {
                                 editor,
                                 &mut self.text_edit_buffer,
                                 &mut self.measure,
+                                &mut self.measure_rx,
+                                Some(ui.ctx()),
                             );
                         }
                         let view = camera_view(camera_for_requests);
@@ -1028,29 +1116,38 @@ impl eframe::App for NapkinApp {
                         colors,
                     ));
 
-                    if self.unreadable.is_none()
-                        && let Some(editing) = editor.text_editing().cloned()
-                    {
-                        let first_frame = self.text_edit_buffer.is_none();
-                        let buffer = self
-                            .text_edit_buffer
-                            .get_or_insert_with(|| editing.text.clone());
-                        let outcome = text_edit::show(
-                            ui,
-                            &editing,
-                            buffer,
-                            camera,
-                            response.rect.min,
-                            self.theme.dark,
-                            first_frame,
-                        );
-                        if matches!(outcome, TextEditOutcome::Commit(_)) {
-                            commit_pending_text_edit(
-                                editor,
-                                &mut self.text_edit_buffer,
-                                &mut self.measure,
+                    match editor.text_editing() {
+                        // No stale buffer can survive whatever ended editing without going
+                        // through `commit_pending_text_edit` itself (a reload, were one ever to
+                        // land here while editing despite `reload_check_ready` now refusing
+                        // that; a future editor-side reset) to seed a later, unrelated edit.
+                        None => self.text_edit_buffer = None,
+                        Some(editing) if self.unreadable.is_none() => {
+                            let editing = editing.clone();
+                            let first_frame = self.text_edit_buffer.is_none();
+                            let buffer = self
+                                .text_edit_buffer
+                                .get_or_insert_with(|| editing.text.clone());
+                            let outcome = text_edit::show(
+                                ui,
+                                &editing,
+                                buffer,
+                                camera,
+                                response.rect.min,
+                                self.theme.dark,
+                                first_frame,
                             );
+                            if matches!(outcome, TextEditOutcome::Commit(_)) {
+                                commit_pending_text_edit(
+                                    editor,
+                                    &mut self.text_edit_buffer,
+                                    &mut self.measure,
+                                    &mut self.measure_rx,
+                                    Some(ui.ctx()),
+                                );
+                            }
                         }
+                        Some(_) => {}
                     }
 
                     let toolbar_colors = ToolbarColors::from_theme(&self.theme);
@@ -1067,6 +1164,8 @@ impl eframe::App for NapkinApp {
                             editor,
                             &mut self.text_edit_buffer,
                             &mut self.measure,
+                            &mut self.measure_rx,
+                            Some(ui.ctx()),
                         );
                         editor.set_tool(tool);
                     }
@@ -1080,7 +1179,11 @@ impl eframe::App for NapkinApp {
                         self.theme.dark,
                     ) && self.unreadable.is_none()
                     {
-                        let measure = self.measure.get_or_insert_with(FontMeasure::new);
+                        let measure = resolve_measure(
+                            &mut self.measure,
+                            &mut self.measure_rx,
+                            Some(ui.ctx()),
+                        );
                         editor.set_property(property, measure);
                     }
 
@@ -1232,12 +1335,21 @@ mod tests {
 
     #[test]
     fn reload_check_waits_out_an_in_flight_save() {
-        assert!(!reload_check_ready(false, false), "nothing pending");
+        assert!(!reload_check_ready(false, false, false), "nothing pending");
         assert!(
-            !reload_check_ready(true, true),
+            !reload_check_ready(true, true, false),
             "a save is running; stay pending and try again next frame"
         );
-        assert!(reload_check_ready(true, false));
+        assert!(reload_check_ready(true, false, false));
+    }
+
+    #[test]
+    fn reload_check_waits_out_a_text_edit_in_progress() {
+        assert!(
+            !reload_check_ready(true, false, true),
+            "a text edit is in progress; stay pending and try again next frame"
+        );
+        assert!(reload_check_ready(true, false, false));
     }
 
     #[test]
