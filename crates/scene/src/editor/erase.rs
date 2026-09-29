@@ -17,8 +17,10 @@
 //! intersection `intersectElementWithLineSegment` computes via `curveIntersectLineSegment`'s
 //! Newton solver. `collision::segment_hits_element` uses `collision::hit_threshold` uniformly
 //! instead, and a distance-to-outline test for every kind (a 16-piece polyline approximation of
-//! any curved outline segment) rather than an exact intersection, so this deliberately
-//! disagrees with JS's precise tolerances and true curve intersections; see this module's own
+//! any curved outline segment, or, for an ellipse specifically, a 32-sided polygon standing in
+//! for its outline entirely, since unlike a rectanguloid or diamond it has no existing Bezier
+//! deconstruction to flatten) rather than an exact intersection, so this deliberately disagrees
+//! with JS's precise tolerances and true curve intersections; see this module's own
 //! `collision::segment_hits_element` doc comment.
 
 use std::collections::HashSet;
@@ -109,12 +111,15 @@ pub(super) fn pointer_up(editor: &mut Editor<impl Env>, event: PointerEvent) {
 }
 
 /// Ends an in-progress eraser stroke, whether by [`pointer_up`] or a tool switch: deletes
-/// everything in [`ActiveState::pending`] as one history step (`edit::delete_selection`, so a
-/// group, bound text or bound container already folded into `pending` at hit time goes with
-/// it), then clears the pending set. `event` is unused: the segment up to the release position
-/// was already covered by the last `pointer_move` (or, for a plain click, by `pointer_down`
-/// itself), matching `eraseElements` reading `elementsPendingErasure` as already final rather
-/// than extending the trail on release.
+/// everything in [`ActiveState::pending`] as one history step (`edit::erase_selection`, which
+/// also deletes a pending frame's children outright and a pending container's bound text,
+/// unlike `edit::delete_selection`'s keyboard-Delete rules), then clears the pending set.
+/// `event` is unused: the segment up to the release position was already covered by the last
+/// `pointer_move` (or, for a plain click, by `pointer_down` itself), matching `eraseElements`
+/// reading `elementsPendingErasure` as already final rather than extending the trail on
+/// release. Napkin's selection is already empty throughout an eraser stroke (`Editor::set_tool`
+/// clears it for any tool but Selection/Hand), so unlike `Command::Delete` there is no
+/// resulting selection to update here.
 pub(super) fn finish_gesture(editor: &mut Editor<impl Env>, _event: Option<PointerEvent>) {
     let Gesture::Active(state) = std::mem::replace(&mut editor.erase_gesture, Gesture::None) else {
         return;
@@ -122,10 +127,8 @@ pub(super) fn finish_gesture(editor: &mut Editor<impl Env>, _event: Option<Point
     if state.pending.is_empty() {
         return;
     }
-    let selection = Selection::from_ids(state.pending);
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-    let next_selection = edit::delete_selection(file, &selection, &mut editor.env);
-    editor.selection = next_selection;
+    edit::erase_selection(file, &state.pending, &mut editor.env);
     editor.finish_edit(&state.start, &state.selection_before);
 }
 
@@ -190,25 +193,27 @@ fn add_segment_hits(
     }
 }
 
-/// Adds `hit_id`'s whole group (`selection::select_groups`, matching `updateElementsToBeErased`'s
-/// `shallowestGroupId`/`getElementsInGroup`), then, for each id that adds, its bound text and
-/// its own container, if either exists (`hasBoundTextElement`/`getBoundTextElementId` and
-/// `isBoundToContainer`, so erasing a labelled shape also erases its label and erasing a label
-/// also erases the shape it labels).
+/// Adds `hit_id`'s whole group as bare ids (`selection::select_groups`, matching
+/// `updateElementsToBeErased`'s `shallowestGroupId`/`getElementsInGroup`: every member joins
+/// `pending`, but none of them gets its own bound text or container examined), then, for
+/// `hit_id` alone, its bound text and its own container, if either exists
+/// (`hasBoundTextElement`/`getBoundTextElementId` and `isBoundToContainer`, checked only on the
+/// element `eraserTest` actually matched, not on the rest of its group) so erasing a labelled
+/// shape also erases its label and erasing a label also erases the shape it labels.
 fn expand_and_insert(file: &SceneFile, hit_id: &str, pending: &mut HashSet<String>) {
     let grouped = selection::select_groups(file, &Selection::from_ids([hit_id.to_owned()]));
     for id in grouped.iter() {
         pending.insert(id.to_owned());
-        let Some(element) = find(file, id) else {
-            continue;
-        };
-        if let Some(container_id) = element.container_id() {
-            pending.insert(container_id.to_owned());
-        }
-        for (bound_id, kind) in element.bound_elements() {
-            if kind == "text" {
-                pending.insert(bound_id.to_owned());
-            }
+    }
+    let Some(element) = find(file, hit_id) else {
+        return;
+    };
+    if let Some(container_id) = element.container_id() {
+        pending.insert(container_id.to_owned());
+    }
+    for (bound_id, kind) in element.bound_elements() {
+        if kind == "text" {
+            pending.insert(bound_id.to_owned());
         }
     }
 }

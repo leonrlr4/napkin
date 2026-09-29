@@ -347,6 +347,49 @@ pub fn delete_selection(
     next_selection
 }
 
+/// `eraseElements`: marks every element in `pending` deleted, plus every element whose
+/// `frameId` names one already in `pending`, plus every bound text whose `containerId` names
+/// one already in `pending`; the same `fixBindingsAfterDeletion` cleanup as
+/// [`delete_selection`] runs afterwards for each element this call actually deleted. Unlike
+/// [`delete_selection`] (`actionDeleteSelected`, keyboard Delete), erasing a frame deletes its
+/// children outright instead of releasing them (clearing `frameId`): `eraseElements` folds a
+/// frame directly into `newElementWith(ele, { isDeleted: true })`'s single flat condition,
+/// with no frame-child special case at all.
+pub fn erase_selection(file: &mut SceneFile, pending: &HashSet<String>, env: &mut impl Env) {
+    let id_to_pos: HashMap<String, usize> = file
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, element)| element.id().map(|id| (id.to_owned(), index)))
+        .collect();
+
+    let delete_ids: BTreeSet<String> = file
+        .elements
+        .iter()
+        .filter(|element| !element.is_deleted())
+        .filter_map(|element| {
+            let id = element.id()?;
+            let frame_erased = element.frame_id().is_some_and(|fid| pending.contains(fid));
+            let container_erased = element
+                .container_id()
+                .is_some_and(|cid| pending.contains(cid));
+            (pending.contains(id) || frame_erased || container_erased).then(|| id.to_owned())
+        })
+        .collect();
+
+    for id in &delete_ids {
+        let &pos = id_to_pos.get(id).expect("delete_ids only names live ids");
+        file.elements[pos].set_deleted(true);
+        bump_version(&mut file.elements[pos], env);
+    }
+
+    for id in &delete_ids {
+        let &pos = id_to_pos.get(id).expect("delete_ids only names live ids");
+        unbind_targets(file, &id_to_pos, pos, env);
+        unbind_bound_elements(file, &id_to_pos, pos, env);
+    }
+}
+
 /// `BoundElement.unbindAffected`: removes the element at `pos`'s id from `boundElements` of
 /// each non-deleted element it is itself bound to (its container, and the elements its start
 /// and end bindings name). `frameId` is not one of these targets: a frame never lists its

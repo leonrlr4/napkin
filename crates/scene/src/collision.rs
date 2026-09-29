@@ -1076,6 +1076,28 @@ pub fn segment_hits_element(
     to: [f64; 2],
     threshold: f64,
 ) -> bool {
+    // Cheap reject first (`doBoundsIntersect`, checked before `eraserTest` runs any real
+    // geometry): both the segment's own bounds and the element's rotated bounds padded by
+    // `threshold`, so this can only ever reject a query the precise test below would too.
+    let Some(element_bounds) = geometry.bounds(element) else {
+        return false;
+    };
+    let segment_bounds = [
+        from[0].min(to[0]) - threshold,
+        from[1].min(to[1]) - threshold,
+        from[0].max(to[0]) + threshold,
+        from[1].max(to[1]) + threshold,
+    ];
+    let padded_element_bounds = [
+        element_bounds[0] - threshold,
+        element_bounds[1] - threshold,
+        element_bounds[2] + threshold,
+        element_bounds[3] + threshold,
+    ];
+    if !bounds_intersect(segment_bounds, padded_element_bounds) {
+        return false;
+    }
+
     if should_test_inside(element)
         && (is_point_in_element(geometry, element, from)
             || is_point_in_element(geometry, element, to))
@@ -1083,6 +1105,11 @@ pub fn segment_hits_element(
         return true;
     }
     segment_distance_to_element(geometry, element, from, to) <= threshold
+}
+
+/// `doBoundsIntersect`: whether two axis-aligned boxes overlap.
+fn bounds_intersect(a: [f64; 4], b: [f64; 4]) -> bool {
+    a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1]
 }
 
 #[cfg(test)]
