@@ -15,18 +15,27 @@
 //! remaining logic is just what `bind_label` already does.
 //!
 //! Left out of this port, matching the rest of `scene`'s scope: frames, sticky notes, elbow
-//! arrow endpoint labels (an arrow is never a text container here), the autoshape tool, grid
-//! snapping, and `startTextEditing`'s `TEXT_TO_CENTER_SNAP_THRESHOLD` (30 scene units) gate on
-//! binding to a container. Clicking or double-clicking anywhere inside a rectangle, diamond or
-//! ellipse's bounding box always edits or creates its label here; the JS only does that within
-//! 30 units of the container's center, and creates unbound free text (inheriting the
-//! container's angle) for a miss further out.
+//! arrow endpoint labels (an arrow is never a text container here), the autoshape tool, and
+//! grid snapping (`getTextCreationGridPoint` is moot without a grid mode, so the free-text
+//! position formula below is exact, not an approximation).
+//!
+//! A click or double-click within a rectangle/diamond/ellipse's bounding box only binds to it
+//! as a label within `TEXT_TO_CENTER_SNAP_THRESHOLD` (30 scene units) of its center
+//! (`getTextWysiwygSnappedToCenterPosition`); further out it creates unbound free text at the
+//! click point instead, inheriting the container's angle and `groupIds`
+//! (`startTextEditing`'s own field assembly does this for *every* miss, bound or not, as long
+//! as some container was found under the point at all). A double-click additionally forces a
+//! bind regardless of distance when the container already has a label, has a non-transparent
+//! background, or the click lands on its own outline (`handleCanvasDoubleClick`'s pre-snap
+//! branch, which the text tool's own `handleTextOnPointerDown` does not have — its distance
+//! check runs unconditionally once the click was inside the container's bounding box at all).
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::batch::add::{LabelSpec, bind_label};
 use crate::collision;
+use crate::color::is_transparent;
 use crate::edit;
 use crate::element::Element;
 use crate::env::Env;
@@ -39,6 +48,9 @@ use crate::text::{self, TextMeasure};
 use crate::transform;
 
 use super::{Editor, PointerEvent, Tool, clone_scene};
+
+/// `TEXT_TO_CENTER_SNAP_THRESHOLD` (`packages/common/src/constants.ts`), in scene units.
+const TEXT_TO_CENTER_SNAP_THRESHOLD: f64 = 30.0;
 
 /// The text element being edited, until [`commit_text`] writes it back
 /// (`state.editingTextElement` plus the font/color/opacity fields `textWysiwyg` reads off it
@@ -62,6 +74,10 @@ pub struct TextEditing {
     pub stroke_color: String,
     pub opacity: f64,
     pub angle: f64,
+    /// A container's `groupIds`, inherited by a free text created near it that missed the
+    /// center-snap threshold (`startTextEditing`'s `groupIds: container?.groupIds ?? []`);
+    /// empty for every other kind of edit.
+    pub group_ids: Vec<String>,
 }
 
 /// Topmost non-deleted, non-locked element hit at `point` (`getElementAtPosition` with
@@ -111,6 +127,13 @@ fn container_at(
         })
 }
 
+/// The position of `id`'s live (non-deleted) element, if it still has one.
+fn live_position(elements: &[Element], id: &str) -> Option<usize> {
+    elements
+        .iter()
+        .position(|e| !e.is_deleted() && e.id() == Some(id))
+}
+
 /// `element`'s bound text label, if it has one and it is still live (`getBoundTextElement`).
 fn bound_label_of(elements: &[Element], element: &Element) -> Option<usize> {
     let (label_id, _) = element
@@ -122,17 +145,41 @@ fn bound_label_of(elements: &[Element], element: &Element) -> Option<usize> {
         .position(|e| !e.is_deleted() && e.id() == Some(label_id))
 }
 
-/// What a pointer-down or double-click at a point should edit.
+/// What a pointer-down or double-click at a point should edit. `NewFreeText`'s `near_container`
+/// is the container the click missed the center-snap threshold of, if any (for the angle and
+/// `groupIds` a free text created there inherits); `None` for a click with no container at all.
 enum Target {
     ExistingText(usize),
     NewLabel(usize),
-    NewFreeText,
+    NewFreeText { near_container: Option<usize> },
+}
+
+/// `getContainerCenter`, restricted to napkin's non-arrow containers: `container.x +
+/// container.width / 2`, `container.y + container.height / 2`. The JS does not rotate this
+/// back into scene space for a rotated container, so neither does this, even though every
+/// other bound-text placement in `scene` does.
+fn container_center(container: &Element) -> [f64; 2] {
+    let placement = container
+        .placement()
+        .expect("a rectangle/diamond/ellipse container always has a placement");
+    [
+        placement.x + placement.width / 2.0,
+        placement.y + placement.height / 2.0,
+    ]
+}
+
+/// `getTextWysiwygSnappedToCenterPosition`'s own check: whether `point` is within
+/// [`TEXT_TO_CENTER_SNAP_THRESHOLD`] scene units of `container`'s center.
+fn near_container_center(container: &Element, point: [f64; 2]) -> bool {
+    let [cx, cy] = container_center(container);
+    rough::js::hypot(point[0] - cx, point[1] - cy) < TEXT_TO_CENTER_SNAP_THRESHOLD
 }
 
 /// `handleTextOnPointerDown`'s target resolution, napkin's container/free-text subset only
 /// (no arrow endpoint labels): the topmost hit if it is text, else that hit's existing label if
 /// it is a container that already has one (`hasBoundTextElement`), else a container found by
-/// bounding box (a new label), else new free text at the pointer.
+/// bounding box, bound only within the center-snap threshold (a new label; further out, new
+/// free text near it), else new free text with no container at all.
 fn text_tool_target(editor: &mut Editor<impl Env>, point: [f64; 2], zoom: f64) -> Target {
     if let Some(index) = topmost_hit(&mut editor.geometry, &editor.file.elements, point, zoom) {
         if matches!(editor.file.elements[index], Element::Text(_)) {
@@ -143,26 +190,56 @@ fn text_tool_target(editor: &mut Editor<impl Env>, point: [f64; 2], zoom: f64) -
         }
     }
     match container_at(&mut editor.geometry, &editor.file.elements, point) {
-        Some(index) => Target::NewLabel(index),
-        None => Target::NewFreeText,
+        Some(index) if near_container_center(&editor.file.elements[index], point) => {
+            Target::NewLabel(index)
+        }
+        Some(index) => Target::NewFreeText {
+            near_container: Some(index),
+        },
+        None => Target::NewFreeText {
+            near_container: None,
+        },
     }
 }
 
 /// `handleCanvasDoubleClick`'s target resolution: a container found at the point takes
 /// priority (its existing label, or a new one) over a free text hit, matching
-/// `getTextBindableContainerAtPosition` running before the free-text fallback in the JS.
+/// `getTextBindableContainerAtPosition` running before the free-text fallback in the JS. A
+/// labelless container binds unconditionally when it has a non-transparent background or the
+/// click lands on its own outline (the pre-snap branch that forces `sceneX`/`sceneY` onto its
+/// exact center before the shared center-snap check ever runs), else only within the same
+/// center-snap threshold [`text_tool_target`] uses.
 fn double_click_target(editor: &mut Editor<impl Env>, point: [f64; 2], zoom: f64) -> Target {
-    if let Some(container) = container_at(&mut editor.geometry, &editor.file.elements, point) {
-        return match bound_label_of(&editor.file.elements, &editor.file.elements[container]) {
-            Some(label) => Target::ExistingText(label),
-            None => Target::NewLabel(container),
+    if let Some(index) = container_at(&mut editor.geometry, &editor.file.elements, point) {
+        let container = editor.file.elements[index].clone();
+        if let Some(label) = bound_label_of(&editor.file.elements, &container) {
+            return Target::ExistingText(label);
+        }
+        let opaque = !is_transparent(
+            &container
+                .base()
+                .expect("a container always has a base")
+                .background_color,
+        );
+        let threshold = collision::hit_threshold(&container, zoom);
+        let hits_outline =
+            collision::hit_element_itself(&mut editor.geometry, &container, point, threshold);
+        let forced = opaque || hits_outline;
+        return if forced || near_container_center(&container, point) {
+            Target::NewLabel(index)
+        } else {
+            Target::NewFreeText {
+                near_container: Some(index),
+            }
         };
     }
     match topmost_hit(&mut editor.geometry, &editor.file.elements, point, zoom) {
         Some(index) if matches!(editor.file.elements[index], Element::Text(_)) => {
             Target::ExistingText(index)
         }
-        _ => Target::NewFreeText,
+        _ => Target::NewFreeText {
+            near_container: None,
+        },
     }
 }
 
@@ -192,6 +269,7 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 stroke_color: t.base.stroke_color.clone(),
                 opacity: t.base.opacity,
                 angle: t.base.angle,
+                group_ids: Vec::new(),
             }
         }
         Target::NewLabel(container_index) => {
@@ -221,11 +299,26 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 stroke_color: style.stroke_color.clone(),
                 opacity: style.opacity,
                 angle: placement.angle,
+                group_ids: Vec::new(),
             }
         }
-        Target::NewFreeText => {
+        Target::NewFreeText { near_container } => {
             let style = &editor.style;
             let line_height = text::line_height(style.font_family);
+            // `startTextEditing`'s own field assembly gives free text the angle and groupIds
+            // of whatever container the click found, bound or not (`container?.angle`,
+            // `container?.groupIds ?? []`); a click with no container at all gets neither.
+            let (angle, group_ids) = match near_container.map(|i| &editor.file.elements[i]) {
+                Some(container) => (
+                    container.placement().map_or(0.0, |p| p.angle),
+                    container
+                        .group_ids()
+                        .iter()
+                        .map(|s| (*s).to_owned())
+                        .collect(),
+                ),
+                None => (0.0, Vec::new()),
+            };
             // `startTextEditing`'s free-text position: the click point itself for x, and y
             // shifted up by half a line's pixel height so the first line is centered on it
             // (`getLineHeightInPx(fontSize, lineHeight) / 2`, since no grid is in effect).
@@ -241,7 +334,8 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 text_align: "left".to_owned(),
                 stroke_color: style.stroke_color.clone(),
                 opacity: style.opacity,
-                angle: 0.0,
+                angle,
+                group_ids,
             }
         }
     }
@@ -293,11 +387,8 @@ fn update_existing_text(
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) {
-    let position = file
-        .elements
-        .iter()
-        .position(|e| !e.is_deleted() && e.id() == Some(id))
-        .expect("the text being edited still exists");
+    let position = live_position(&file.elements, id)
+        .expect("commit_text only calls this once it has confirmed the text is still live");
     let before = file.elements[position].clone();
 
     let normalized = text::normalize_text(text);
@@ -346,7 +437,14 @@ fn update_existing_text(
 
 /// A new label on `container_id`, via the same `bindTextToContainer`/`redrawTextBoundingBox`
 /// primitive the AI batch interface uses (`batch::add::bind_label`): centered, not wrapped,
-/// left overflowing when it does not fit (spec deviation 1). Returns the label's id.
+/// left overflowing when it does not fit (spec deviation 1), colored and made opaque per
+/// `editing`'s stroke color and opacity (`currentItemStrokeColor`/`currentItemOpacity` at
+/// `startTextEditing` time) rather than `bind_label`'s AI-batch default of the container's own
+/// color. Bumps the container's own version for gaining the `boundElements` entry: unlike
+/// `add_elements`, which only ever binds to a container it just created in the same batch
+/// (still at version 1, matching the JS baseline), this container is a pre-existing one, so
+/// nothing else records that mutation (see `bind_label`'s own doc comment). Returns the label's
+/// id.
 fn create_new_label(
     file: &mut SceneFile,
     container_id: &str,
@@ -355,17 +453,17 @@ fn create_new_label(
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) -> String {
-    let position = file
-        .elements
-        .iter()
-        .position(|e| !e.is_deleted() && e.id() == Some(container_id))
-        .expect("the label's container still exists");
+    let position = live_position(&file.elements, container_id)
+        .expect("commit_text only calls this once it has confirmed the container is still live");
+    let container_before = file.elements[position].clone();
     let label = LabelSpec {
         text: text.to_owned(),
         font_size: Some(editing.font_size),
         font_family: Some(editing.font_family),
         text_align: None,
         vertical_align: None,
+        stroke_color: Some(editing.stroke_color.clone()),
+        opacity: Some(editing.opacity),
     };
     let mut warnings = Vec::new();
     let label_position = bind_label(
@@ -377,6 +475,9 @@ fn create_new_label(
         env,
         &mut warnings,
     );
+    if file.elements[position] != container_before {
+        bump_version(&mut file.elements[position], env);
+    }
     let label_id = file.elements[label_position]
         .id()
         .expect("a freshly created label has an id")
@@ -401,6 +502,7 @@ fn create_new_free_text(
         angle: editing.angle,
         stroke_color: editing.stroke_color.clone(),
         opacity: editing.opacity,
+        group_ids: editing.group_ids.clone(),
         ..ElementProps::default()
     };
     let text_props = TextProps {
@@ -433,6 +535,19 @@ fn create_new_free_text(
 /// than only on a keyboard submit, napkin's own submit path having no such distinction):
 /// the container when the (possibly just-created) text is bound to one, else the text itself
 /// when it survives, else nothing.
+///
+/// The element (or, for a new label, the container) an in-progress edit refers to is checked
+/// for existence again here rather than trusted: every editor path that could otherwise delete
+/// or replace it while `text_editing` is `Some` already refuses to run (`Editor::is_idle`
+/// covers the command surface; `select`/`create`/`erase::pointer_down` each bail on
+/// `text_editing.is_some()` directly, since a double-click-started edit leaves `tool` at
+/// `Selection` rather than switching to a tool those already gate on), but nothing here should
+/// *rely* on every such path staying airtight forever. A non-empty edit whose target vanished
+/// becomes a new free text at the edit's own origin instead (`textWysiwyg`'s own
+/// `getElement(element.id)` guard has no equivalent fallback — the element it might not find
+/// was never deletable out from under it in the first place, since JS inserts it into the
+/// scene the moment editing starts); an empty edit of a vanished target is simply dropped,
+/// same as an abandoned new text.
 pub(super) fn commit_text(
     editor: &mut Editor<impl Env>,
     text: &str,
@@ -447,28 +562,54 @@ pub(super) fn commit_text(
     let before = Arc::clone(&editor.file);
     let selection_before = editor.selection.clone();
 
-    let surviving_id: Option<String> = match (&editing.element_id, deleted) {
-        (Some(id), true) => {
-            let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-            edit::delete_selection(file, &Selection::from_ids([id.clone()]), &mut editor.env);
-            Some(id.clone())
+    let surviving_id: Option<String> = if let Some(id) = &editing.element_id {
+        let live = live_position(&editor.file.elements, id).is_some();
+        match (live, deleted) {
+            (true, true) => {
+                let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+                edit::delete_selection(file, &Selection::from_ids([id.clone()]), &mut editor.env);
+                Some(id.clone())
+            }
+            (true, false) => {
+                let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+                update_existing_text(file, id, text, measure, &mut editor.env);
+                Some(id.clone())
+            }
+            // Erased, or otherwise removed, out from under this edit: nothing left to delete
+            // or update.
+            (false, true) => None,
+            (false, false) => {
+                let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+                Some(create_new_free_text(
+                    file,
+                    &editing,
+                    text,
+                    measure,
+                    &mut editor.env,
+                ))
+            }
         }
-        (Some(id), false) => {
-            let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-            update_existing_text(file, id, text, measure, &mut editor.env);
-            Some(id.clone())
-        }
-        (None, true) => None,
-        (None, false) => {
-            let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-            let id = match &editing.container_id {
-                Some(container_id) => {
-                    create_new_label(file, container_id, &editing, text, measure, &mut editor.env)
-                }
-                None => create_new_free_text(file, &editing, text, measure, &mut editor.env),
-            };
-            Some(id)
-        }
+    } else if deleted {
+        None
+    } else {
+        let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+        let container_live = editing
+            .container_id
+            .as_deref()
+            .is_some_and(|id| live_position(&file.elements, id).is_some());
+        let id = if container_live {
+            create_new_label(
+                file,
+                editing.container_id.as_deref().expect("checked above"),
+                &editing,
+                text,
+                measure,
+                &mut editor.env,
+            )
+        } else {
+            create_new_free_text(file, &editing, text, measure, &mut editor.env)
+        };
+        Some(id)
     };
 
     editor.selection = match surviving_id {
@@ -490,4 +631,115 @@ pub(super) fn commit_text(
     };
 
     editor.finish_edit(&before, &selection_before)
+}
+
+#[cfg(test)]
+mod tests {
+    //! `commit_text`'s fallback for an edit target that vanished mid-edit. Every reachable way
+    //! to make that happen through the public `Editor` API is already refused while
+    //! `text_editing` is `Some` (see `commit_text`'s own doc comment), so exercising the
+    //! fallback needs to plant a `TextEditing` whose id was never live in the first place,
+    //! which only an internal test (able to reach `Editor`'s private `text_editing` field and
+    //! this module's own `commit_text`) can do; `crates/scene/tests/editor_text.rs` covers the
+    //! guards themselves through the public API instead.
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::env::Env;
+    use crate::sample;
+
+    struct TestEnv {
+        state: u64,
+        now: f64,
+    }
+
+    impl TestEnv {
+        fn seeded(seed: u64) -> TestEnv {
+            TestEnv {
+                state: seed.max(1),
+                now: 1.0,
+            }
+        }
+    }
+
+    impl Env for TestEnv {
+        fn fill_random(&mut self, bytes: &mut [u8]) {
+            for byte in bytes {
+                self.state ^= self.state << 13;
+                self.state ^= self.state >> 7;
+                self.state ^= self.state << 17;
+                *byte = (self.state >> 32) as u8;
+            }
+        }
+
+        fn now_ms(&mut self) -> f64 {
+            self.now += 1.0;
+            self.now
+        }
+    }
+
+    fn stub_editing(element_id: Option<&str>, container_id: Option<&str>) -> TextEditing {
+        TextEditing {
+            element_id: element_id.map(str::to_owned),
+            container_id: container_id.map(str::to_owned),
+            text: "old".to_owned(),
+            origin: [10.0, 20.0],
+            width: 0.0,
+            font_family: 5.0,
+            font_size: 20.0,
+            line_height: 1.25,
+            text_align: "left".to_owned(),
+            stroke_color: "#1e1e1e".to_owned(),
+            opacity: 100.0,
+            angle: 0.0,
+            group_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_non_empty_edit_of_a_vanished_element_becomes_a_new_free_text() {
+        let mut editor = Editor::new(sample::file(vec![]), TestEnv::seeded(1));
+        editor.text_editing = Some(stub_editing(Some("gone"), None));
+
+        assert!(commit_text(
+            &mut editor,
+            "revived",
+            &mut sample::CharWidthMeasure
+        ));
+
+        assert!(editor.text_editing.is_none());
+        assert_eq!(editor.file.elements.len(), 1);
+        let v = editor.file.elements[0].to_value();
+        assert_eq!(v["text"], json!("revived"));
+        assert_eq!(v["x"], json!(10.0));
+        assert_eq!(v["y"], json!(20.0));
+    }
+
+    #[test]
+    fn an_empty_edit_of_a_vanished_element_is_dropped_without_panicking() {
+        let mut editor = Editor::new(sample::file(vec![]), TestEnv::seeded(1));
+        editor.text_editing = Some(stub_editing(Some("gone"), None));
+
+        assert!(!commit_text(&mut editor, "", &mut sample::CharWidthMeasure));
+
+        assert!(editor.file.elements.is_empty());
+    }
+
+    #[test]
+    fn a_new_label_whose_container_vanished_becomes_a_new_free_text() {
+        let mut editor = Editor::new(sample::file(vec![]), TestEnv::seeded(1));
+        editor.text_editing = Some(stub_editing(None, Some("gone")));
+
+        assert!(commit_text(
+            &mut editor,
+            "label text",
+            &mut sample::CharWidthMeasure
+        ));
+
+        assert_eq!(editor.file.elements.len(), 1);
+        let v = editor.file.elements[0].to_value();
+        assert_eq!(v["text"], json!("label text"));
+        assert_eq!(v["containerId"], json!(null));
+    }
 }

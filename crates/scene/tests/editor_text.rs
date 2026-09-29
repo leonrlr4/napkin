@@ -1,6 +1,6 @@
 mod support;
 
-use scene::editor::{Command, Tool};
+use scene::editor::{Command, Property, Tool};
 use scene::sample::{self, CharWidthMeasure};
 use serde_json::json;
 use support::*;
@@ -76,4 +76,115 @@ fn double_click_on_empty_canvas_starts_new_text_there() {
     assert!(e.double_click(at(40.0, 40.0)));
     assert_eq!(e.text_editing().unwrap().element_id, None);
     assert_eq!(e.text_editing().unwrap().container_id, None);
+}
+
+#[test]
+fn switching_to_another_tool_while_editing_does_not_lose_or_erase_the_text() {
+    let mut e = editor(vec![sample::text("t", [0.0, 0.0, 36.0, 25.0], "old", None)]);
+    assert!(e.double_click(at(10.0, 10.0)));
+
+    // The eraser tool would otherwise delete "t" out from under this edit.
+    e.set_tool(Tool::Eraser);
+    e.pointer_down(at(10.0, 10.0));
+    e.pointer_up(at(10.0, 10.0));
+    assert!(!e.file().elements[0].is_deleted());
+
+    // A creation tool would otherwise start drawing a new shape underneath the editor.
+    e.set_tool(Tool::Rectangle);
+    e.pointer_down(at(50.0, 50.0));
+    e.pointer_up(at(80.0, 80.0));
+    assert_eq!(e.file().elements.len(), 1);
+
+    assert!(e.text_editing().is_some());
+    assert!(e.commit_text("still here", &mut CharWidthMeasure));
+    assert_eq!(e.file().elements[0].to_value()["text"], json!("still here"));
+}
+
+#[test]
+fn text_tool_click_far_from_a_containers_center_creates_free_text_not_a_label() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 200.0, 100.0],
+    )]);
+    e.set_tool(Tool::Text);
+    // (20, 20) is inside the rectangle's bounding box but about 85 units from its center
+    // (100, 50), well past the 30-unit center-snap threshold.
+    e.pointer_down(at(20.0, 20.0));
+    e.pointer_up(at(20.0, 20.0));
+    assert_eq!(e.text_editing().unwrap().container_id, None);
+    assert!(e.commit_text("free", &mut CharWidthMeasure));
+    assert_eq!(e.file().elements.len(), 2);
+    assert!(e.file().elements[0].bound_elements().is_empty());
+}
+
+#[test]
+fn text_tool_click_near_a_containers_center_binds_its_label() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 200.0, 100.0],
+    )]);
+    e.set_tool(Tool::Text);
+    // (110, 60) is about 14 units from the center (100, 50), within the threshold.
+    e.pointer_down(at(110.0, 60.0));
+    e.pointer_up(at(110.0, 60.0));
+    assert_eq!(e.text_editing().unwrap().container_id.as_deref(), Some("r"));
+}
+
+#[test]
+fn double_click_near_a_transparent_containers_edge_creates_free_text_inheriting_its_group() {
+    let mut e = editor(vec![sample::with(
+        sample::generic("rectangle", "r", [0.0, 0.0, 200.0, 100.0]),
+        json!({"groupIds": ["g1"]}),
+    )]);
+    // The rectangle's background is transparent (the sample default) and (20, 20) neither
+    // hits its outline nor falls within the center-snap threshold, so this must not force a
+    // bind the way clicking its actual outline or an opaque fill would.
+    assert!(e.double_click(at(20.0, 20.0)));
+    let editing = e.text_editing().unwrap().clone();
+    assert_eq!(editing.container_id, None);
+    assert_eq!(editing.element_id, None);
+    assert_eq!(editing.group_ids, vec!["g1".to_owned()]);
+    assert!(e.commit_text("free", &mut CharWidthMeasure));
+    assert_eq!(e.file().elements[1].to_value()["groupIds"], json!(["g1"]));
+}
+
+#[test]
+fn new_ui_label_takes_the_current_item_style_not_the_containers_stroke() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 200.0, 100.0],
+    )]);
+    let container_version_before = e.file().elements[0].version();
+    // The container's own stroke color is the sample default, "#1e1e1e"; give the item style
+    // a different color and opacity so the label's source is distinguishable.
+    e.set_property(
+        Property::StrokeColor("#ff0000".to_owned()),
+        &mut CharWidthMeasure,
+    );
+    e.set_property(Property::Opacity(50.0), &mut CharWidthMeasure);
+    assert!(e.double_click(at(100.0, 50.0)));
+    assert!(e.commit_text("box", &mut CharWidthMeasure));
+    let label = e.file().elements[1].to_value();
+    assert_eq!(label["strokeColor"], json!("#ff0000"));
+    assert_eq!(label["opacity"], json!(50.0));
+    // The container gained a `boundElements` entry, a real mutation that must bump its
+    // version like any other (`bind_label` itself does not, see its own doc comment).
+    assert!(e.file().elements[0].version() > container_version_before);
+    assert!(e.command(Command::Undo));
+    assert!(e.file().elements[0].bound_elements().is_empty());
+}
+
+#[test]
+fn font_size_set_while_editing_applies_to_the_committed_text() {
+    let mut e = editor(vec![]);
+    e.set_tool(Tool::Text);
+    e.pointer_down(at(0.0, 0.0));
+    e.pointer_up(at(0.0, 0.0));
+    e.set_property(Property::FontSize(36.0), &mut CharWidthMeasure);
+    assert_eq!(e.text_editing().unwrap().font_size, 36.0);
+    assert!(e.commit_text("hi", &mut CharWidthMeasure));
+    assert_eq!(e.file().elements[0].to_value()["fontSize"], json!(36.0));
 }

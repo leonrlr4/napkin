@@ -62,7 +62,11 @@ pub(super) fn pending(gesture: &Gesture) -> &HashSet<String> {
 }
 
 pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
-    if editor.tool != Tool::Eraser {
+    // `text_editing` can survive a tool switch away from `Text`/`Selection` (`Editor::set_tool`
+    // deliberately never discards it, see its own doc comment): without this check, switching
+    // to the eraser mid-edit could delete the element still being edited out from under
+    // `commit_text`.
+    if editor.tool != Tool::Eraser || editor.text_editing.is_some() {
         return;
     }
     let start = Arc::clone(&editor.file);

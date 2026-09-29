@@ -55,7 +55,7 @@ use crate::new_element::bump_version;
 use crate::text::{self, TextMeasure};
 use crate::transform;
 
-use super::{ArrowType, EdgeStyle, Editor, ItemStyle, StrokeWidth, Tool, clone_scene};
+use super::{ArrowType, EdgeStyle, Editor, ItemStyle, StrokeWidth, TextEditing, Tool, clone_scene};
 
 /// One property-panel section (`SelectedShapeActions` in
 /// `packages/excalidraw/components/Actions.tsx`).
@@ -520,6 +520,7 @@ pub(super) fn set_property<E: Env>(
     measure: &mut dyn TextMeasure,
 ) -> bool {
     update_style(&mut editor.style, &property);
+    apply_to_text_editing(&mut editor.text_editing, &property);
 
     if editor.selection.is_empty() {
         return false;
@@ -545,6 +546,29 @@ pub(super) fn set_property<E: Env>(
     }
 
     editor.finish_edit(&before, &selection_before)
+}
+
+/// The four properties `includeBoundTextElement` already singles out above (stroke color,
+/// opacity, font family, font size) also apply live to the text currently being edited, if
+/// any: `editingTextElement` is itself part of what `changeProperty`'s `getSelectedElements`
+/// call targets in the JS, so a panel change while the wysiwyg editor is open reaches it too,
+/// not just a `commit_text` afterwards it has no other way to pick up. Selection is always
+/// empty while `text_editing` is `Some` (`text::pointer_down`/`double_click` both clear it), so
+/// this runs whether or not the function goes on to touch any selected element.
+fn apply_to_text_editing(text_editing: &mut Option<TextEditing>, property: &Property) {
+    let Some(editing) = text_editing else {
+        return;
+    };
+    match property {
+        Property::StrokeColor(v) => editing.stroke_color = v.clone(),
+        Property::Opacity(v) => editing.opacity = *v,
+        Property::FontFamily(v) => {
+            editing.font_family = *v;
+            editing.line_height = text::line_height(*v);
+        }
+        Property::FontSize(v) => editing.font_size = *v,
+        _ => {}
+    }
 }
 
 fn update_style(style: &mut ItemStyle, property: &Property) {

@@ -98,10 +98,15 @@ pub(super) struct FreedrawState {
 }
 
 pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
+    // `text_editing` can survive a tool switch away from `Text`/`Selection` (`Editor::set_tool`
+    // deliberately never discards it, see its own doc comment): without this check, switching
+    // to a creation tool mid-edit and drawing would start a shape gesture over the element
+    // still being edited, and a later `commit_text` could find it gone.
     if matches!(
         editor.tool,
         Tool::Selection | Tool::Hand | Tool::Text | Tool::Eraser
-    ) {
+    ) || editor.text_editing.is_some()
+    {
         return;
     }
     if matches!(editor.create_gesture, Gesture::MultiPoint(_)) {

@@ -54,6 +54,15 @@ pub struct LabelSpec {
     pub font_family: Option<f64>,
     pub text_align: Option<String>,
     pub vertical_align: Option<String>,
+    /// Overrides `bind_label`'s default stroke color (the container's own): `None` for the AI
+    /// batch interface, which always takes the container's color. The editor's own text tool
+    /// sets this to `currentItemStrokeColor` (`startTextEditing`'s field assembly gives a
+    /// freshly bound label the current item style's stroke color, not the container's, except
+    /// for a sticky note's label, out of scope here).
+    pub stroke_color: Option<String>,
+    /// Overrides `bind_label`'s default opacity (`ElementProps::default()`, 100): `None` for
+    /// the AI batch interface. The editor sets this to `currentItemOpacity`.
+    pub opacity: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -219,6 +228,8 @@ fn parse_label(pos: usize, value: &Value) -> Result<LabelSpec, OpError> {
         font_family,
         text_align,
         vertical_align,
+        stroke_color: None,
+        opacity: None,
     })
 }
 
@@ -816,7 +827,15 @@ pub fn add_elements(
 
 /// `bindTextToContainer` + `redrawTextBoundingBox` without wrapping or growing the container:
 /// appends a label to the container at `container`, returns its position, and pushes a warning
-/// when it does not fit (`name` is how the warning refers to the container).
+/// when it does not fit (`name` is how the warning refers to the container). The label's
+/// stroke color and opacity default to the container's own color and `ElementProps::default()`'s
+/// opacity (the AI batch interface's behavior); `label.stroke_color`/`label.opacity` override
+/// either, for the editor's own text tool. Does not bump `container`'s own version even though
+/// it gains a `boundElements` entry: the AI batch interface's `add_elements` always calls this
+/// on a container it just created in the same batch (version 1 throughout, matching the JS
+/// baseline's `Object.assign`), and `batch::apply_update`'s own container-vs-`container_before`
+/// diff already bumps it for a pre-existing one; a caller binding to a pre-existing container
+/// outside those two paths (the editor's `text::create_new_label`) must bump it itself.
 pub(crate) fn bind_label(
     file: &mut SceneFile,
     container: usize,
@@ -827,11 +846,13 @@ pub(crate) fn bind_label(
     warnings: &mut Vec<String>,
 ) -> usize {
     let container_before = file.elements[container].clone();
-    let stroke_color = container_before
-        .base()
-        .expect("bind_label's container is always a typed shape")
-        .stroke_color
-        .clone();
+    let stroke_color = label.stroke_color.clone().unwrap_or_else(|| {
+        container_before
+            .base()
+            .expect("bind_label's container is always a typed shape")
+            .stroke_color
+            .clone()
+    });
     let angle = container_before.placement().map_or(0.0, |p| p.angle);
     let container_id = container_before
         .id()
@@ -840,6 +861,9 @@ pub(crate) fn bind_label(
 
     let props = ElementProps {
         stroke_color,
+        opacity: label
+            .opacity
+            .unwrap_or_else(|| ElementProps::default().opacity),
         ..ElementProps::default()
     };
     let mut text_element = new_text_element(

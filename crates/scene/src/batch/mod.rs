@@ -549,6 +549,8 @@ fn apply_generic_update(
                 font_family: None,
                 text_align: None,
                 vertical_align: None,
+                stroke_color: None,
+                opacity: None,
             };
             let label_index = add::bind_label(next, index, &label, &name, measure, env, warnings);
             let label_id = next.elements[label_index]
