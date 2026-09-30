@@ -51,6 +51,36 @@ fn double_click_edits_existing_text_and_empty_deletes_it() {
 }
 
 #[test]
+fn a_panel_change_during_an_edit_is_applied_and_remeasured_on_commit() {
+    let mut e = editor(vec![sample::text("t", [0.0, 0.0, 36.0, 25.0], "old", None)]);
+    assert!(e.double_click(at(10.0, 10.0)));
+
+    e.set_property(Property::FontSize(40.0), &mut CharWidthMeasure);
+    e.set_property(
+        Property::StrokeColor("#ff0000".into()),
+        &mut CharWidthMeasure,
+    );
+    e.set_property(Property::Opacity(50.0), &mut CharWidthMeasure);
+    // The overlay already shows the change (it reads `TextEditing`, which `set_property` did
+    // update); what this test guards is that the element itself picks it up too, on commit.
+    let editing = e.text_editing().expect("still editing");
+    assert_eq!(editing.font_size, 40.0);
+    assert_eq!(editing.stroke_color, "#ff0000");
+    assert_eq!(editing.opacity, 50.0);
+
+    assert!(e.commit_text("old", &mut CharWidthMeasure));
+    let v = e.file().elements[0].to_value();
+    assert_eq!(v["fontSize"], json!(40.0));
+    assert_eq!(v["strokeColor"], json!("#ff0000"));
+    assert_eq!(v["opacity"], json!(50.0));
+    assert_eq!(
+        v["width"],
+        json!(3.0 * 40.0 * 0.6),
+        "re-measured at the new font size"
+    );
+}
+
+#[test]
 fn double_click_on_a_container_adds_a_centered_label() {
     let mut e = editor(vec![sample::generic(
         "rectangle",

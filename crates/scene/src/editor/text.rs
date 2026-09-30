@@ -4,15 +4,15 @@
 //! `wysiwyg/textWysiwyg.tsx`'s own `onSubmit`), all in `packages/excalidraw/components/App.tsx`
 //! at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
 //!
-//! Text editing is a field of the editor, not a pointer gesture (spec deviation 5): nothing is
-//! written back to the file until [`commit_text`]. A brand new text or label that ends up empty
-//! is therefore never created at all, rather than being inserted empty by `startTextEditing`
-//! and soft-deleted again by `onSubmit`; an existing one that ends up empty is soft-deleted the
-//! same way [`edit::delete_selection`] deletes a selection. Creating a new container label goes
-//! through `batch::add::bind_label` (the same primitive the AI batch interface uses), not a
-//! second copy of `startTextEditing`'s own container-binding branch: napkin has no sticky notes
-//! and does not grow a container to fit its label (spec deviations 1, M5), so that branch's
-//! remaining logic is just what `bind_label` already does.
+//! Text editing is a field of the editor, not a pointer gesture: nothing is written back to the
+//! file until [`commit_text`]. A brand new text or label that ends up empty is therefore never
+//! created at all, rather than being inserted empty by `startTextEditing` and soft-deleted again
+//! by `onSubmit`; an existing one that ends up empty is soft-deleted the same way
+//! [`edit::delete_selection`] deletes a selection. Creating a new container label goes through
+//! `batch::add::bind_label` (the same primitive the AI batch interface uses), not a second copy
+//! of `startTextEditing`'s own container-binding branch: napkin has no sticky notes and does not
+//! grow a container to fit its label, so that branch's remaining logic is just what `bind_label`
+//! already does.
 //!
 //! Left out of this port, matching the rest of `scene`'s scope: frames, sticky notes, elbow
 //! arrow endpoint labels (an arrow is never a text container here), the autoshape tool, and
@@ -372,17 +372,20 @@ pub(super) fn double_click(editor: &mut Editor<impl Env>, event: PointerEvent) -
 }
 
 /// Rewrites an existing text's content in place (`textWysiwyg`'s `onSubmit`, kept-text branch):
-/// re-measures at its current font, repositions a container's label with
+/// applies `editing`'s current font family/size, stroke color and opacity (`set_property` only
+/// ever wrote those to `editing` itself while the edit was open, via `apply_to_text_editing`),
+/// re-measures at that font, repositions a container's label with
 /// [`transform::bound_text_position`], and leaves a standalone text's top-left exactly where it
-/// was. Unlike `properties.rs`'s `redraw_text` (the property panel's font-size/family change),
-/// this does not recentre a standalone text at all: `getAdjustedDimensions`' anchor-preserving
-/// math keeps a left/top-aligned, unrotated text's top-left fixed on a content edit too (the
-/// only alignment/angle napkin's own UI ever creates), so the simpler fixed-top-left rule
-/// matches the JS for everything napkin can produce; it can disagree with the JS for a loaded
-/// file's differently aligned or rotated text.
+/// was. Unlike `properties.rs`'s `redraw_text` (the property panel's font-size/family change
+/// outside an edit), this does not recentre a standalone text at all: `getAdjustedDimensions`'
+/// anchor-preserving math keeps a left/top-aligned, unrotated text's top-left fixed on a content
+/// edit too (the only alignment/angle napkin's own UI ever creates), so the simpler
+/// fixed-top-left rule matches the JS for everything napkin can produce; it can disagree with
+/// the JS for a loaded file's differently aligned or rotated text.
 fn update_existing_text(
     file: &mut SceneFile,
     id: &str,
+    editing: &TextEditing,
     text: &str,
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
@@ -395,14 +398,16 @@ fn update_existing_text(
     let Element::Text(t) = &mut file.elements[position] else {
         unreachable!("commit_text only edits text elements")
     };
-    let line_height = t
-        .line_height
-        .unwrap_or_else(|| text::line_height(t.font_family));
+    t.font_family = editing.font_family;
+    t.font_size = editing.font_size;
+    t.line_height = Some(editing.line_height);
+    t.base.stroke_color = editing.stroke_color.clone();
+    t.base.opacity = editing.opacity;
     let [width, height] = text::measure_text(
         &normalized,
         t.font_family,
         t.font_size,
-        line_height,
+        editing.line_height,
         measure,
     );
     t.text = normalized.clone();
@@ -437,7 +442,7 @@ fn update_existing_text(
 
 /// A new label on `container_id`, via the same `bindTextToContainer`/`redrawTextBoundingBox`
 /// primitive the AI batch interface uses (`batch::add::bind_label`): centered, not wrapped,
-/// left overflowing when it does not fit (spec deviation 1), colored and made opaque per
+/// left overflowing when it does not fit, colored and made opaque per
 /// `editing`'s stroke color and opacity (`currentItemStrokeColor`/`currentItemOpacity` at
 /// `startTextEditing` time) rather than `bind_label`'s AI-batch default of the container's own
 /// color. Bumps the container's own version for gaining the `boundElements` entry: unlike
@@ -572,7 +577,7 @@ pub(super) fn commit_text(
             }
             (true, false) => {
                 let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-                update_existing_text(file, id, text, measure, &mut editor.env);
+                update_existing_text(file, id, &editing, text, measure, &mut editor.env);
                 Some(id.clone())
             }
             // Erased, or otherwise removed, out from under this edit: nothing left to delete
