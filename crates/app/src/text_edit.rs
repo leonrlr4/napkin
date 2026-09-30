@@ -14,6 +14,12 @@ use crate::camera::Camera;
 use crate::fonts;
 use crate::render::color::render_color;
 
+/// The overlay's `TextEdit`'s own id: explicit (not egui's auto-assigned one) so [`show`] can
+/// name it again to clear its persisted state when a new edit starts.
+fn text_edit_id() -> egui::Id {
+    egui::Id::new("napkin-text-edit-buffer")
+}
+
 /// What the overlay decided this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TextEditOutcome {
@@ -118,8 +124,16 @@ pub fn show(
         .fixed_pos(anchor)
         .pivot(pivot_align)
         .show(ui.ctx(), |ui| {
+            if first_frame {
+                // The `TextEdit` below keeps the same id across every edit, so without this its
+                // persisted `TextEditState` (cursor position, and its own Ctrl+Z/Ctrl+Y undo
+                // history) would still hold whatever a previous, unrelated edit left behind: a
+                // fresh edit's very first Ctrl+Z could restore that earlier edit's text here.
+                egui::text_edit::TextEditState::default().store(ui.ctx(), text_edit_id());
+            }
             let response = ui.add(
                 egui::TextEdit::multiline(&mut *buffer)
+                    .id(text_edit_id())
                     .frame(egui::Frame::NONE)
                     .font(font_id)
                     .text_color(color)
@@ -239,6 +253,160 @@ mod tests {
 
         editing.opacity = 100.0;
         assert_eq!(stroke_color(&editing, false).a(), 255);
+    }
+
+    /// Runs one headless frame of [`show`] over `editing`/`buffer`, with `events` fed through
+    /// `egui::RawInput` and a canvas-sized widget allocated first (as `NapkinApp::ui`'s central
+    /// panel is), matching how the overlay actually sits in the frame: a click can land on that
+    /// canvas widget instead of the overlay's own (possibly zero-sized) `TextEdit`.
+    fn run_frame(
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+        editing: &TextEditing,
+        buffer: &mut String,
+        first_frame: bool,
+    ) -> TextEditOutcome {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let camera = Camera {
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            zoom: 1.0,
+        };
+        let mut outcome = TextEditOutcome::Editing;
+        let mut output = ctx.run_ui(raw, |ui| {
+            let (_rect, _response) =
+                ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            outcome = show(
+                ui,
+                editing,
+                buffer,
+                camera,
+                egui::Pos2::ZERO,
+                false,
+                first_frame,
+            );
+        });
+        output.textures_delta.clear();
+        outcome
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// With egui configured the way `napkin_app::configure_input` sets it up
+    /// (`SurrenderFocusOn::Presses`), the click that creates a text edit must not commit an
+    /// empty string on its own release: [`pointer_down`](scene::editor::Editor::pointer_down)
+    /// starts the edit and the overlay `request_focus`es in the very same frame, so the
+    /// matching pointer-up lands with the pointer still down over nothing but canvas (the
+    /// widget just appeared, at zero width) and would read as "clicked outside" under the
+    /// default `SurrenderFocusOn::Clicks`. A later press elsewhere still ends the edit.
+    #[test]
+    fn keeps_focus_through_its_own_creating_clicks_release_but_not_a_later_press() {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|options| {
+            options.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
+        });
+        fonts::install(&ctx, &glyphon::fontdb::Database::new());
+        // Font definitions only take effect at the start of the next pass.
+        let mut warmup = ctx.run_ui(egui::RawInput::default(), |_| {});
+        warmup.textures_delta.clear();
+        let editing = sample_editing("left");
+        let click = egui::pos2(editing.origin[0] as f32, editing.origin[1] as f32);
+        let mut buffer = String::new();
+
+        assert_eq!(
+            run_frame(&ctx, 0.0, press(click, true), &editing, &mut buffer, true),
+            TextEditOutcome::Editing,
+            "the creating press should not itself commit"
+        );
+        assert_eq!(
+            run_frame(
+                &ctx,
+                0.01,
+                press(click, false),
+                &editing,
+                &mut buffer,
+                false
+            ),
+            TextEditOutcome::Editing,
+            "the creating click's own release must not surrender focus"
+        );
+
+        let elsewhere = egui::pos2(500.0, 500.0);
+        assert!(
+            matches!(
+                run_frame(
+                    &ctx,
+                    0.02,
+                    press(elsewhere, true),
+                    &editing,
+                    &mut buffer,
+                    false
+                ),
+                TextEditOutcome::Commit(_)
+            ),
+            "a later press elsewhere should still end the edit"
+        );
+    }
+
+    /// With the widget's `TextEditState` reset every time a new edit starts (`show`'s own
+    /// `first_frame` branch), pressing Ctrl+Z right after typing into a brand new edit can only
+    /// ever undo within that edit's own (empty) history, never reach back into an earlier,
+    /// already-committed edit that reused the same widget id.
+    #[test]
+    fn ctrl_z_in_a_new_edit_never_restores_a_previous_edits_text() {
+        let ctx = egui::Context::default();
+        fonts::install(&ctx, &glyphon::fontdb::Database::new());
+        let mut warmup = ctx.run_ui(egui::RawInput::default(), |_| {});
+        warmup.textures_delta.clear();
+
+        let text_event = |text: &str| vec![egui::Event::Text(text.to_owned())];
+        let ctrl_z = vec![egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }];
+
+        // Edit A: focus, type "A", then let the widget's own undo point for "A" stabilize
+        // (`Undoer`'s `stable_time` is 1 second).
+        let editing_a = sample_editing("left");
+        let mut buffer_a = String::new();
+        run_frame(&ctx, 0.0, vec![], &editing_a, &mut buffer_a, true);
+        run_frame(&ctx, 0.1, text_event("A"), &editing_a, &mut buffer_a, false);
+        run_frame(&ctx, 2.0, vec![], &editing_a, &mut buffer_a, false);
+        assert_eq!(buffer_a, "A");
+
+        // Edit A commits; the app starts a fresh buffer for a new edit B, reusing the same
+        // overlay (and so the same widget id) `show` always draws at.
+        let editing_b = sample_editing("left");
+        let mut buffer_b = String::new();
+        run_frame(&ctx, 2.1, vec![], &editing_b, &mut buffer_b, true);
+        run_frame(&ctx, 2.2, text_event("B"), &editing_b, &mut buffer_b, false);
+        // Ctrl+Z fires well before B's own "B" state has had a second to stabilize into its own
+        // undo point.
+        run_frame(&ctx, 2.3, ctrl_z, &editing_b, &mut buffer_b, false);
+
+        assert_ne!(buffer_b, "A", "edit B's undo pulled in edit A's text");
     }
 
     #[test]

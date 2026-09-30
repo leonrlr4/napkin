@@ -189,6 +189,20 @@ impl Rasterize for NoGpu {
     }
 }
 
+/// Makes egui surrender keyboard focus only on a later *press* outside the focused widget,
+/// instead of its default of any *click* (down and up) outside it. `text_edit`'s overlay
+/// `request_focus`es its `TextEdit` the same frame a canvas click creates it; with the default
+/// `SurrenderFocusOn::Clicks`, the release half of that very click already lands outside the
+/// still-empty, zero-width widget and is read as a click outside it, so the overlay would
+/// surrender the focus it was just given and commit an empty string before the user ever typed
+/// anything. A later press elsewhere still surrenders it, which is what actually finishing an
+/// edit by clicking away is supposed to do.
+fn configure_input(ctx: &egui::Context) {
+    ctx.options_mut(|options| {
+        options.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
+    });
+}
+
 /// Binds the control socket, unless `bench` is set (spec §9.3: `--bench` never opens it). `None`
 /// without `$XDG_RUNTIME_DIR`/`$NAPKIN_SOCKET` and no notice; `None` with a notice when the
 /// socket exists but cannot be used, either because another napkin already owns it or because
@@ -231,12 +245,18 @@ impl NapkinApp {
         if let Some(render_state) = &cc.wgpu_render_state {
             callback::install(render_state);
         }
+        configure_input(&cc.egui_ctx);
+        // `fonts::egui_family` names families `fonts::install` binds; without registering them
+        // up front, a text edit opened before the scan below finishes would ask egui to lay out
+        // an unbound `FontFamily::Name` and panic. The bundled fonts alone are enough for that
+        // (no system scan needed), so this install is synchronous; `poll_measure` reinstalls
+        // with the system's CJK font once the scan below has one.
+        fonts::install(&cc.egui_ctx, &glyphon::fontdb::Database::new());
         // Scanning every installed font (`FontSystem::new`, ~0.2s) on this thread would blow
         // spec §6.7's start-to-first-frame budget, so it runs on a spawned thread instead;
-        // `poll_measure` picks up the result (and only then calls `fonts::install`, from its own
-        // database, so that scan isn't repeated) once it is ready. `--bench` skips this
-        // entirely: nothing it does ever measures text, and a thread it never joins would only
-        // muddy its own timing.
+        // `poll_measure` picks up the result (and only then reinstalls from its own database, so
+        // that scan isn't repeated) once it is ready. `--bench` skips this entirely: nothing it
+        // does ever measures text, and a thread it never joins would only muddy its own timing.
         let measure_rx = (!bench).then(|| {
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
@@ -1298,6 +1318,16 @@ mod tests {
 
     use super::*;
     use crate::camera::MAX_ZOOM;
+
+    #[test]
+    fn configure_input_surrenders_focus_only_on_a_press() {
+        let ctx = egui::Context::default();
+        configure_input(&ctx);
+        assert_eq!(
+            ctx.options(|options| options.input_options.surrender_focus_on),
+            egui::SurrenderFocusOn::Presses
+        );
+    }
 
     #[test]
     fn ctrl_k_ignores_key_repeat_but_not_a_fresh_press() {

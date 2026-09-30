@@ -140,4 +140,27 @@ mod tests {
             );
         }
     }
+
+    /// Before this synchronous, empty-database [`install`] runs, `egui_family`'s named families
+    /// aren't bound to anything yet, and asking epaint to lay out text in one panics
+    /// (`FontFamily::{family:?} is not bound to any fonts`) rather than falling back to a
+    /// default family. A text edit opened in that window (before the background font scan
+    /// `NapkinApp::new` starts has produced a `FontMeasure`) hits exactly this.
+    #[test]
+    fn text_lays_out_in_every_bundled_family_right_after_install() {
+        let ctx = egui::Context::default();
+        install(&ctx, &glyphon::fontdb::Database::new());
+        let mut output = ctx.run_ui(Default::default(), |_| {});
+        output.textures_delta.clear();
+
+        for font_family in [5.0, 6.0, 8.0] {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                ui.label(
+                    egui::RichText::new("hi")
+                        .font(egui::FontId::new(20.0, egui_family(font_family))),
+                );
+            });
+            output.textures_delta.clear();
+        }
+    }
 }
