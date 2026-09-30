@@ -30,8 +30,9 @@ pub struct PointerCapture {
 }
 
 impl PointerCapture {
-    /// The last pointer position in scene coordinates, from the most recent translated event.
-    /// Used to place a paste when the pointer has never moved this session.
+    /// The last pointer position in scene coordinates, from the most recent translated event;
+    /// `None` when the pointer has never moved this session, in which case a paste falls back
+    /// to the view's own center instead.
     pub fn last(&self) -> Option<[f64; 2]> {
         self.last
     }
