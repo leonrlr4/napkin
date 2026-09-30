@@ -13,8 +13,9 @@
 //! (`select_gesture`, `create_gesture`, `erase_gesture`); at most one is active at a time, since
 //! [`Editor::set_tool`] finishes all three before switching. `Command::Escape` clears the
 //! selection while idle, discards or finishes an active creation gesture (see `create::escape`),
-//! abandons an in-progress eraser stroke (see `erase::escape`), and otherwise does nothing:
-//! napkin has no other in-progress edit to cancel.
+//! and abandons an in-progress eraser stroke (see `erase::escape`). A text edit in progress
+//! never reaches this command at all: the overlay's own `TextEdit` widget already treats Escape
+//! as a loss of focus and commits it first (see the `app` crate's `text_edit` module).
 
 mod create;
 mod erase;
@@ -213,6 +214,10 @@ impl<E: Env> Editor<E> {
     /// Without this, switching tools mid-gesture would leave the mutation unrecorded and the
     /// editor permanently "not idle", since `pointer_move` and `pointer_up` both do nothing
     /// once the tool no longer matches the gesture in progress.
+    ///
+    /// This deliberately never touches `text_editing`: an in-progress text edit survives a tool
+    /// switch (it ends only through `Editor::commit_text`), so `create`/`erase`'s own
+    /// `pointer_down` still check for it directly rather than relying on the tool alone.
     pub fn set_tool(&mut self, tool: Tool) {
         select::finish_gesture(self, None);
         create::finish_gesture(self, None);
@@ -410,6 +415,11 @@ impl<E: Env> Editor<E> {
     /// Applies one batch as one history step (AI spec §4.1), keeping the selection (minus
     /// anything the batch deleted). Refuses while a gesture is in progress: the caller waits
     /// for `is_idle`. Bumps `revision` on success.
+    ///
+    /// Unspecified fields fall back to [`ItemStyle::default`], not [`Editor::style`]: an AI
+    /// batch is deterministic the same way `convertToExcalidrawElements` is, so a rectangle it
+    /// adds without a `strokeColor` always gets `#1e1e1e`, whatever the user last picked in the
+    /// property panel.
     pub fn apply_batch(
         &mut self,
         batch: &Value,
@@ -422,8 +432,13 @@ impl<E: Env> Editor<E> {
                 message: "napkin is in the middle of a drawing gesture; try again".into(),
             }]);
         }
-        let (next, report) =
-            batch::apply_batch(&self.file, batch, &self.style, measure, &mut self.env)?;
+        let (next, report) = batch::apply_batch(
+            &self.file,
+            batch,
+            &ItemStyle::default(),
+            measure,
+            &mut self.env,
+        )?;
         let before = std::mem::replace(&mut self.file, Arc::new(next));
         let selection = self.selection.clone();
         self.finish_edit(&before, &selection);
@@ -439,8 +454,15 @@ impl<E: Env> Editor<E> {
     /// Excalidraw data (`addElementsFromPasteOrLibrary`) is repaired the way loading a file
     /// repairs it (`edit::repair_on_load`'s duplicate-id and index fixes), its deleted elements
     /// dropped, and the rest centered on `at`; anything else becomes one new text element
-    /// (`addTextFromPaste`), also centered on `at`. Returns whether anything was pasted.
+    /// (`addTextFromPaste`), also centered on `at`. Returns whether anything was pasted. Refused
+    /// (returning `false`) while a gesture, a multi-point line or a text edit is in progress
+    /// (`Editor::is_idle`): applying it mid-drag would either merge into the drag's own eventual
+    /// history entry or interrupt it losing the selection, and applying it mid-edit would insert
+    /// elements the edit's own commit does not expect to find.
     pub fn paste(&mut self, text: &str, at: [f64; 2], measure: &mut dyn TextMeasure) -> bool {
+        if !self.is_idle() {
+            return false;
+        }
         let Some(parsed) = clipboard::parse(text) else {
             return false;
         };

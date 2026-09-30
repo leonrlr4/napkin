@@ -1,7 +1,7 @@
 mod support;
 
 use scene::clipboard::{self, Pasted};
-use scene::editor::Command;
+use scene::editor::{Command, Tool};
 use scene::sample::{self, CharWidthMeasure};
 use serde_json::{Value, json};
 use support::*;
@@ -54,6 +54,60 @@ fn plain_text_pastes_as_a_text_element() {
     assert_eq!(v["type"], json!("text"));
     assert_eq!(v["text"], json!("hello"));
     assert!(clipboard::parse("").is_none());
+}
+
+#[test]
+fn paste_is_refused_while_drawing_a_multi_point_line() {
+    let mut e = editor(vec![]);
+    e.set_tool(Tool::Line);
+    click(&mut e, at(0.0, 0.0));
+    e.pointer_move(at(100.0, 0.0));
+    click(&mut e, at(100.0, 0.0));
+    e.pointer_move(at(100.0, 100.0));
+
+    assert!(!e.paste("hello", [500.0, 500.0], &mut CharWidthMeasure));
+    assert!(!e.is_idle(), "the line gesture must still be in progress");
+
+    click(&mut e, at(100.0, 100.0));
+    assert!(e.command(Command::Finalize));
+    let live: Vec<Value> = e
+        .file()
+        .elements
+        .iter()
+        .filter(|x| !x.is_deleted())
+        .map(|x| x.to_value())
+        .collect();
+    assert_eq!(live.len(), 1, "the refused paste must not add anything");
+    assert_eq!(live[0]["type"], json!("line"));
+}
+
+#[test]
+fn paste_is_refused_mid_selection_drag() {
+    let mut e = editor(vec![sample::with(
+        sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 100.0]),
+        json!({"backgroundColor": "#ffc9c9"}),
+    )]);
+    e.pointer_down(at(50.0, 50.0));
+    e.pointer_move(at(80.0, 50.0));
+
+    assert!(!e.paste("hello", [500.0, 500.0], &mut CharWidthMeasure));
+
+    e.pointer_move(at(120.0, 50.0));
+    e.pointer_up(at(120.0, 50.0));
+    let live: Vec<Value> = e
+        .file()
+        .elements
+        .iter()
+        .filter(|x| !x.is_deleted())
+        .map(|x| x.to_value())
+        .collect();
+    assert_eq!(live.len(), 1, "the refused paste must not add anything");
+    assert_eq!(
+        (live[0]["x"].clone(), live[0]["y"].clone()),
+        (json!(70.0), json!(0.0)),
+        "the drag must still complete normally"
+    );
+    assert_eq!(selected(&e), ["r"]);
 }
 
 #[test]
