@@ -54,7 +54,7 @@ pub struct FrameInput<'a> {
     /// focused window, and egui-winit drops the Super modifier on Linux, so the letter alone
     /// would reach the tool shortcuts.
     pub super_held: bool,
-    /// The pointer is over an egui area such as the toolbar (`Context::is_pointer_over_egui`):
+    /// The pointer is over a floating egui area such as the toolbar, not the canvas itself:
     /// a primary press here must not reach the editor as `Down`.
     pub pointer_over_ui: bool,
     /// The primary button was double-clicked this frame

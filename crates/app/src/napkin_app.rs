@@ -197,6 +197,18 @@ impl Rasterize for NoGpu {
 /// surrender the focus it was just given and commit an empty string before the user ever typed
 /// anything. A later press elsewhere still surrenders it, which is what actually finishing an
 /// edit by clicking away is supposed to do.
+/// The pointer is over a floating egui area (toolbar, property panel, text-edit overlay,
+/// notices), so a press there must not start a canvas gesture. `Context::is_pointer_over_egui`
+/// does not work for this: the canvas is itself the central panel, which takes the whole root
+/// UI, so that method treats every point of the canvas as "over egui" too.
+fn pointer_over_overlay(ctx: &egui::Context) -> bool {
+    let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
+        return false;
+    };
+    ctx.layer_id_at(pos)
+        .is_some_and(|layer| layer.order != egui::Order::Background)
+}
+
 fn configure_input(ctx: &egui::Context) {
     ctx.options_mut(|options| {
         options.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
@@ -938,7 +950,7 @@ impl eframe::App for NapkinApp {
                                 keyboard_taken: ui.ctx().egui_wants_keyboard_input(),
                                 focused: self.focused,
                                 super_held,
-                                pointer_over_ui: ui.ctx().is_pointer_over_egui(),
+                                pointer_over_ui: pointer_over_overlay(ui.ctx()),
                                 double_clicked: ui.input(|i| {
                                     i.pointer
                                         .button_double_clicked(egui::PointerButton::Primary)
@@ -1318,6 +1330,45 @@ mod tests {
 
     use super::*;
     use crate::camera::MAX_ZOOM;
+
+    /// One headless frame shaped like `NapkinApp::ui`: a central panel whose canvas widget takes
+    /// the whole window, and a small `egui::Area` (the toolbar) over its top-left corner.
+    fn run_canvas_with_toolbar(ctx: &egui::Context, pointer: egui::Pos2) -> bool {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events: vec![egui::Event::PointerMoved(pointer)],
+            ..Default::default()
+        };
+        let mut over = false;
+        let mut output = ctx.run_ui(raw, |ui| {
+            over = pointer_over_overlay(ui.ctx());
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            });
+            egui::Area::new(egui::Id::new("toolbar"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.allocate_exact_size(egui::vec2(100.0, 40.0), egui::Sense::click());
+                });
+        });
+        output.textures_delta.clear();
+        over
+    }
+
+    #[test]
+    fn only_floating_areas_count_as_ui_over_the_canvas() {
+        let ctx = egui::Context::default();
+        // Layer rects are known from the previous frame, as they are in the running app.
+        run_canvas_with_toolbar(&ctx, egui::pos2(400.0, 300.0));
+        assert!(
+            !run_canvas_with_toolbar(&ctx, egui::pos2(400.0, 300.0)),
+            "the canvas itself is not UI covering the canvas"
+        );
+        assert!(run_canvas_with_toolbar(&ctx, egui::pos2(20.0, 20.0)));
+    }
 
     #[test]
     fn configure_input_surrenders_focus_only_on_a_press() {
