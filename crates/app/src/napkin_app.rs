@@ -826,11 +826,18 @@ impl eframe::App for NapkinApp {
                                             );
                                             editor.set_tool(Tool::Selection);
                                             let base_clones = editor.scene_clones();
-                                            editor.pointer_down(PointerEvent {
-                                                at: target,
-                                                modifiers: Modifiers::default(),
-                                                zoom: camera.zoom,
-                                            });
+                                            editor.pointer_down(
+                                                PointerEvent {
+                                                    at: target,
+                                                    modifiers: Modifiers::default(),
+                                                    zoom: camera.zoom,
+                                                },
+                                                &mut DeferredMeasure {
+                                                    measure: &mut self.measure,
+                                                    measure_rx: &mut self.measure_rx,
+                                                    ctx: Some(ui.ctx()),
+                                                },
+                                            );
                                             // The drag phase gets its own statistics window,
                                             // same as the camera script's above.
                                             self.stats = FrameStats::new();
@@ -1004,7 +1011,14 @@ impl eframe::App for NapkinApp {
                                             &mut self.measure_rx,
                                             Some(ui.ctx()),
                                         );
-                                        editor.pointer_down(event);
+                                        editor.pointer_down(
+                                            event,
+                                            &mut DeferredMeasure {
+                                                measure: &mut self.measure,
+                                                measure_rx: &mut self.measure_rx,
+                                                ctx: Some(ui.ctx()),
+                                            },
+                                        );
                                     }
                                     EditorInput::Move(event) => editor.pointer_move(
                                         event,
@@ -1046,7 +1060,14 @@ impl eframe::App for NapkinApp {
                                         editor.paste(&text, at, measure);
                                     }
                                     EditorInput::DoubleClick(event) => {
-                                        editor.double_click(event);
+                                        editor.double_click(
+                                            event,
+                                            &mut DeferredMeasure {
+                                                measure: &mut self.measure,
+                                                measure_rx: &mut self.measure_rx,
+                                                ctx: Some(ui.ctx()),
+                                            },
+                                        );
                                     }
                                 }
                             }

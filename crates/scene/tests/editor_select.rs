@@ -36,7 +36,7 @@ fn shift_click_adds_and_removes_on_release() {
     click(&mut e, at(50.0, 50.0));
     click(&mut e, shift(250.0, 50.0));
     assert_eq!(selected(&e), ["a", "b"]);
-    e.pointer_down(shift(50.0, 50.0));
+    e.pointer_down(shift(50.0, 50.0), &mut CharWidthMeasure);
     assert_eq!(selected(&e), ["a", "b"], "removal waits for pointer up");
     e.pointer_up(shift(50.0, 50.0), &mut CharWidthMeasure);
     assert_eq!(selected(&e), ["b"]);
@@ -70,7 +70,7 @@ fn box_selection_updates_while_dragging() {
         solid("a", [10.0, 10.0, 50.0, 50.0]),
         solid("b", [100.0, 100.0, 50.0, 50.0]),
     ]);
-    e.pointer_down(at(0.0, 0.0));
+    e.pointer_down(at(0.0, 0.0), &mut CharWidthMeasure);
     e.pointer_move(at(70.0, 70.0), &mut CharWidthMeasure);
     assert_eq!(selected(&e), ["a"]);
     assert_eq!(e.overlay(1.0).box_selection, Some([0.0, 0.0, 70.0, 70.0]));
@@ -200,7 +200,7 @@ fn undo_waits_for_the_gesture_and_revision_counts_edits() {
     drag(&mut e, at(5.0, 5.0), [15.0, 5.0]);
     let after_first = e.revision();
     assert!(after_first > 0);
-    e.pointer_down(at(15.0, 5.0));
+    e.pointer_down(at(15.0, 5.0), &mut CharWidthMeasure);
     e.pointer_move(at(25.0, 5.0), &mut CharWidthMeasure);
     assert!(!e.is_idle());
     assert!(!e.command(Command::Undo));
@@ -319,7 +319,7 @@ fn bring_forward_reorders_and_undoes_in_one_step() {
 #[test]
 fn changing_tool_mid_drag_finishes_the_gesture_as_one_undo_step() {
     let mut e = editor(vec![solid("a", [0.0, 0.0, 10.0, 10.0])]);
-    e.pointer_down(at(5.0, 5.0));
+    e.pointer_down(at(5.0, 5.0), &mut CharWidthMeasure);
     e.pointer_move(at(15.0, 5.0), &mut CharWidthMeasure);
     assert!(!e.is_idle());
     e.set_tool(Tool::Rectangle);

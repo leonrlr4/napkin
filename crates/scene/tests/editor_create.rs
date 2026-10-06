@@ -173,7 +173,7 @@ fn clicking_back_on_the_start_closes_a_line_into_a_polygon() {
 fn freedraw_records_relative_points_and_keeps_the_tool() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Freedraw);
-    e.pointer_down(at(10.0, 10.0));
+    e.pointer_down(at(10.0, 10.0), &mut CharWidthMeasure);
     e.pointer_move(at(15.0, 12.0), &mut CharWidthMeasure);
     e.pointer_move(at(15.0, 12.0), &mut CharWidthMeasure);
     e.pointer_move(at(5.0, 20.0), &mut CharWidthMeasure);
@@ -203,7 +203,7 @@ fn freedraw_records_relative_points_and_keeps_the_tool() {
 fn escape_discards_a_dragged_shape_but_finishes_a_multi_point_arrow() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Rectangle);
-    e.pointer_down(at(0.0, 0.0));
+    e.pointer_down(at(0.0, 0.0), &mut CharWidthMeasure);
     e.pointer_move(at(50.0, 50.0), &mut CharWidthMeasure);
     assert!(e.command(Command::Escape));
     e.pointer_up(at(50.0, 50.0), &mut CharWidthMeasure);

@@ -189,6 +189,7 @@ mod tests {
             opacity: 100.0,
             angle: 0.0,
             group_ids: Vec::new(),
+            wrap_width: None,
         }
     }
 

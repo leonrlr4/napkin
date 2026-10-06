@@ -106,7 +106,7 @@ fn a_batch_uses_the_default_style_not_the_panels_current_picks() {
 fn refuses_while_a_gesture_is_in_progress() {
     let mut editor = editor(vec![]);
     editor.set_tool(Tool::Rectangle);
-    editor.pointer_down(at(0.0, 0.0));
+    editor.pointer_down(at(0.0, 0.0), &mut CharWidthMeasure);
     let errors = editor
         .apply_batch(
             &json!({"ops": [{"op": "add", "type": "text", "x": 0, "y": 0, "text": "hi"}]}),

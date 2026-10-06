@@ -9,7 +9,7 @@ use support::*;
 fn text_tool_creates_a_measured_text_element_in_one_step() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Text);
-    e.pointer_down(at(100.0, 100.0));
+    e.pointer_down(at(100.0, 100.0), &mut CharWidthMeasure);
     e.pointer_up(at(100.0, 100.0), &mut CharWidthMeasure);
     let editing = e.text_editing().expect("editing").clone();
     assert_eq!(editing.element_id, None);
@@ -30,7 +30,7 @@ fn text_tool_creates_a_measured_text_element_in_one_step() {
 fn committing_empty_new_text_creates_nothing() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Text);
-    e.pointer_down(at(0.0, 0.0));
+    e.pointer_down(at(0.0, 0.0), &mut CharWidthMeasure);
     e.pointer_up(at(0.0, 0.0), &mut CharWidthMeasure);
     assert!(!e.commit_text("", &mut CharWidthMeasure));
     assert!(e.file().elements.is_empty());
@@ -40,12 +40,12 @@ fn committing_empty_new_text_creates_nothing() {
 #[test]
 fn double_click_edits_existing_text_and_empty_deletes_it() {
     let mut e = editor(vec![sample::text("t", [0.0, 0.0, 36.0, 25.0], "old", None)]);
-    assert!(e.double_click(at(10.0, 10.0)));
+    assert!(e.double_click(at(10.0, 10.0), &mut CharWidthMeasure));
     assert_eq!(e.text_editing().unwrap().element_id.as_deref(), Some("t"));
     assert_eq!(e.text_editing().unwrap().text, "old");
     assert!(e.commit_text("longer", &mut CharWidthMeasure));
     assert_eq!(e.file().elements[0].to_value()["width"], json!(6.0 * 12.0));
-    assert!(e.double_click(at(10.0, 10.0)));
+    assert!(e.double_click(at(10.0, 10.0), &mut CharWidthMeasure));
     assert!(e.commit_text("", &mut CharWidthMeasure));
     assert!(e.file().elements[0].is_deleted());
 }
@@ -53,7 +53,7 @@ fn double_click_edits_existing_text_and_empty_deletes_it() {
 #[test]
 fn a_panel_change_during_an_edit_is_applied_and_remeasured_on_commit() {
     let mut e = editor(vec![sample::text("t", [0.0, 0.0, 36.0, 25.0], "old", None)]);
-    assert!(e.double_click(at(10.0, 10.0)));
+    assert!(e.double_click(at(10.0, 10.0), &mut CharWidthMeasure));
 
     e.set_property(Property::FontSize(40.0), &mut CharWidthMeasure);
     e.set_property(
@@ -87,7 +87,7 @@ fn double_click_on_a_container_adds_a_centered_label() {
         "r",
         [0.0, 0.0, 200.0, 100.0],
     )]);
-    assert!(e.double_click(at(100.0, 50.0)));
+    assert!(e.double_click(at(100.0, 50.0), &mut CharWidthMeasure));
     assert_eq!(e.text_editing().unwrap().container_id.as_deref(), Some("r"));
     assert!(e.commit_text("box", &mut CharWidthMeasure));
     let label = e.file().elements[1].to_value();
@@ -103,7 +103,7 @@ fn double_click_on_a_container_adds_a_centered_label() {
 #[test]
 fn double_click_on_empty_canvas_starts_new_text_there() {
     let mut e = editor(vec![]);
-    assert!(e.double_click(at(40.0, 40.0)));
+    assert!(e.double_click(at(40.0, 40.0), &mut CharWidthMeasure));
     assert_eq!(e.text_editing().unwrap().element_id, None);
     assert_eq!(e.text_editing().unwrap().container_id, None);
 }
@@ -111,17 +111,17 @@ fn double_click_on_empty_canvas_starts_new_text_there() {
 #[test]
 fn switching_to_another_tool_while_editing_does_not_lose_or_erase_the_text() {
     let mut e = editor(vec![sample::text("t", [0.0, 0.0, 36.0, 25.0], "old", None)]);
-    assert!(e.double_click(at(10.0, 10.0)));
+    assert!(e.double_click(at(10.0, 10.0), &mut CharWidthMeasure));
 
     // The eraser tool would otherwise delete "t" out from under this edit.
     e.set_tool(Tool::Eraser);
-    e.pointer_down(at(10.0, 10.0));
+    e.pointer_down(at(10.0, 10.0), &mut CharWidthMeasure);
     e.pointer_up(at(10.0, 10.0), &mut CharWidthMeasure);
     assert!(!e.file().elements[0].is_deleted());
 
     // A creation tool would otherwise start drawing a new shape underneath the editor.
     e.set_tool(Tool::Rectangle);
-    e.pointer_down(at(50.0, 50.0));
+    e.pointer_down(at(50.0, 50.0), &mut CharWidthMeasure);
     e.pointer_up(at(80.0, 80.0), &mut CharWidthMeasure);
     assert_eq!(e.file().elements.len(), 1);
 
@@ -140,7 +140,7 @@ fn text_tool_click_far_from_a_containers_center_creates_free_text_not_a_label() 
     e.set_tool(Tool::Text);
     // (20, 20) is inside the rectangle's bounding box but about 85 units from its center
     // (100, 50), well past the 30-unit center-snap threshold.
-    e.pointer_down(at(20.0, 20.0));
+    e.pointer_down(at(20.0, 20.0), &mut CharWidthMeasure);
     e.pointer_up(at(20.0, 20.0), &mut CharWidthMeasure);
     assert_eq!(e.text_editing().unwrap().container_id, None);
     assert!(e.commit_text("free", &mut CharWidthMeasure));
@@ -157,7 +157,7 @@ fn text_tool_click_near_a_containers_center_binds_its_label() {
     )]);
     e.set_tool(Tool::Text);
     // (110, 60) is about 14 units from the center (100, 50), within the threshold.
-    e.pointer_down(at(110.0, 60.0));
+    e.pointer_down(at(110.0, 60.0), &mut CharWidthMeasure);
     e.pointer_up(at(110.0, 60.0), &mut CharWidthMeasure);
     assert_eq!(e.text_editing().unwrap().container_id.as_deref(), Some("r"));
 }
@@ -171,7 +171,7 @@ fn double_click_near_a_transparent_containers_edge_creates_free_text_inheriting_
     // The rectangle's background is transparent (the sample default) and (20, 20) neither
     // hits its outline nor falls within the center-snap threshold, so this must not force a
     // bind the way clicking its actual outline or an opaque fill would.
-    assert!(e.double_click(at(20.0, 20.0)));
+    assert!(e.double_click(at(20.0, 20.0), &mut CharWidthMeasure));
     let editing = e.text_editing().unwrap().clone();
     assert_eq!(editing.container_id, None);
     assert_eq!(editing.element_id, None);
@@ -195,7 +195,7 @@ fn new_ui_label_takes_the_current_item_style_not_the_containers_stroke() {
         &mut CharWidthMeasure,
     );
     e.set_property(Property::Opacity(50.0), &mut CharWidthMeasure);
-    assert!(e.double_click(at(100.0, 50.0)));
+    assert!(e.double_click(at(100.0, 50.0), &mut CharWidthMeasure));
     assert!(e.commit_text("box", &mut CharWidthMeasure));
     let label = e.file().elements[1].to_value();
     assert_eq!(label["strokeColor"], json!("#ff0000"));
@@ -211,10 +211,78 @@ fn new_ui_label_takes_the_current_item_style_not_the_containers_stroke() {
 fn font_size_set_while_editing_applies_to_the_committed_text() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Text);
-    e.pointer_down(at(0.0, 0.0));
+    e.pointer_down(at(0.0, 0.0), &mut CharWidthMeasure);
     e.pointer_up(at(0.0, 0.0), &mut CharWidthMeasure);
     e.set_property(Property::FontSize(36.0), &mut CharWidthMeasure);
     assert_eq!(e.text_editing().unwrap().font_size, 36.0);
     assert!(e.commit_text("hi", &mut CharWidthMeasure));
     assert_eq!(e.file().elements[0].to_value()["fontSize"], json!(36.0));
+}
+
+#[test]
+fn a_new_label_wraps_inside_its_container_and_grows_it() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 100.0, 50.0],
+    )]);
+    assert!(e.double_click(at(50.0, 25.0), &mut CharWidthMeasure));
+    assert_eq!(e.text_editing().unwrap().wrap_width, Some(90.0));
+    assert!(e.commit_text("hello world", &mut CharWidthMeasure));
+    let label = e.file().elements[1].to_value();
+    assert_eq!(label["text"], json!("hello\nworld"));
+    assert_eq!(e.file().elements[0].placement().unwrap().height, 60.0);
+    assert!(e.command(Command::Undo));
+    assert_eq!(e.file().elements[0].placement().unwrap().height, 50.0);
+}
+
+#[test]
+fn editing_a_wrapped_label_starts_from_its_original_text() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 100.0, 50.0],
+    )]);
+    e.double_click(at(50.0, 25.0), &mut CharWidthMeasure);
+    e.commit_text("hello world", &mut CharWidthMeasure);
+    assert!(e.double_click(at(50.0, 30.0), &mut CharWidthMeasure));
+    assert_eq!(e.text_editing().unwrap().text, "hello world");
+    assert_eq!(e.text_editing().unwrap().wrap_width, Some(90.0));
+}
+
+#[test]
+fn a_tiny_container_grows_to_the_minimum_before_editing() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 10.0, 10.0],
+    )]);
+    let before = e.file().clone();
+    assert!(e.double_click(at(5.0, 5.0), &mut CharWidthMeasure));
+    // approx_min_container_size with CharWidthMeasure at fontSize 20: [22, 35].
+    let p = e.file().elements[0].placement().unwrap();
+    assert_eq!([p.width, p.height], [22.0, 35.0]);
+    assert!(!e.commit_text("", &mut CharWidthMeasure));
+    assert_eq!(e.file().elements, before.elements);
+    assert!(!e.command(Command::Undo));
+}
+
+#[test]
+fn growing_a_tiny_container_and_labelling_it_is_one_undo_step() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 10.0, 10.0],
+    )]);
+    e.double_click(at(5.0, 5.0), &mut CharWidthMeasure);
+    assert!(e.commit_text("a", &mut CharWidthMeasure));
+    assert!(e.command(Command::Undo));
+    let p = e.file().elements[0].placement().unwrap();
+    assert_eq!([p.width, p.height], [10.0, 10.0]);
+    assert!(
+        e.file()
+            .elements
+            .iter()
+            .all(|x| x.is_deleted() || x.id() == Some("r"))
+    );
 }

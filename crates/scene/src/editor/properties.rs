@@ -596,11 +596,51 @@ fn apply_property(
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) {
-    let mut next = file.elements[position].clone();
-    let matched = mutate(&mut next, file, property, measure, env);
-    if matched && next != file.elements[position] {
-        file.elements[position] = next;
+    let before = file.elements[position].clone();
+    let mut next = before.clone();
+    let matched = mutate(&mut next, property, measure, env);
+    if !matched {
+        return;
+    }
+    file.elements[position] = next;
+    if matches!(property, Property::FontFamily(_) | Property::FontSize(_)) {
+        rewrap_label(file, position, measure, env);
+    }
+    // `redraw_text_bounding_box` bumps the elements it changed itself; this covers the font
+    // change it was handed.
+    if file.elements[position] != before && file.elements[position].version() == before.version() {
         bump_version(&mut file.elements[position], env);
+    }
+}
+
+/// `redrawTextBoundingBox(element, container)` after `actionChangeFontFamily`/
+/// `actionChangeFontSize` changed the font of the text at `position`: a container's label
+/// (or a standalone text with `autoResize: false`) is rewrapped, and the container grows when
+/// the new font no longer fits. A standalone `autoResize` text was already remeasured by
+/// [`redraw_text`].
+fn rewrap_label(
+    file: &mut SceneFile,
+    position: usize,
+    measure: &mut dyn TextMeasure,
+    env: &mut impl Env,
+) {
+    let Element::Text(t) = &file.elements[position] else {
+        return;
+    };
+    match t.container_id.value() {
+        Some(container_id) => {
+            let container = file
+                .elements
+                .iter()
+                .position(|e| !e.is_deleted() && e.id() == Some(container_id.as_str()));
+            if container.is_some() {
+                bound_text::redraw_text_bounding_box(file, position, container, measure, env);
+            }
+        }
+        None if t.auto_resize == Some(false) => {
+            bound_text::redraw_text_bounding_box(file, position, None, measure, env);
+        }
+        None => {}
     }
 }
 
@@ -641,7 +681,6 @@ fn set_arrowhead(next: &mut Element, start: bool, value: &Option<String>) -> boo
 /// element's kind (it is left untouched, whatever `next` looks like at that point).
 fn mutate(
     next: &mut Element,
-    file: &SceneFile,
     property: &Property,
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
@@ -714,7 +753,7 @@ fn mutate(
                 t.font_family = *family;
                 t.line_height = Some(text::line_height(*family));
             }
-            redraw_text(next, file, measure);
+            redraw_text(next, measure);
             true
         }
         Property::FontSize(size) => {
@@ -724,24 +763,26 @@ fn mutate(
             if let Element::Text(t) = next {
                 t.font_size = *size;
             }
-            redraw_text(next, file, measure);
+            redraw_text(next, measure);
             true
         }
         Property::Opacity(opacity) => mutate_base(next, |b| b.opacity = *opacity),
     }
 }
 
-/// `redrawTextBoundingBox`, without wrapping or growing the container to fit (a bound label is
-/// centred, does not wrap, and overflows when it does not fit, per spec §5.8): remeasures
-/// `next`'s (already-mutated) text at its current font, and repositions it. A container's
-/// label is recentred with [`bound_text::bound_text_position`] (silently left alone when that
-/// returns `None`, e.g. an arrow's label: out of scope there too); a standalone `autoResize`
-/// text keeps its align-appropriate edge fixed horizontally and recentres vertically, as
-/// `offsetElementAfterFontResize` does for `actionChangeFontSize`.
-fn redraw_text(next: &mut Element, file: &SceneFile, measure: &mut dyn TextMeasure) {
+/// The remeasuring half of `redrawTextBoundingBox` for a font change: remeasures `next`'s
+/// (already-mutated) text at its current font, unwrapped. A container's label is then rewrapped
+/// and recentred by [`rewrap_label`]; a standalone `autoResize` text keeps its align-appropriate
+/// edge fixed horizontally and recentres vertically, as `offsetElementAfterFontResize` does for
+/// `actionChangeFontSize`. A standalone text with `autoResize: false` keeps its width and is
+/// left to [`rewrap_label`] entirely.
+fn redraw_text(next: &mut Element, measure: &mut dyn TextMeasure) {
     let Element::Text(text) = next else { return };
-    let container_id = text.container_id.value().cloned();
+    let bound = text.container_id.value().is_some();
     let auto_resize = text.auto_resize;
+    if !bound && auto_resize == Some(false) {
+        return;
+    }
     let text_align = text.text_align.clone();
     let old_width = text.base.width;
     let old_height = text.base.height;
@@ -760,19 +801,7 @@ fn redraw_text(next: &mut Element, file: &SceneFile, measure: &mut dyn TextMeasu
     text.base.width = width;
     text.base.height = height;
 
-    if let Some(container_id) = container_id {
-        let Some(container) = file
-            .elements
-            .iter()
-            .find(|e| !e.is_deleted() && e.id() == Some(container_id.as_str()))
-        else {
-            return;
-        };
-        if let Some([x, y]) = bound_text::bound_text_position(container, text) {
-            text.base.x = x;
-            text.base.y = y;
-        }
-    } else if auto_resize == Some(true) {
+    if !bound && auto_resize == Some(true) {
         let dx = match text_align.as_str() {
             "left" => 0.0,
             "right" => old_width - width,

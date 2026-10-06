@@ -72,14 +72,14 @@ pub fn alt(x: f64, y: f64) -> PointerEvent {
 }
 
 pub fn click(editor: &mut Editor<TestEnv>, event: PointerEvent) {
-    editor.pointer_down(event);
+    editor.pointer_down(event, &mut CharWidthMeasure);
     editor.pointer_up(event, &mut CharWidthMeasure);
 }
 
 /// Presses at `from`, moves to `to` in four equal steps and releases there, keeping `from`'s
 /// modifiers and zoom.
 pub fn drag(editor: &mut Editor<TestEnv>, from: PointerEvent, to: [f64; 2]) {
-    editor.pointer_down(from);
+    editor.pointer_down(from, &mut CharWidthMeasure);
     for step in 1..=4 {
         let t = f64::from(step) / 4.0;
         let at = [
