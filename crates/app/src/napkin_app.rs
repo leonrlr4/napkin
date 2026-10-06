@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
@@ -20,9 +21,11 @@ use crate::control::handler::{self, Session, handle};
 use crate::control::render::Rasterize;
 use crate::control::server::{BindError, Incoming, Server, socket_path};
 use crate::edit_input::{self, EditorInput, PointerCapture};
+use crate::fonts;
 use crate::input::{self, CanvasInput};
 use crate::overlay::{self, OverlayColors};
 use crate::pinch::{PinchListener, PinchTracker};
+use crate::properties_panel::{self, PanelColors};
 use crate::render::callback::{self, CanvasCallback};
 use crate::render::color::render_color;
 use crate::render::gpu::{CanvasFrame, CanvasRenderer};
@@ -30,7 +33,9 @@ use crate::render::offscreen::GpuRasterizer;
 use crate::render::text::FontMeasure;
 use crate::stats::FrameStats;
 use crate::storage::{self, Content};
+use crate::text_edit::{self, TextEditOutcome};
 use crate::theme::{self, Theme};
+use crate::toolbar::{self, ToolbarColors};
 use crate::writer::{SaveJob, SaveWorker};
 
 /// How often a mutating request at the front of the queue re-checks `Editor::is_idle` while a
@@ -132,12 +137,29 @@ pub struct NapkinApp {
     control: Option<Server>,
     /// Requests in arrival order; a mutating one at the front waits for `Editor::is_idle`.
     pending: VecDeque<Incoming>,
-    /// Created on the first request that measures text.
+    /// `Some` once the background scan [`NapkinApp::new`] starts (or a fallback build; see
+    /// [`resolve_measure`]) has produced it. Never built synchronously on this thread at
+    /// startup: a `FontSystem` scans every installed font (spec §6.7's start-to-first-frame
+    /// budget has no room for that), so it is built on a spawned thread instead and picked up
+    /// from `measure_rx` once ready.
     measure: Option<FontMeasure>,
+    /// The other end of the background scan [`NapkinApp::new`] starts; taken (and the scan's
+    /// result installed into `measure`) either by [`NapkinApp::poll_measure`]'s non-blocking
+    /// check each frame, or by [`resolve_measure`] blocking on it the moment something needs a
+    /// `FontMeasure` before that poll has caught up (rare, and only possible in the first
+    /// fraction of a second after startup). `None` in `--bench`, which skips the scan
+    /// altogether, and once `measure` is `Some`.
+    measure_rx: Option<mpsc::Receiver<FontMeasure>>,
     /// The renderer `render` requests draw with (its own format, `offscreen::FORMAT`).
     offscreen: Option<CanvasRenderer>,
     /// The canvas size in points, from the latest laid-out frame.
     canvas_size: [f64; 2],
+    /// The text-edit overlay's live buffer, `Some` for exactly as long as
+    /// `Editor::text_editing()` is: created (from its `text`) the frame editing starts, mutated
+    /// in place by the `TextEdit` widget every frame after, and taken and committed whenever
+    /// editing ends, however it ends (the overlay's own Ctrl+Enter/Escape/blur, a canvas click
+    /// or tool change, losing window focus, or exiting).
+    text_edit_buffer: Option<String>,
 }
 
 /// A [`Rasterize`] for a `render` request that arrives before the first frame has a GPU render
@@ -165,6 +187,32 @@ impl Rasterize for NoGpu {
     ) -> Result<Vec<u8>, String> {
         Err("no GPU".to_string())
     }
+}
+
+/// Makes egui surrender keyboard focus only on a later *press* outside the focused widget,
+/// instead of its default of any *click* (down and up) outside it. `text_edit`'s overlay
+/// `request_focus`es its `TextEdit` the same frame a canvas click creates it; with the default
+/// `SurrenderFocusOn::Clicks`, the release half of that very click already lands outside the
+/// still-empty, zero-width widget and is read as a click outside it, so the overlay would
+/// surrender the focus it was just given and commit an empty string before the user ever typed
+/// anything. A later press elsewhere still surrenders it, which is what actually finishing an
+/// edit by clicking away is supposed to do.
+/// The pointer is over a floating egui area (toolbar, property panel, text-edit overlay,
+/// notices), so a press there must not start a canvas gesture. `Context::is_pointer_over_egui`
+/// does not work for this: the canvas is itself the central panel, which takes the whole root
+/// UI, so that method treats every point of the canvas as "over egui" too.
+fn pointer_over_overlay(ctx: &egui::Context) -> bool {
+    let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
+        return false;
+    };
+    ctx.layer_id_at(pos)
+        .is_some_and(|layer| layer.order != egui::Order::Background)
+}
+
+fn configure_input(ctx: &egui::Context) {
+    ctx.options_mut(|options| {
+        options.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
+    });
 }
 
 /// Binds the control socket, unless `bench` is set (spec §9.3: `--bench` never opens it). `None`
@@ -209,6 +257,25 @@ impl NapkinApp {
         if let Some(render_state) = &cc.wgpu_render_state {
             callback::install(render_state);
         }
+        configure_input(&cc.egui_ctx);
+        // `fonts::egui_family` names families `fonts::install` binds; without registering them
+        // up front, a text edit opened before the scan below finishes would ask egui to lay out
+        // an unbound `FontFamily::Name` and panic. The bundled fonts alone are enough for that
+        // (no system scan needed), so this install is synchronous; `poll_measure` reinstalls
+        // with the system's CJK font once the scan below has one.
+        fonts::install(&cc.egui_ctx, &glyphon::fontdb::Database::new());
+        // Scanning every installed font (`FontSystem::new`, ~0.2s) on this thread would blow
+        // spec §6.7's start-to-first-frame budget, so it runs on a spawned thread instead;
+        // `poll_measure` picks up the result (and only then reinstalls from its own database, so
+        // that scan isn't repeated) once it is ready. `--bench` skips this entirely: nothing it
+        // does ever measures text, and a thread it never joins would only muddy its own timing.
+        let measure_rx = (!bench).then(|| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(FontMeasure::new());
+            });
+            rx
+        });
         let (control, control_notice) = bind_control(cc, bench);
         let notice = control_notice.or(notice);
         let pinch = PinchListener::start(cc)
@@ -264,8 +331,10 @@ impl NapkinApp {
             control,
             pending: VecDeque::new(),
             measure: None,
+            measure_rx,
             offscreen: None,
             canvas_size: [0.0, 0.0],
+            text_edit_buffer: None,
         }
     }
 
@@ -279,6 +348,30 @@ impl NapkinApp {
                 self.autosave.finished(now, Ok(()));
             }
             Err(message) => self.autosave.finished(now, Err(message)),
+        }
+    }
+
+    /// A non-blocking check for the background font scan `NapkinApp::new` started: once it has
+    /// produced a `FontMeasure`, registers its database with `fonts::install` and keeps the
+    /// measure. A no-op every other frame (`measure` already `Some`, the scan not done yet, or
+    /// `--bench`, which never started one). If the scan's thread died without sending anything,
+    /// stops polling it; whatever next needs a `FontMeasure` falls back to building one directly
+    /// (see [`resolve_measure`]).
+    fn poll_measure(&mut self, ctx: &egui::Context) {
+        if self.measure.is_some() {
+            return;
+        }
+        let Some(rx) = &self.measure_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(mut measure) => {
+                fonts::install(ctx, measure.db_mut());
+                self.measure = Some(measure);
+                self.measure_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.measure_rx = None,
         }
     }
 
@@ -326,7 +419,7 @@ impl NapkinApp {
             let unsaved = self.autosave.has_unsaved_changes(editor.revision());
             let mut no_measure = NoMeasure;
             let measure: &mut dyn TextMeasure = if handler::is_mutating(&incoming.request) {
-                self.measure.get_or_insert_with(FontMeasure::new)
+                resolve_measure(&mut self.measure, &mut self.measure_rx, Some(ctx))
             } else {
                 &mut no_measure
             };
@@ -378,20 +471,6 @@ fn ctrl_k_just_pressed(events: &[egui::Event]) -> bool {
             } if modifiers.command
         )
     })
-}
-
-/// The tool's lowercase name, as shown above the canvas.
-fn tool_label(tool: Tool) -> &'static str {
-    match tool {
-        Tool::Selection => "selection",
-        Tool::Hand => "hand",
-        Tool::Rectangle => "rectangle",
-        Tool::Diamond => "diamond",
-        Tool::Ellipse => "ellipse",
-        Tool::Arrow => "arrow",
-        Tool::Line => "line",
-        Tool::Freedraw => "freedraw",
-    }
 }
 
 /// `file`'s stored view, when its `scrollX`/`scrollY`/`zoom` are all finite and `zoom` is
@@ -472,11 +551,13 @@ fn camera_view(camera: Camera) -> NapkinView {
 }
 
 /// Whether a reload check queued by a focus gain ([`NapkinApp::reload_check_pending`]) should
-/// run this frame: only once no save is in flight. A pending check that finds a save running
-/// stays pending instead of being dropped, so the caller must keep asking (by requesting a
-/// repaint) until this returns `true`.
-fn reload_check_ready(pending: bool, saving: bool) -> bool {
-    pending && !saving
+/// run this frame: only once no save is in flight and no text edit is in progress (running it
+/// mid-edit could call `Editor::replace_file` out from under the element being edited, dropping
+/// the in-progress buffer with no way to recover it). A pending check that finds either stays
+/// pending instead of being dropped, so the caller must keep asking (by requesting a repaint)
+/// until this returns `true`.
+fn reload_check_ready(pending: bool, saving: bool, editing: bool) -> bool {
+    pending && !saving && !editing
 }
 
 /// Spec §5.6: reload when the file on disk changed since napkin last read or wrote it, no
@@ -500,6 +581,52 @@ pub fn should_reload(
 /// again: nothing on disk is left to protect, and the next save recreates the file.
 pub fn should_clear_unreadable(unreadable: bool, disk_mtime: Option<SystemTime>) -> bool {
     unreadable && disk_mtime.is_none()
+}
+
+/// `measure`, building it first if `NapkinApp::poll_measure` has not already: blocks on
+/// `measure_rx`'s background scan if there is one still running (only possible in the first
+/// fraction of a second after startup, before any frame's `poll_measure` had the chance to pick
+/// it up), or builds a fresh one on this thread if there is no scan to wait for (`--bench`, or
+/// the scan's thread having died). `ctx` gets `fonts::install`'d from whatever measure this
+/// resolves to, the same as `poll_measure` would have; `None` when there is no frame in progress
+/// to install into (`on_exit`, where it would be moot anyway).
+fn resolve_measure<'a>(
+    measure: &'a mut Option<FontMeasure>,
+    measure_rx: &mut Option<mpsc::Receiver<FontMeasure>>,
+    ctx: Option<&egui::Context>,
+) -> &'a mut FontMeasure {
+    if measure.is_none() {
+        let mut built = measure_rx
+            .take()
+            .and_then(|rx| rx.recv().ok())
+            .unwrap_or_default();
+        if let Some(ctx) = ctx {
+            fonts::install(ctx, built.db_mut());
+        }
+        *measure = Some(built);
+    }
+    measure.as_mut().expect("just ensured Some")
+}
+
+/// Ends a text edit in progress by committing `buffer`'s current contents, if there is one: a
+/// no-op once `editor.text_editing()` is already `None`, so every caller below can run this
+/// unconditionally instead of checking first. Takes each field it needs rather than `&mut self`
+/// so it can run from inside a loop that already holds `self.editor` borrowed mutably.
+fn commit_pending_text_edit(
+    editor: &mut Editor<SystemEnv>,
+    buffer: &mut Option<String>,
+    measure: &mut Option<FontMeasure>,
+    measure_rx: &mut Option<mpsc::Receiver<FontMeasure>>,
+    ctx: Option<&egui::Context>,
+) {
+    if editor.text_editing().is_none() {
+        return;
+    }
+    let Some(text) = buffer.take() else {
+        return;
+    };
+    let measure = resolve_measure(measure, measure_rx, ctx);
+    editor.commit_text(&text, measure);
 }
 
 impl eframe::App for NapkinApp {
@@ -533,8 +660,17 @@ impl eframe::App for NapkinApp {
         };
         // An in-progress multi-point line's cursor-following point is already in `file` but
         // not yet reflected in `revision`; without this, exiting would either save that
-        // uncommitted point as if confirmed, or drop it entirely (spec §8).
+        // uncommitted point as if confirmed, or drop it entirely (spec §8). A text edit in
+        // progress needs the same treatment: `finish_pending_gesture` does not touch it, so it
+        // is committed here directly instead of being dropped.
         editor.finish_pending_gesture();
+        commit_pending_text_edit(
+            editor,
+            &mut self.text_edit_buffer,
+            &mut self.measure,
+            &mut self.measure_rx,
+            None,
+        );
         let path = self.path.clone().expect("a writer implies a save path");
         let view = camera_view(camera);
         let state = DocumentState {
@@ -557,6 +693,7 @@ impl eframe::App for NapkinApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let frame_start = Instant::now();
         self.stats.frame_started(frame_start);
+        self.poll_measure(ui.ctx());
 
         if let Some(control) = &self.control {
             while let Some(incoming) = control.try_recv() {
@@ -758,14 +895,16 @@ impl eframe::App for NapkinApp {
                         // Regaining focus: reread the file if it changed while napkin was away
                         // and nothing here would be lost (spec §5.6). The camera does not
                         // move; a failed reparse stops input and saving until a later reload
-                        // succeeds. A save in flight when focus returns defers the check
-                        // (`reload_check_pending` stays set) instead of skipping it outright,
-                        // and asks for a repaint so it runs again once the save finishes,
-                        // rather than waiting for the next focus gain and letting that save
-                        // (or the next autosave) overwrite the external change unnoticed.
+                        // succeeds. A save in flight, or a text edit in progress, when focus
+                        // returns defers the check (`reload_check_pending` stays set) instead of
+                        // skipping it outright, and asks for a repaint so it runs again once
+                        // that finishes, rather than waiting for the next focus gain and letting
+                        // that save (or the next autosave) overwrite the external change
+                        // unnoticed, or `replace_file` dropping the edit in progress.
                         if let Some(path) = self.path.clone() {
                             let saving = self.autosave.in_flight();
-                            if reload_check_ready(self.reload_check_pending, saving) {
+                            let editing = editor.text_editing().is_some();
+                            if reload_check_ready(self.reload_check_pending, saving, editing) {
                                 self.reload_check_pending = false;
                                 let disk_mtime = storage::modified(&path).unwrap_or_else(|error| {
                                     eprintln!("napkin: {}: {error}", path.display());
@@ -811,15 +950,56 @@ impl eframe::App for NapkinApp {
                                 keyboard_taken: ui.ctx().egui_wants_keyboard_input(),
                                 focused: self.focused,
                                 super_held,
+                                pointer_over_ui: pointer_over_overlay(ui.ctx()),
+                                double_clicked: ui.input(|i| {
+                                    i.pointer
+                                        .button_double_clicked(egui::PointerButton::Primary)
+                                }),
                             };
                             for action in edit_input::translate(&frame_input, &mut self.capture) {
                                 match action {
-                                    EditorInput::Down(event) => editor.pointer_down(event),
+                                    EditorInput::Down(event) => {
+                                        // A click on the canvas while editing text ends that
+                                        // edit first (its own commit paths never run: the click
+                                        // reached here instead of the overlay's `TextEdit`
+                                        // because `pointer_over_ui` was false), then proceeds
+                                        // as this tool's own pointer-down would otherwise.
+                                        commit_pending_text_edit(
+                                            editor,
+                                            &mut self.text_edit_buffer,
+                                            &mut self.measure,
+                                            &mut self.measure_rx,
+                                            Some(ui.ctx()),
+                                        );
+                                        editor.pointer_down(event);
+                                    }
                                     EditorInput::Move(event) => editor.pointer_move(event),
                                     EditorInput::Up(event) => editor.pointer_up(event),
                                     EditorInput::Tool(tool) => editor.set_tool(tool),
                                     EditorInput::Command(command) => {
                                         editor.command(command);
+                                    }
+                                    EditorInput::Copy => {
+                                        if let Some(text) = editor.copy_selection() {
+                                            ui.ctx().copy_text(text);
+                                        }
+                                    }
+                                    EditorInput::Paste(text) => {
+                                        let at = self.capture.last().unwrap_or_else(|| {
+                                            camera.view_to_scene([
+                                                self.canvas_size[0] / 2.0,
+                                                self.canvas_size[1] / 2.0,
+                                            ])
+                                        });
+                                        let measure = resolve_measure(
+                                            &mut self.measure,
+                                            &mut self.measure_rx,
+                                            Some(ui.ctx()),
+                                        );
+                                        editor.paste(&text, at, measure);
+                                    }
+                                    EditorInput::DoubleClick(event) => {
+                                        editor.double_click(event);
                                     }
                                 }
                             }
@@ -856,8 +1036,17 @@ impl eframe::App for NapkinApp {
                             // See `on_exit`'s identical comment: a multi-point line's follow
                             // point must be committed before a focus-loss save, or the save
                             // would either capture that uncommitted point as if confirmed, or,
-                            // if nothing else changed, miss it entirely.
+                            // if nothing else changed, miss it entirely. A text edit in progress
+                            // needs the same treatment, since `finish_pending_gesture` does not
+                            // touch it.
                             editor.finish_pending_gesture();
+                            commit_pending_text_edit(
+                                editor,
+                                &mut self.text_edit_buffer,
+                                &mut self.measure,
+                                &mut self.measure_rx,
+                                Some(ui.ctx()),
+                            );
                         }
                         let view = camera_view(camera_for_requests);
                         let state = DocumentState {
@@ -924,6 +1113,25 @@ impl eframe::App for NapkinApp {
                     pixels_per_point,
                     dark: self.theme.dark,
                     generation: self.generation,
+                    faded: Arc::new(
+                        self.editor
+                            .as_ref()
+                            .expect(EDITOR_INVARIANT)
+                            .pending_erasure()
+                            .clone(),
+                    ),
+                    // The text element being edited is hidden once the text-edit overlay
+                    // renders it as an egui `TextEdit` instead; empty while typing a brand new
+                    // text or label, which has no element yet to hide.
+                    hidden: Arc::new(
+                        self.editor
+                            .as_ref()
+                            .expect(EDITOR_INVARIANT)
+                            .text_editing()
+                            .and_then(|editing| editing.element_id.clone())
+                            .into_iter()
+                            .collect(),
+                    ),
                 };
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                     response.rect,
@@ -940,15 +1148,80 @@ impl eframe::App for NapkinApp {
                         colors,
                     ));
 
-                    egui::Area::new(egui::Id::new("napkin-current-tool"))
-                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 8.0))
-                        .show(ui.ctx(), |ui| {
-                            ui.small(tool_label(editor.tool()));
-                        });
+                    match editor.text_editing() {
+                        // No stale buffer can survive whatever ended editing without going
+                        // through `commit_pending_text_edit` itself (a reload, were one ever to
+                        // land here while editing despite `reload_check_ready` now refusing
+                        // that; a future editor-side reset) to seed a later, unrelated edit.
+                        None => self.text_edit_buffer = None,
+                        Some(editing) if self.unreadable.is_none() => {
+                            let editing = editing.clone();
+                            let first_frame = self.text_edit_buffer.is_none();
+                            let buffer = self
+                                .text_edit_buffer
+                                .get_or_insert_with(|| editing.text.clone());
+                            let outcome = text_edit::show(
+                                ui,
+                                &editing,
+                                buffer,
+                                camera,
+                                response.rect.min,
+                                self.theme.dark,
+                                first_frame,
+                            );
+                            if matches!(outcome, TextEditOutcome::Commit(_)) {
+                                commit_pending_text_edit(
+                                    editor,
+                                    &mut self.text_edit_buffer,
+                                    &mut self.measure,
+                                    &mut self.measure_rx,
+                                    Some(ui.ctx()),
+                                );
+                            }
+                        }
+                        Some(_) => {}
+                    }
+
+                    let toolbar_colors = ToolbarColors::from_theme(&self.theme);
+                    // An unreadable file blocks every other edit (see the pointer/keyboard
+                    // gate above); the toolbar still draws so the current tool stays visible,
+                    // but a click must not change it.
+                    if let Some(tool) = toolbar::show(ui.ctx(), editor.tool(), toolbar_colors)
+                        && self.unreadable.is_none()
+                    {
+                        // A tool change ends a text edit in progress rather than abandoning it
+                        // (the toolbar itself is a click the canvas never sees, so the usual
+                        // click-commits-first path above never runs for it).
+                        commit_pending_text_edit(
+                            editor,
+                            &mut self.text_edit_buffer,
+                            &mut self.measure,
+                            &mut self.measure_rx,
+                            Some(ui.ctx()),
+                        );
+                        editor.set_tool(tool);
+                    }
+
+                    let panel_colors = PanelColors::from_theme(&self.theme);
+                    let panel_state = editor.panel();
+                    if let Some(property) = properties_panel::show(
+                        ui.ctx(),
+                        &panel_state,
+                        panel_colors,
+                        self.theme.dark,
+                    ) && self.unreadable.is_none()
+                    {
+                        let measure = resolve_measure(
+                            &mut self.measure,
+                            &mut self.measure_rx,
+                            Some(ui.ctx()),
+                        );
+                        editor.set_property(property, measure);
+                    }
 
                     if let Some(message) = &self.unreadable {
                         egui::Area::new(egui::Id::new("napkin-unreadable"))
-                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 28.0))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 52.0))
                             .show(ui.ctx(), |ui| {
                                 ui.colored_label(egui::Color32::RED, message);
                             });
@@ -1058,6 +1331,55 @@ mod tests {
     use super::*;
     use crate::camera::MAX_ZOOM;
 
+    /// One headless frame shaped like `NapkinApp::ui`: a central panel whose canvas widget takes
+    /// the whole window, and a small `egui::Area` (the toolbar) over its top-left corner.
+    fn run_canvas_with_toolbar(ctx: &egui::Context, pointer: egui::Pos2) -> bool {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events: vec![egui::Event::PointerMoved(pointer)],
+            ..Default::default()
+        };
+        let mut over = false;
+        let mut output = ctx.run_ui(raw, |ui| {
+            over = pointer_over_overlay(ui.ctx());
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            });
+            egui::Area::new(egui::Id::new("toolbar"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.allocate_exact_size(egui::vec2(100.0, 40.0), egui::Sense::click());
+                });
+        });
+        output.textures_delta.clear();
+        over
+    }
+
+    #[test]
+    fn only_floating_areas_count_as_ui_over_the_canvas() {
+        let ctx = egui::Context::default();
+        // Layer rects are known from the previous frame, as they are in the running app.
+        run_canvas_with_toolbar(&ctx, egui::pos2(400.0, 300.0));
+        assert!(
+            !run_canvas_with_toolbar(&ctx, egui::pos2(400.0, 300.0)),
+            "the canvas itself is not UI covering the canvas"
+        );
+        assert!(run_canvas_with_toolbar(&ctx, egui::pos2(20.0, 20.0)));
+    }
+
+    #[test]
+    fn configure_input_surrenders_focus_only_on_a_press() {
+        let ctx = egui::Context::default();
+        configure_input(&ctx);
+        assert_eq!(
+            ctx.options(|options| options.input_options.surrender_focus_on),
+            egui::SurrenderFocusOn::Presses
+        );
+    }
+
     #[test]
     fn ctrl_k_ignores_key_repeat_but_not_a_fresh_press() {
         let key_event =
@@ -1094,12 +1416,21 @@ mod tests {
 
     #[test]
     fn reload_check_waits_out_an_in_flight_save() {
-        assert!(!reload_check_ready(false, false), "nothing pending");
+        assert!(!reload_check_ready(false, false, false), "nothing pending");
         assert!(
-            !reload_check_ready(true, true),
+            !reload_check_ready(true, true, false),
             "a save is running; stay pending and try again next frame"
         );
-        assert!(reload_check_ready(true, false));
+        assert!(reload_check_ready(true, false, false));
+    }
+
+    #[test]
+    fn reload_check_waits_out_a_text_edit_in_progress() {
+        assert!(
+            !reload_check_ready(true, false, true),
+            "a text edit is in progress; stay pending and try again next frame"
+        );
+        assert!(reload_check_ready(true, false, false));
     }
 
     #[test]

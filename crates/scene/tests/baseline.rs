@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use scene::batch::add_elements;
 use scene::color::{apply_dark_mode_filter, is_transparent};
+use scene::duplicate::{DuplicateMode, duplicate_elements};
 use scene::editor::{ArrowType, EdgeStyle, ItemStyle};
 use scene::element::{Element, Roundness, StrokeOptions};
 use scene::env::Env;
@@ -16,11 +17,13 @@ use scene::new_element::{
     ElementProps, GenericKind, TextProps, new_arrow_element, new_freedraw_element,
     new_generic_element, new_line_element, new_text_element,
 };
-use scene::sample::CharWidthMeasure;
+use scene::sample::{self, CharWidthMeasure};
+use scene::selection::Selection;
 use scene::shape::{
     ElementShape, PathOp, ShapeContext, freedraw_outline_points, generate_element_shape,
     generate_rough_options,
 };
+use scene::zindex::{self, Direction};
 use serde_json::{Value, json};
 use testkit::rough_json::{drawable_value, options_value};
 use testkit::{Case, check_group, num, numbers, point_value, points_from, throws};
@@ -214,6 +217,73 @@ fn fractional_index() {
     });
 }
 
+/// A complete rectangle (or `t`'s text label, or the `frame1` frame) element for the zindex
+/// cases, mirroring `tools/baseline/scene/generate.mjs`'s `zindexElement`: `g1`/`g2` are in
+/// group `"G"`, `t` is `r`'s bound label, `del`/`fbDel` are soft-deleted, `frame1` is a `frame`
+/// element, `fa`/`fb`/`fbDel` are its children, and every other field but `index` (`a0`, `a1`,
+/// ... in array order) is a fixed default. Built from `sample`'s full-field JSON so it loads as
+/// a typed element, not `Raw` (`frame1` is the one exception: napkin has no typed frame
+/// element, so it falls back to `Raw` the same way it would loading a real `.excalidraw` file).
+fn zindex_element(id: &str, position: usize) -> Value {
+    let mut value = if id == "t" {
+        sample::text(id, [0.0, 0.0, 10.0, 10.0], "hi", Some("r"))
+    } else {
+        sample::generic("rectangle", id, [0.0, 0.0, 10.0, 10.0])
+    };
+    value["index"] = json!(format!("a{position}"));
+    value["version"] = json!(1);
+    value["versionNonce"] = json!(0);
+    value["updated"] = json!(1);
+    if id == "g1" || id == "g2" {
+        value["groupIds"] = json!(["G"]);
+    }
+    if id == "del" || id == "fbDel" {
+        value["isDeleted"] = json!(true);
+    }
+    if id == "r" {
+        value["boundElements"] = json!([{"id": "t", "type": "text"}]);
+    }
+    if matches!(id, "fa" | "fb" | "fbDel") {
+        value["frameId"] = json!("frame1");
+    }
+    if id == "frame1" {
+        value["type"] = json!("frame");
+    }
+    value
+}
+
+#[test]
+fn zindex() {
+    check_group(&dir(), "zindex", |case| {
+        let ids: Vec<&str> = case.args[0]
+            .as_array()
+            .expect("ids")
+            .iter()
+            .map(|v| v.as_str().expect("id"))
+            .collect();
+        let selected: Vec<&str> = case.args[1]
+            .as_array()
+            .expect("selected")
+            .iter()
+            .map(|v| v.as_str().expect("id"))
+            .collect();
+        let direction = match case.args[2].as_str().expect("direction") {
+            "left" => Direction::Left,
+            "right" => Direction::Right,
+            other => panic!("unknown direction {other}"),
+        };
+        let elements: Vec<Element> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| element_from(&zindex_element(id, i)))
+            .collect();
+        let selection = Selection::from_ids(selected);
+        let result =
+            zindex::move_one(&elements, &selection, direction, &mut FixedEnv).unwrap_or(elements);
+        index_summary(&result)
+    });
+}
+
 #[test]
 fn colors() {
     check_group(&dir(), "colors", |case| {
@@ -338,7 +408,9 @@ fn freedraw_outline() {
 }
 
 /// `generate.mjs`'s `normalizeSkeletonOutput`: drops `seed` and `versionNonce`, renames ids to
-/// `e<position>` in order, references included.
+/// `e<position>` in order (references included), and renames every `groupId` to `g<n>`
+/// (1-based) in first-occurrence order, scanning each element's own `groupIds` in the same
+/// output-order pass. Shared by the `skeleton` and `duplicate` groups.
 fn normalize_skeleton_output(elements: &[Element]) -> Value {
     let values: Vec<Value> = elements.iter().map(Element::to_value).collect();
     let rename: HashMap<String, String> = values
@@ -353,6 +425,15 @@ fn normalize_skeleton_output(elements: &[Element]) -> Value {
                 .cloned()
                 .unwrap_or_default()
         )
+    };
+    let mut group_rename: HashMap<String, String> = HashMap::new();
+    let mut group_id = |raw: &str| -> String {
+        if let Some(existing) = group_rename.get(raw) {
+            return existing.clone();
+        }
+        let name = format!("g{}", group_rename.len() + 1);
+        group_rename.insert(raw.to_owned(), name.clone());
+        name
     };
     Value::Array(
         values
@@ -373,6 +454,13 @@ fn normalize_skeleton_output(elements: &[Element]) -> Value {
                 for key in ["startBinding", "endBinding"] {
                     if let Some(binding) = map.get_mut(key).filter(|b| b.is_object()) {
                         binding["elementId"] = id(&binding["elementId"]);
+                    }
+                }
+                if let Some(Value::Array(group_ids)) = map.get_mut("groupIds") {
+                    for g in group_ids.iter_mut() {
+                        if let Some(s) = g.as_str() {
+                            *g = json!(group_id(s));
+                        }
                     }
                 }
                 v
@@ -423,5 +511,40 @@ fn skeleton() {
         )
         .unwrap_or_else(|errors| panic!("{errors:?}"));
         normalize_skeleton_output(&file.elements)
+    });
+}
+
+#[test]
+fn duplicate() {
+    check_group(&dir(), "duplicate", |case| {
+        let elements: Vec<Element> = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .cloned()
+            .map(Element::from_value)
+            .collect();
+        let ids: Vec<String> = case.args[1]
+            .as_array()
+            .expect("ids")
+            .iter()
+            .map(|v| v.as_str().expect("id").to_owned())
+            .collect();
+        let selection = Selection::from_ids(ids);
+        let mode = match case.args[2].as_str().expect("mode") {
+            "in-place" => DuplicateMode::InPlace {
+                offset: [
+                    scene::duplicate::DEFAULT_GRID_SIZE / 2.0,
+                    scene::duplicate::DEFAULT_GRID_SIZE / 2.0,
+                ],
+            },
+            "everything" => DuplicateMode::Everything,
+            other => panic!("unknown mode {other}"),
+        };
+        let mut env = DistinctIdEnv::default();
+        let mut duplicated = duplicate_elements(&elements, &selection, mode, &mut env);
+        let moved: HashSet<String> = duplicated.new_ids.iter().cloned().collect();
+        sync_moved_indices(&mut duplicated.elements, &moved, &mut env);
+        normalize_skeleton_output(&duplicated.elements)
     });
 }

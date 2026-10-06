@@ -1,6 +1,6 @@
 mod support;
 
-use scene::editor::{Command, Tool};
+use scene::editor::{Command, Property, Tool};
 use scene::sample::{self, CharWidthMeasure};
 use serde_json::json;
 
@@ -69,6 +69,37 @@ fn deleting_a_selected_element_drops_it_from_the_selection() {
         )
         .unwrap();
     assert!(editor.selection().is_empty());
+}
+
+#[test]
+fn a_batch_uses_the_default_style_not_the_panels_current_picks() {
+    let mut editor = editor(vec![]);
+    editor.set_property(
+        Property::StrokeColor("#ff0000".into()),
+        &mut CharWidthMeasure,
+    );
+    editor.set_property(Property::Roughness(0.0), &mut CharWidthMeasure);
+
+    let report = editor
+        .apply_batch(
+            &json!({"ops": [
+                {"op": "add", "type": "rectangle", "id": "a", "x": 0, "y": 0, "width": 50, "height": 50},
+            ]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    assert_eq!(report.added.len(), 1);
+    let value = editor.file().elements[0].to_value();
+    assert_eq!(
+        value["strokeColor"],
+        json!("#1e1e1e"),
+        "must use ItemStyle::default, not the panel's #ff0000"
+    );
+    assert_eq!(
+        value["roughness"],
+        json!(1.0),
+        "must use ItemStyle::default, not the panel's 0"
+    );
 }
 
 #[test]

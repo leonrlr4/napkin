@@ -271,6 +271,27 @@ export const indexScenarios = [
   ["movedWrong", ["a0", "a1", "a1V", "a1"], [0]],
 ];
 
+/**
+ * [case name, elements, selected ids, "left" | "right"] for moveOneLeft/moveOneRight.
+ * `frame1` is a `frame` element; `fa`/`fb`/`fbDel` are its children (`frameId: "frame1"`,
+ * `fbDel` also `isDeleted: true`); every other id is a plain rectangle.
+ */
+export const zindexCases = [
+  ["right/middle", ["a", "b", "c"], ["b"], "right"],
+  ["left/middle", ["a", "b", "c"], ["b"], "left"],
+  ["right/top", ["a", "b", "c"], ["c"], "right"],
+  ["right/twoApart", ["a", "b", "c", "d", "e"], ["a", "c"], "right"],
+  ["left/block", ["a", "b", "c", "d"], ["c", "d"], "left"],
+  ["right/group", ["a", "g1", "g2", "b"], ["g1", "g2"], "right"],
+  ["right/withLabel", ["r", "t", "x"], ["r"], "right"],
+  ["right/skipsDeleted", ["a", "del", "b"], ["a"], "right"],
+  // Selecting the frame itself moves it and every child, including a deleted one, as a block.
+  ["right/frameMovesWithDeletedChild", ["out1", "frame1", "fa", "fbDel", "out2"], ["frame1"], "right"],
+  // Selecting a lone child restricts the target search to the frame's own children, jumping
+  // over a non-child element sitting between them.
+  ["right/withinFrameSkipsOutsider", ["frame1", "fa", "mid", "fb"], ["fa"], "right"],
+];
+
 /** [case name, newElement.ts function, opts]; id and seed are fixed, everything else defaults. */
 export const newElementCalls = [
   ["rectangle/defaults", "newElement", { type: "rectangle", id: "r1", seed: 5, x: 10, y: 20 }],
@@ -341,4 +362,55 @@ export const skeletonBatches = [
     { type: "ellipse", id: "dot", x: 0, y: 0, width: 0.5, height: 20 },
     { type: "arrow", x: 50, y: 10, points: [[0, 0], [-45, 0]], end: { id: "dot" } },
   ]],
+];
+
+/** A bound text label's full field set, matching `element("text", ...)`'s shape. */
+function label(overrides) {
+  return element("text", {
+    text: "hi", fontSize: 20, fontFamily: 5, textAlign: "center", verticalAlign: "middle",
+    containerId: null, originalText: "hi", autoResize: true, lineHeight: 1.25,
+    ...overrides,
+  });
+}
+
+/**
+ * [case name, elements, ids of elements to duplicate, "in-place" | "everything"] for
+ * `duplicateElements`. `generate.mjs` runs each case with `randomizeSeed: true` and, for
+ * "in-place", `appState.selectedGroupIds` derived from the given ids (a group counts as
+ * selected when every one of its members is in `ids`) and `overrides` adding
+ * `DEFAULT_GRID_SIZE / 2` to `x`/`y` (`actionDuplicateSelection`).
+ */
+export const duplicateCases = [
+  ["singleRectangleInPlace", [element("rectangle", { id: "r" })], ["r"], "in-place"],
+  ["labeledContainerDuplicatesItsLabel", [
+    element("rectangle", { id: "r", boundElements: [{ id: "t", type: "text" }] }),
+    label({ id: "t", containerId: "r" }),
+  ], ["r"], "in-place"],
+  ["arrowOnlySelectedDropsItsBindings", [
+    element("rectangle", { id: "r1" }),
+    element("rectangle", { id: "r2", x: 200 }),
+    linear("arrow", [[0, 0], [70, 0]], {
+      id: "a", x: 130, y: 30,
+      startBinding: { elementId: "r1", focus: 0, gap: 5 },
+      endBinding: { elementId: "r2", focus: 0, gap: 5 },
+    }),
+  ], ["a"], "in-place"],
+  ["arrowAndBothTargetsSelectedRebindsToTheCopies", [
+    element("rectangle", { id: "r1", boundElements: [{ id: "a", type: "arrow" }] }),
+    element("rectangle", { id: "r2", x: 200, boundElements: [{ id: "a", type: "arrow" }] }),
+    linear("arrow", [[0, 0], [70, 0]], {
+      id: "a", x: 130, y: 30,
+      startBinding: { elementId: "r1", focus: 0, gap: 5 },
+      endBinding: { elementId: "r2", focus: 0, gap: 5 },
+    }),
+  ], ["r1", "r2", "a"], "in-place"],
+  ["fullySelectedGroupDuplicatesTogetherUnderANewGroupId", [
+    element("rectangle", { id: "g1", groupIds: ["g"] }),
+    element("rectangle", { id: "g2", x: 50, groupIds: ["g"] }),
+  ], ["g1", "g2"], "in-place"],
+  ["everythingDuplicatesEveryElementInOrder", [
+    element("rectangle", { id: "r", boundElements: [{ id: "t", type: "text" }] }),
+    label({ id: "t", containerId: "r" }),
+    element("ellipse", { id: "e", x: 300 }),
+  ], null, "everything"],
 ];

@@ -162,7 +162,11 @@ fn hit_point(
 }
 
 pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
-    if editor.tool != Tool::Selection {
+    // A double click that started editing an existing text (or its container's label) leaves
+    // `tool` at `Tool::Selection`, unlike the text tool's own pointer-down: without this check
+    // a stray click while that edit is still open would start an ordinary selection gesture
+    // underneath it.
+    if editor.tool != Tool::Selection || editor.text_editing.is_some() {
         return;
     }
 

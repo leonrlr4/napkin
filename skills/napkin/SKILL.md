@@ -163,20 +163,16 @@ line breaks"` — napkin doesn't wrap text or resize the box for you, so widen i
 ]}
 ```
 
-## Layout conventions
+## Layout and design
 
-Rough character width to plan box sizes before rendering (napkin doesn't wrap or resize
-for you): about `0.55 x fontSize` per Latin character, about `1 x fontSize` for CJK.
-Default `fontSize` is 20. Give a labeled box at least `text width + 40` for its own width,
-and 60-80 height for a single line of text. Space sibling shapes 60-100 px apart. Keep
-coordinates on multiples of 20. Lay out a main flow left-to-right or top-to-bottom. Start
-an arrow 6-10 px outside the source shape's edge and end it 6-10 px before the target's
-edge, and bind both ends with `start`/`end` rather than relying on the coordinates alone.
+Before drawing anything bigger than a couple of shapes, read `design.md` in this skill's
+directory (`~/.claude/skills/napkin/design.md`) and follow it: decide what the picture must
+say, pick the structure that matches it, plan coordinates on a 20 px grid before the first
+`apply`, and use type size and a small palette for hierarchy instead of more boxes.
 
-For color, pick from Excalidraw's own palette and keep `fillStyle: "solid"`: blue
-`#1971c2` / `#a5d8ff`, green `#2f9e44` / `#b2f2bb`, red `#e03131` / `#ffc9c9`, yellow
-`#f08c00` / `#ffec99`, purple `#6741d9` / `#d0bfff` (stroke / background). Don't use more
-than three colors in one drawing.
+Plan box sizes from text width, since napkin doesn't wrap or resize for you: about
+`0.55 x fontSize` per Latin character, about `1 x fontSize` for CJK. Give a labeled box at
+least `text width + 40` for its width.
 
 ## Pacing
 

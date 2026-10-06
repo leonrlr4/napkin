@@ -38,6 +38,8 @@ fn prepare_only(file: scene::SceneFile, camera: Camera, size_px: [u32; 2], pixel
         pixels_per_point,
         dark: false,
         generation: 0,
+        faded: std::sync::Arc::new(std::collections::HashSet::new()),
+        hidden: std::sync::Arc::new(std::collections::HashSet::new()),
     };
     let prepared = renderer.prepare(&device, &queue, &frame);
     queue.submit(prepared);
@@ -325,9 +327,28 @@ fn invalid_text_metrics_do_not_panic_or_hang() {
             sample::text("t", [0.0, 0.0, 100.0, 25.0], "text", None),
             overrides,
         );
-        let file = sample::file(vec![text]);
+        let file = std::sync::Arc::new(sample::file(vec![text]));
+        // Device creation and `CanvasRenderer::new`'s cosmic-text font scan happen before the
+        // timer starts: with the workspace's GPU tests serialized on `support::GPU` and each of
+        // them paying for its own font scan, that setup alone can already take longer than 5s
+        // when several test binaries run in parallel. Only `prepare`, the call a regression
+        // could make hang forever, is what the timer needs to cover.
+        let (_gpu, device, queue) = support::gpu();
+        let mut renderer = CanvasRenderer::new(&device, &queue, support::FORMAT);
+        let frame = CanvasFrame {
+            file,
+            camera: Camera::default(),
+            size_px: [200, 100],
+            pixels_per_point: 1.0,
+            dark: false,
+            generation: 0,
+            faded: std::sync::Arc::new(std::collections::HashSet::new()),
+            hidden: std::sync::Arc::new(std::collections::HashSet::new()),
+        };
         assert_finishes_within(std::time::Duration::from_secs(5), move || {
-            prepare_only(file, Camera::default(), [200, 100], 1.0);
+            let prepared = renderer.prepare(&device, &queue, &frame);
+            queue.submit(prepared);
+            device.poll(wgpu::PollType::wait_indefinitely()).ok();
         });
         // Each case above uses its own thread and file; `label` documents which one a failure
         // came from when `cargo test` reports which closure's assertion tripped.

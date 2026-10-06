@@ -3,8 +3,10 @@
 
 pub mod batch;
 pub mod binding;
+pub mod clipboard;
 pub mod collision;
 pub mod color;
+pub mod duplicate;
 pub mod edit;
 pub mod editor;
 pub mod element;
@@ -22,6 +24,7 @@ pub mod selection;
 pub mod shape;
 pub mod text;
 pub mod transform;
+pub mod zindex;
 
 pub use crate::element::{Element, Placement};
 pub use crate::file::SceneFile;

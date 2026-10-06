@@ -98,7 +98,15 @@ pub(super) struct FreedrawState {
 }
 
 pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
-    if matches!(editor.tool, Tool::Selection | Tool::Hand) {
+    // `text_editing` can survive a tool switch away from `Text`/`Selection` (`Editor::set_tool`
+    // deliberately never discards it, see its own doc comment): without this check, switching
+    // to a creation tool mid-edit and drawing would start a shape gesture over the element
+    // still being edited, and a later `commit_text` could find it gone.
+    if matches!(
+        editor.tool,
+        Tool::Selection | Tool::Hand | Tool::Text | Tool::Eraser
+    ) || editor.text_editing.is_some()
+    {
         return;
     }
     if matches!(editor.create_gesture, Gesture::MultiPoint(_)) {
@@ -119,12 +127,15 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
         Tool::Rectangle | Tool::Diamond | Tool::Ellipse => start_shape(editor, event),
         Tool::Arrow | Tool::Line => start_linear(editor, event),
         Tool::Freedraw => start_freedraw(editor, event),
-        Tool::Selection | Tool::Hand => {}
+        Tool::Selection | Tool::Hand | Tool::Text | Tool::Eraser => {}
     }
 }
 
 pub(super) fn pointer_move(editor: &mut Editor<impl Env>, event: PointerEvent) {
-    if matches!(editor.tool, Tool::Selection | Tool::Hand) {
+    if matches!(
+        editor.tool,
+        Tool::Selection | Tool::Hand | Tool::Text | Tool::Eraser
+    ) {
         return;
     }
     editor.create_gesture = match std::mem::replace(&mut editor.create_gesture, Gesture::None) {
@@ -148,7 +159,10 @@ pub(super) fn pointer_move(editor: &mut Editor<impl Env>, event: PointerEvent) {
 }
 
 pub(super) fn pointer_up(editor: &mut Editor<impl Env>, event: PointerEvent) {
-    if matches!(editor.tool, Tool::Selection | Tool::Hand) {
+    if matches!(
+        editor.tool,
+        Tool::Selection | Tool::Hand | Tool::Text | Tool::Eraser
+    ) {
         return;
     }
     if matches!(editor.create_gesture, Gesture::MultiPoint(_)) {

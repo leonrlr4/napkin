@@ -293,6 +293,30 @@ fn a_click_grazing_only_the_bounding_box_of_a_selected_transparent_shape_clears_
 }
 
 #[test]
+fn bring_forward_reorders_and_undoes_in_one_step() {
+    let mut e = editor(vec![
+        solid("a", [0.0, 0.0, 10.0, 10.0]),
+        solid("b", [20.0, 0.0, 10.0, 10.0]),
+        solid("c", [40.0, 0.0, 10.0, 10.0]),
+    ]);
+    let order = |e: &scene::editor::Editor<TestEnv>| -> Vec<String> {
+        e.file()
+            .elements
+            .iter()
+            .map(|el| el.id().expect("id").to_owned())
+            .collect()
+    };
+    click(&mut e, at(25.0, 5.0));
+    assert_eq!(selected(&e), ["b"]);
+    assert!(e.command(Command::BringForward));
+    assert_eq!(order(&e), ["a", "c", "b"]);
+    assert_eq!(selected(&e), ["b"]);
+    assert!(e.command(Command::Undo));
+    assert_eq!(order(&e), ["a", "b", "c"]);
+    assert_eq!(selected(&e), ["b"]);
+}
+
+#[test]
 fn changing_tool_mid_drag_finishes_the_gesture_as_one_undo_step() {
     let mut e = editor(vec![solid("a", [0.0, 0.0, 10.0, 10.0])]);
     e.pointer_down(at(5.0, 5.0));

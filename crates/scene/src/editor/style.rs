@@ -34,6 +34,22 @@ impl StrokeWidth {
             (StrokeWidth::ExtraBold, true) => 4.0,
         }
     }
+
+    /// The key (if any) whose `value` is `stroke_width`: the inverse of `value`, for reading an
+    /// element's current stroke width back as a panel selection (`getStrokeWidthKeyForElement`).
+    /// `STROKE_WIDTH_KEYS` (`packages/common/src/constants.ts`) only lists thin/medium/bold,
+    /// matching the panel's three buttons; this also checks `ExtraBold`; since napkin never
+    /// writes that width itself, that only matters for a value loaded from a file.
+    pub(crate) fn from_value(stroke_width: f64, freedraw: bool) -> Option<StrokeWidth> {
+        [
+            StrokeWidth::Thin,
+            StrokeWidth::Medium,
+            StrokeWidth::Bold,
+            StrokeWidth::ExtraBold,
+        ]
+        .into_iter()
+        .find(|key| key.value(freedraw) == stroke_width)
+    }
 }
 
 /// `currentItemRoundness`: whether a new rectangle, diamond, ellipse or line gets a
@@ -70,6 +86,10 @@ pub struct ItemStyle {
     pub start_arrowhead: Option<String>,
     pub end_arrowhead: Option<String>,
     pub stroke_variability: String,
+    /// `currentItemFontFamily` (`DEFAULT_FONT_FAMILY`, Excalifont).
+    pub font_family: f64,
+    /// `currentItemFontSize` (`DEFAULT_FONT_SIZE`).
+    pub font_size: f64,
 }
 
 impl Default for ItemStyle {
@@ -87,6 +107,8 @@ impl Default for ItemStyle {
             start_arrowhead: None,
             end_arrowhead: Some("arrow".to_string()),
             stroke_variability: "constant".to_string(),
+            font_family: crate::text::DEFAULT_FONT_FAMILY,
+            font_size: crate::text::DEFAULT_FONT_SIZE,
         }
     }
 }

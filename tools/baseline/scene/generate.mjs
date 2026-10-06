@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, runCase, writeGroup } from "../lib/harness.mjs";
-import { colors, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches } from "./cases.mjs";
+import { colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -24,9 +24,12 @@ const lib = await bundleExcalidraw(
   export { newElement, newLinearElement, newArrowElement, newFreeDrawElement, newTextElement } from "@excalidraw/element/newElement";
   export { setCustomTextMetricsProvider } from "@excalidraw/element/textMeasurements";
   export { syncMovedIndices, syncInvalidIndices } from "@excalidraw/element/fractionalIndex";
-  export { applyDarkModeFilter, isTransparent } from "@excalidraw/common";
+  export { moveOneLeft, moveOneRight } from "@excalidraw/element/zindex";
+  export { Scene } from "@excalidraw/element/Scene";
+  export { applyDarkModeFilter, isTransparent, DEFAULT_GRID_SIZE } from "@excalidraw/common";
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
+  export { duplicateElements } from "@excalidraw/element/duplicate";
   `,
 );
 
@@ -176,6 +179,62 @@ for (const [label, indices, moved] of indexScenarios) {
 }
 writeGroup(outDir, "fractional_index", source, indexCases);
 
+/** `fa`/`fb`/`fbDel`: children of the `frame1` frame element (see `zindexElement`). */
+const FRAME_CHILDREN = new Set(["fa", "fb", "fbDel"]);
+
+/**
+ * A complete `rectangle` (or `text` label, or `frame`) element for the zindex cases: `id` and
+ * `index` (`a0`, `a1`, ... in array order) are the only fields that vary by case; `g1`/`g2` are
+ * in group `"G"`, `t` is `r`'s bound label, `del`/`fbDel` are soft-deleted, `frame1` is a frame
+ * element, and `fa`/`fb`/`fbDel` are its children.
+ */
+function zindexElement(id, position) {
+  const el = {
+    id, type: "rectangle", x: 0, y: 0, width: 10, height: 10, angle: 0,
+    strokeColor: "#1e1e1e", backgroundColor: "transparent", fillStyle: "solid",
+    strokeWidth: 2, strokeStyle: "solid", roughness: 1, opacity: 100,
+    groupIds: id === "g1" || id === "g2" ? ["G"] : [],
+    frameId: FRAME_CHILDREN.has(id) ? "frame1" : null, index: `a${position}`,
+    roundness: null, seed: 1, version: 1, versionNonce: 0,
+    isDeleted: id === "del" || id === "fbDel",
+    boundElements: id === "r" ? [{ id: "t", type: "text" }] : null, updated: 1,
+  };
+  if (id === "t") {
+    Object.assign(el, {
+      type: "text", containerId: "r", text: "hi", fontSize: 20, baseFontSize: 20,
+      fontFamily: 5, textAlign: "center", verticalAlign: "middle", originalText: "hi",
+      autoResize: true, lineHeight: 1.25, boundElements: null,
+    });
+  }
+  if (id === "frame1") {
+    el.type = "frame";
+  }
+  return el;
+}
+
+writeGroup(
+  outDir,
+  "zindex",
+  source,
+  zindexCases.map(([name, ids, selected, direction]) => {
+    const fn = direction === "right" ? "moveOneRight" : "moveOneLeft";
+    const appState = {
+      selectedElementIds: Object.fromEntries(selected.map((id) => [id, true])),
+      editingGroupId: null,
+    };
+    return {
+      name,
+      call: fn,
+      args: [ids, selected, direction],
+      ...runCase(name, () => {
+        const elements = ids.map((id, position) => zindexElement(id, position));
+        const scene = new lib.Scene(elements);
+        return lib[fn](elements, appState, scene).map(({ id, index, version }) => ({ id, index, version }));
+      }),
+    };
+  }),
+);
+
 // Canvas text metrics do not exist in node; every UTF-16 code unit is 0.6em wide. The Rust
 // side uses the same formula (`scene::sample::CharWidthMeasure`).
 lib.setCustomTextMetricsProvider({ getLineWidth: (text, font) => text.length * parseFloat(font) * 0.6 });
@@ -196,13 +255,20 @@ writeGroup(
 );
 
 /**
- * Stable across Math.random streams: `seed` and `versionNonce` are dropped and every id is
- * renamed to `e<position>` in output order, references included. `crates/scene/tests/
- * baseline.rs`'s `normalize_skeleton_output` does the same.
+ * Stable across Math.random streams: `seed` and `versionNonce` are dropped, every id is
+ * renamed to `e<position>` in output order (references included), and every `groupId` is
+ * renamed to `g<n>` (1-based) in first-occurrence order, scanning each element's own
+ * `groupIds` in the same output-order pass. `crates/scene/tests/baseline.rs`'s
+ * `normalize_skeleton_output` does the same; shared by the `skeleton` and `duplicate` groups.
  */
 function normalizeSkeletonOutput(elements) {
   const rename = new Map(elements.map((e, i) => [e.id, `e${i}`]));
   const id = (value) => rename.get(value) ?? value;
+  const groupRename = new Map();
+  const groupId = (value) => {
+    if (!groupRename.has(value)) groupRename.set(value, `g${groupRename.size + 1}`);
+    return groupRename.get(value);
+  };
   return elements.map(({ seed, versionNonce, ...rest }) => {
     const out = structuredClone(rest);
     out.id = id(out.id);
@@ -211,8 +277,32 @@ function normalizeSkeletonOutput(elements) {
     for (const key of ["startBinding", "endBinding"]) {
       if (out[key]) out[key] = { ...out[key], elementId: id(out[key].elementId) };
     }
+    if (Array.isArray(out.groupIds)) out.groupIds = out.groupIds.map(groupId);
     return out;
   });
+}
+
+/**
+ * `appState.selectedGroupIds` as forming the selection through the editor would leave it: a
+ * group counts as selected exactly when every one of its members (at any nesting level) is in
+ * `ids` (mirrors `crates::duplicate::selected_group_ids`).
+ */
+function selectedGroupIdsFor(elements, ids) {
+  const selected = new Set(ids);
+  const candidates = new Set();
+  for (const element of elements) {
+    if (selected.has(element.id)) {
+      for (const groupId of element.groupIds ?? []) candidates.add(groupId);
+    }
+  }
+  const result = {};
+  for (const groupId of candidates) {
+    const fullySelected = elements.every(
+      (element) => !(element.groupIds ?? []).includes(groupId) || selected.has(element.id),
+    );
+    if (fullySelected) result[groupId] = true;
+  }
+  return result;
 }
 
 writeGroup(
@@ -226,6 +316,47 @@ writeGroup(
     ...runCase(
       name,
       () => normalizeSkeletonOutput(lib.convertToExcalidrawElements(structuredClone(skeletons))),
+      { exactDespiteRandom: true },
+    ),
+  })),
+);
+
+writeGroup(
+  outDir,
+  "duplicate",
+  source,
+  duplicateCases.map(([name, elements, ids, mode]) => ({
+    name,
+    call: "duplicateElements",
+    args: [elements, ids ?? [], mode],
+    ...runCase(
+      name,
+      () => {
+        const clonedElements = structuredClone(elements);
+        const opts =
+          mode === "everything"
+            ? { type: "everything", elements: clonedElements, randomizeSeed: true }
+            : {
+                type: "in-place",
+                elements: clonedElements,
+                idsOfElementsToDuplicate: new Map(
+                  clonedElements.filter((el) => ids.includes(el.id)).map((el) => [el.id, el]),
+                ),
+                appState: {
+                  editingGroupId: null,
+                  selectedGroupIds: selectedGroupIdsFor(clonedElements, ids),
+                },
+                randomizeSeed: true,
+                overrides: ({ origElement }) => ({
+                  x: origElement.x + lib.DEFAULT_GRID_SIZE / 2,
+                  y: origElement.y + lib.DEFAULT_GRID_SIZE / 2,
+                }),
+              };
+        const { elementsWithDuplicates, duplicatedElements } = lib.duplicateElements(opts);
+        const result = mode === "everything" ? duplicatedElements : elementsWithDuplicates;
+        const synced = lib.syncMovedIndices(result, new Map(duplicatedElements.map((e) => [e.id, e])));
+        return normalizeSkeletonOutput(synced);
+      },
       { exactDespiteRandom: true },
     ),
   })),

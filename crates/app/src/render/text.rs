@@ -249,6 +249,13 @@ impl FontMeasure {
             font_system: font_system(),
         }
     }
+
+    /// The font database `font_system()` populated with system and bundled fonts, for a caller
+    /// (`fonts::install`) that needs to look a font up in it without scanning the system's fonts
+    /// a second time.
+    pub fn db_mut(&mut self) -> &mut glyphon::fontdb::Database {
+        self.font_system.db_mut()
+    }
 }
 
 impl Default for FontMeasure {

@@ -3,7 +3,7 @@
 //! isolating translucent or label-holed elements behind the stencil buffer, and drawing
 //! placeholders (spec §1.2) as an opaque box plus a type label.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use scene::Element;
 use scene::shape::ElementShape;
@@ -16,6 +16,10 @@ use crate::render::tessellate::local_center;
 /// scene units: generous enough that no drawable's stroke, rough.js overshoot or freedraw
 /// outline is ever coarse-culled while still visible.
 pub const COARSE_MARGIN: f64 = 64.0;
+
+/// `ELEMENT_READY_TO_ERASE_OPACITY` (`renderElement.ts`, `getRenderOpacity`): the fraction of
+/// an element's own opacity it renders at while it sits in the eraser's pending-erasure set.
+pub const ERASE_PENDING_ALPHA: f32 = 0.2;
 
 /// How far an arrow label's stencil hole extends past the label's own rect on every side,
 /// matching Excalidraw's `clearRect` padding for bound text (`bin/canvas.js`).
@@ -89,12 +93,13 @@ pub struct TextDraw {
     pub element: usize,
     pub label: bool,
     /// The element's own opacity times its frame's opacity (0-1), exactly like a mesh's alpha;
-    /// 1.0 for a placeholder's type label, which (like its dashed box) is napkin's own hint and
-    /// always opaque.
+    /// for a placeholder's type label, 1.0 (or [`ERASE_PENDING_ALPHA`] while pending erasure)
+    /// instead, ignoring the element's own opacity, since the label (like its dashed box) is
+    /// napkin's own hint, not the element's content.
     pub alpha: f32,
 }
 
-pub struct View {
+pub struct View<'a> {
     pub visible: SceneRect,
     pub dark: bool,
     pub bucket: i32,
@@ -102,6 +107,14 @@ pub struct View {
     /// how large a text element's glyphs actually rasterize at, used to route very large text
     /// through the offscreen path instead of glyphon's in-pass renderer.
     pub pixel_scale: f32,
+    /// Ids drawn at [`ERASE_PENDING_ALPHA`] of their opacity (the eraser's pending set); a text
+    /// element bound to a faded container fades with it even when its own id is not listed.
+    /// The eraser itself puts both a container and its label id in the set together, so this
+    /// only matters for whatever else populates `faded`.
+    pub faded: &'a HashSet<String>,
+    /// Ids not drawn at all (the text currently being edited); a faded or hidden container
+    /// still draws normally, only its own label is affected.
+    pub hidden: &'a HashSet<String>,
 }
 
 /// A batch of consecutive same-kind draws waiting to be flushed into a single `DrawItem`, so
@@ -206,9 +219,22 @@ fn label_hole(label: &scene::Placement) -> [[f64; 2]; 4] {
     ]
 }
 
+/// Whether `element` itself is in `faded`, or (for a container's bound text) the container it
+/// labels is: the eraser's pending-erasure set, shared by [`element_alpha`] and a placeholder's
+/// own alpha (which skips `element_alpha`'s opacity math but still fades while pending erasure).
+fn is_faded(element: &Element, faded: &HashSet<String>) -> bool {
+    element.id().is_some_and(|id| faded.contains(id))
+        || element.container_id().is_some_and(|id| faded.contains(id))
+}
+
 /// `element`'s own opacity times its containing frame's opacity (each 0-100, so the product is
-/// divided by 10000), matching Excalidraw's compounded rendering alpha.
-fn element_alpha(element: &Element, frame_opacity: &HashMap<&str, f64>) -> f32 {
+/// divided by 10000), matching Excalidraw's compounded rendering alpha; multiplied again by
+/// [`ERASE_PENDING_ALPHA`] when [`is_faded`].
+fn element_alpha(
+    element: &Element,
+    frame_opacity: &HashMap<&str, f64>,
+    faded: &HashSet<String>,
+) -> f32 {
     let own = element.opacity() / 100.0;
     let frame = element
         .frame_id()
@@ -216,7 +242,11 @@ fn element_alpha(element: &Element, frame_opacity: &HashMap<&str, f64>) -> f32 {
         .copied()
         .unwrap_or(100.0)
         / 100.0;
-    (own * frame) as f32
+    let mut alpha = (own * frame) as f32;
+    if is_faded(element, faded) {
+        alpha *= ERASE_PENDING_ALPHA;
+    }
+    alpha
 }
 
 /// Every non-deleted frame-like element's `id` -> its own `opacity` (0-100), which multiplies
@@ -247,7 +277,11 @@ fn arrow_labels(elements: &[Element]) -> HashMap<&str, usize> {
 }
 
 /// The draw list for one frame, in file order.
-pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) -> Vec<DrawItem> {
+pub fn plan_frame(
+    file: &scene::SceneFile,
+    cache: &mut SceneCache,
+    view: &View<'_>,
+) -> Vec<DrawItem> {
     cache.begin_frame();
     let elements = &file.elements;
     let frame_opacity = frame_opacities(elements);
@@ -260,6 +294,12 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
 
     for (index, element) in elements.iter().enumerate() {
         if element.is_deleted() {
+            continue;
+        }
+        if element.id().is_some_and(|id| view.hidden.contains(id)) {
+            // The text being edited: skipped entirely, but any container it labels (an arrow's
+            // stencil hole, a rectangle drawn without it) is unaffected, since that's a
+            // separate element reached on its own turn through this loop.
             continue;
         }
 
@@ -277,7 +317,7 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
             let draw = TextDraw {
                 element: index,
                 label: false,
-                alpha: element_alpha(element, &frame_opacity),
+                alpha: element_alpha(element, &frame_opacity, view.faded),
             };
             if needs_offscreen_text(text.font_size, text.base.angle, view.pixel_scale) {
                 pending.flush(&mut items);
@@ -316,9 +356,16 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
         };
 
         let alpha: f32 = if is_placeholder {
-            1.0
+            // A placeholder ignores the element's own opacity (napkin's hint, not the
+            // element's content), but still fades while the eraser is about to delete it, the
+            // same as every other drawable does.
+            if is_faded(element, view.faded) {
+                ERASE_PENDING_ALPHA
+            } else {
+                1.0
+            }
         } else {
-            element_alpha(element, &frame_opacity)
+            element_alpha(element, &frame_opacity, view.faded)
         };
 
         let key = MeshKey {
@@ -343,15 +390,16 @@ pub fn plan_frame(file: &scene::SceneFile, cache: &mut SceneCache, view: &View) 
         };
 
         if is_placeholder {
-            // The dashed box and its type label are napkin's own hint, not the element's
-            // content: always opaque (alpha was forced to 1 above) and never isolated.
+            // The dashed box and its type label share `alpha` above and are never isolated: a
+            // placeholder's box and label are flat, non-overlapping shapes that never need the
+            // stencil buffer's help compositing against themselves or each other.
             pending.push_mesh(&mut items, draw);
             pending.push_text(
                 &mut items,
                 TextDraw {
                     element: index,
                     label: true,
-                    alpha: 1.0,
+                    alpha,
                 },
             );
             continue;
@@ -406,7 +454,9 @@ mod tests {
     use super::*;
     use scene::sample;
 
-    fn view() -> View {
+    static EMPTY_IDS: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(HashSet::new);
+
+    fn view() -> View<'static> {
         View {
             visible: SceneRect {
                 min: [-1000.0, -1000.0],
@@ -415,6 +465,19 @@ mod tests {
             dark: false,
             bucket: 0,
             pixel_scale: 1.0,
+            faded: &EMPTY_IDS,
+            hidden: &EMPTY_IDS,
+        }
+    }
+
+    fn view_with(
+        faded: &'static HashSet<String>,
+        hidden: &'static HashSet<String>,
+    ) -> View<'static> {
+        View {
+            faded,
+            hidden,
+            ..view()
         }
     }
 
@@ -585,5 +648,92 @@ mod tests {
         };
         assert_eq!(hole[0], [75.0, -17.0]);
         assert_eq!(hole[2], [125.0, 18.0]);
+    }
+
+    #[test]
+    fn faded_elements_multiply_erase_pending_alpha() {
+        static FADED: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(|| HashSet::from(["a".to_string()]));
+        let file = sample::file(vec![sample::generic(
+            "rectangle",
+            "a",
+            [0.0, 0.0, 10.0, 10.0],
+        )]);
+        let items = plan_frame(
+            &file,
+            &mut SceneCache::new(),
+            &view_with(&FADED, &EMPTY_IDS),
+        );
+        assert_eq!(kinds(&items), ["isolated1"]);
+        let DrawItem::Isolated { draw, .. } = &items[0] else {
+            panic!("isolated")
+        };
+        assert_eq!(draw.key.alpha_bits, ERASE_PENDING_ALPHA.to_bits());
+    }
+
+    #[test]
+    fn a_faded_placeholder_fades_its_box_and_label_too() {
+        static FADED: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(|| HashSet::from(["f".to_string()]));
+        // A `Raw` placeholder (a `frame`, like `frame_opacity_multiplies_and_frames_are_placeholders`
+        // above): its own `opacity` (50) is ignored either way, so the only thing this test's
+        // alpha can come from is the pending-erasure fade.
+        let frame = json!({ "id": "f", "type": "frame", "x": -5, "y": -5, "width": 100, "height": 100, "angle": 0, "opacity": 50, "version": 1 });
+        let file = sample::file(vec![frame]);
+        let items = plan_frame(
+            &file,
+            &mut SceneCache::new(),
+            &view_with(&FADED, &EMPTY_IDS),
+        );
+        assert_eq!(kinds(&items), ["meshes1", "text1"]);
+        let DrawItem::Meshes(draws) = &items[0] else {
+            panic!("mesh")
+        };
+        assert_eq!(draws[0].key.alpha_bits, ERASE_PENDING_ALPHA.to_bits());
+        let DrawItem::Text(labels) = &items[1] else {
+            panic!("label")
+        };
+        assert_eq!(labels[0].alpha, ERASE_PENDING_ALPHA);
+    }
+
+    #[test]
+    fn a_faded_container_fades_its_bound_label_too() {
+        static FADED: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(|| HashSet::from(["a".to_string()]));
+        let arrow = sample::with(
+            sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [200.0, 0.0]]),
+            json!({ "boundElements": [{ "id": "label", "type": "text" }] }),
+        );
+        let label = sample::text("label", [80.0, -12.0, 40.0, 25.0], "hi", Some("a"));
+        let file = sample::file(vec![arrow, label]);
+        let items = plan_frame(
+            &file,
+            &mut SceneCache::new(),
+            &view_with(&FADED, &EMPTY_IDS),
+        );
+        let DrawItem::Text(labels) = &items[1] else {
+            panic!("label")
+        };
+        assert_eq!(labels[0].alpha, ERASE_PENDING_ALPHA);
+    }
+
+    #[test]
+    fn hidden_elements_are_skipped_but_their_container_still_draws() {
+        static HIDDEN: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(|| HashSet::from(["label".to_string()]));
+        let arrow = sample::with(
+            sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [200.0, 0.0]]),
+            json!({ "boundElements": [{ "id": "label", "type": "text" }] }),
+        );
+        let label = sample::text("label", [80.0, -12.0, 40.0, 25.0], "hi", Some("a"));
+        let file = sample::file(vec![arrow, label]);
+        let items = plan_frame(
+            &file,
+            &mut SceneCache::new(),
+            &view_with(&EMPTY_IDS, &HIDDEN),
+        );
+        // The hole still punches through the arrow (the label is being edited through an
+        // overlay drawn on top), but the hidden text element itself produces no `Text` item.
+        assert_eq!(kinds(&items), ["isolated1+hole"]);
     }
 }
