@@ -162,3 +162,59 @@ fn narrowing_a_box_by_update_rewraps_its_label() {
     );
     assert_eq!(editor.file().elements[0].placement().unwrap().height, 60.0);
 }
+
+#[test]
+fn moving_a_labeled_box_only_repositions_its_label() {
+    let mut editor = editor(vec![]);
+    let report = editor
+        .apply_batch(
+            &json!({"ops": [{"op": "add", "type": "rectangle", "id": "r", "x": 0, "y": 0,
+                "width": 300, "height": 50, "label": {"text": "hello"}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let id = report.created["r"].clone();
+    let before = editor.file().elements[1].to_value();
+    editor
+        .apply_batch(
+            &json!({"ops": [{"op": "update", "id": id, "set": {"x": 40, "y": 10}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid update");
+    let after = editor.file().elements[1].to_value();
+    assert_eq!(after["text"], before["text"]);
+    assert_eq!(after["width"], before["width"]);
+    assert_eq!(after["height"], before["height"]);
+    assert_eq!(
+        after["x"].as_f64().unwrap(),
+        before["x"].as_f64().unwrap() + 40.0
+    );
+    assert_eq!(
+        after["y"].as_f64().unwrap(),
+        before["y"].as_f64().unwrap() + 10.0
+    );
+    assert_eq!(editor.file().elements[0].placement().unwrap().height, 50.0);
+}
+
+#[test]
+fn setting_a_containers_text_to_something_longer_grows_it() {
+    let mut editor = editor(vec![]);
+    let report = editor
+        .apply_batch(
+            &json!({"ops": [{"op": "add", "type": "rectangle", "id": "r", "x": 0, "y": 0,
+                "width": 100, "height": 50, "label": {"text": "hi"}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let id = report.created["r"].clone();
+    assert_eq!(editor.file().elements[0].placement().unwrap().height, 50.0);
+    editor
+        .apply_batch(
+            &json!({"ops": [{"op": "update", "id": id, "set": {"text": "hello world"}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid update");
+    let label = editor.file().elements[1].to_value();
+    assert_eq!(label["text"], json!("hello\nworld"));
+    assert_eq!(editor.file().elements[0].placement().unwrap().height, 60.0);
+}

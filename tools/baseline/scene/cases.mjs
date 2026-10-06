@@ -333,6 +333,11 @@ export const skeletonBatches = [
     { type: "diamond", id: "d", x: 200, y: 0, width: 120, height: 60, label: { text: "Is it valid?" } },
     { type: "ellipse", id: "e", x: 0, y: 200, width: 90, height: 50, label: { text: "這是很長的中文標籤" } },
   ]],
+  ["arrowListedBeforeGrownBoxes", [
+    { type: "arrow", x: 85, y: 15, points: [[0, 0], [210, 0]], start: { id: "a" }, end: { id: "b" } },
+    { type: "rectangle", id: "a", x: 0, y: 0, width: 80, height: 30, label: { text: "first step here" } },
+    { type: "rectangle", id: "b", x: 300, y: 0, width: 80, height: 30, label: { text: "second" } },
+  ]],
   ["arrowBetweenGrownBoxes", [
     { type: "rectangle", id: "a", x: 0, y: 0, width: 80, height: 30, label: { text: "first step here" } },
     { type: "rectangle", id: "b", x: 300, y: 0, width: 80, height: 30, label: { text: "second" } },

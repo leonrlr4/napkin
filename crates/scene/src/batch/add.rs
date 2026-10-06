@@ -3,8 +3,8 @@
 //! `afa3a653fc5d2b742adcbd5a6063187b056d2419`): rectangles, diamonds, ellipses, text, lines,
 //! arrows and freedraw, with labels (`bindTextToContainer`) and arrow bindings
 //! (`bindLinearElementToElement`). Differences from the JS this ports are the AI interface
-//! design's, not bugs: shapes must always give `width`/`height`, line/arrow/freedraw `points` are normalized
-//! so the first point is `[0, 0]` (napkin's editing code assumes that), and a line or
+//! design's, not bugs: shapes must always give `width`/`height`, line/arrow/freedraw `points`
+//! are normalized so the first point is `[0, 0]` (napkin's editing code assumes that), and a line or
 //! freedraw's stored `width`/`height` always comes from its points rather than being kept
 //! separately.
 
