@@ -148,6 +148,14 @@ fn bound_label_of(elements: &[Element], element: &Element) -> Option<usize> {
         .position(|e| !e.is_deleted() && e.id() == Some(label_id))
 }
 
+/// A container's label wrap width. A tiny container's max width is negative; no wrap width is
+/// then in effect, which agrees with `wrap_text` treating a negative width as no wrapping.
+fn container_wrap_width(container: &Element) -> Option<f64> {
+    bound_text::bound_text_max_size(container)
+        .map(|[w, _]| w)
+        .filter(|w| *w > 0.0)
+}
+
 /// The width an existing text's editor wraps at: its container's max width for a label, its own
 /// width for a standalone `autoResize: false` text, none otherwise.
 fn existing_wrap_width(elements: &[Element], text: &crate::element::TextElement) -> Option<f64> {
@@ -155,7 +163,7 @@ fn existing_wrap_width(elements: &[Element], text: &crate::element::TextElement)
         let container = elements
             .iter()
             .find(|e| !e.is_deleted() && e.id() == Some(container_id.as_str()))?;
-        return bound_text::bound_text_max_size(container).map(|[w, _]| w);
+        return container_wrap_width(container);
     }
     (text.auto_resize == Some(false)).then_some(text.base.width)
 }
@@ -269,12 +277,29 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                     "text_tool_target/double_click_target only resolve text positions here"
                 )
             };
+            let wrap_width = existing_wrap_width(&editor.file.elements, t);
+            // The overlay lays its lines out inside a `wrap_width`-wide box anchored at its
+            // left edge, aligned per `text_align`. A bound label is drawn at its own measured
+            // width, so the box starts that far left of the label for the lines to sit where
+            // the label is drawn (`textWysiwyg` keeps the editor on the label).
+            let origin_x = match (wrap_width, t.container_id.value()) {
+                (Some(wrap), Some(_)) => {
+                    let slack = (wrap - t.base.width).max(0.0);
+                    let share = match t.text_align.as_str() {
+                        "center" => 0.5,
+                        "right" => 1.0,
+                        _ => 0.0,
+                    };
+                    t.base.x - slack * share
+                }
+                _ => t.base.x,
+            };
             TextEditing {
                 element_id: Some(t.base.id.clone()),
                 container_id: t.container_id.value().cloned(),
                 // `originalText`, not the wrapped `text` (`textWysiwyg`'s initial value).
                 text: t.original_text.clone().unwrap_or_else(|| t.text.clone()),
-                origin: [t.base.x, t.base.y],
+                origin: [origin_x, t.base.y],
                 width: t.base.width,
                 font_family: t.font_family,
                 font_size: t.font_size,
@@ -286,7 +311,7 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 opacity: t.base.opacity,
                 angle: t.base.angle,
                 group_ids: Vec::new(),
-                wrap_width: existing_wrap_width(&editor.file.elements, t),
+                wrap_width,
             }
         }
         Target::NewLabel(container_index) => {
@@ -317,7 +342,7 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 opacity: style.opacity,
                 angle: placement.angle,
                 group_ids: Vec::new(),
-                wrap_width: bound_text::bound_text_max_size(container).map(|[w, _]| w),
+                wrap_width: container_wrap_width(container),
             }
         }
         Target::NewFreeText { near_container } => {
@@ -537,7 +562,9 @@ fn create_new_label(
         opacity: Some(editing.opacity),
     };
     let label_position = bind_label(file, position, &label, measure, env);
-    if file.elements[position] != container_before {
+    if file.elements[position] != container_before
+        && file.elements[position].version() == container_before.version()
+    {
         bump_version(&mut file.elements[position], env);
     }
     let label_id = file.elements[label_position]

@@ -47,8 +47,8 @@ pub fn layout(
 /// that does not exist as an element yet (`editing.element_id` is `None` but `container_id` is
 /// `Some`), since there has been no `bind_label`/`bound_text_position` call yet to have computed
 /// a real top-left for it; a plain top-left for everything else. That covers an existing text or
-/// label (`editing.origin` is already that element's own `x`/`y`, itself centered within its
-/// container already if it is a bound label re-opened for editing) and a brand new free text
+/// label (`editing.origin` is that element's own `x`/`y`, or for a bound label re-opened for editing
+/// the left edge of its container's text area, where `wrap_width` lines are aligned from) and a brand new free text
 /// (`editing.origin` is likewise its intended top-left). `editing.text_align` plays no part in
 /// this choice: `textWysiwyg.tsx`'s own CSS `textAlign` only aligns text within an
 /// already-positioned, fixed-left box; it never moves the box itself, so a right- or
@@ -343,13 +343,6 @@ mod tests {
         ]
     }
 
-    /// With egui configured the way `napkin_app::configure_input` sets it up
-    /// (`SurrenderFocusOn::Presses`), the click that creates a text edit must not commit an
-    /// empty string on its own release: [`pointer_down`](scene::editor::Editor::pointer_down)
-    /// starts the edit and the overlay `request_focus`es in the very same frame, so the
-    /// matching pointer-up lands with the pointer still down over nothing but canvas (the
-    /// widget just appeared, at zero width) and would read as "clicked outside" under the
-    /// default `SurrenderFocusOn::Clicks`. A later press elsewhere still ends the edit.
     /// Types `text` into a fresh overlay over `editing` and returns the overlay area's rect
     /// after layout has settled.
     fn show_once(editing: &TextEditing, text: &str) -> egui::Rect {
@@ -383,6 +376,19 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_label_overlay_starts_at_the_origin_it_was_given() {
+        let editing = TextEditing {
+            element_id: Some("t".to_owned()),
+            container_id: Some("c".to_owned()),
+            wrap_width: Some(90.0),
+            ..sample_editing("center")
+        };
+        let rect = show_once(&editing, "hi");
+        assert_eq!(rect.min.x, 10.0, "{rect:?}");
+        assert_eq!(rect.min.y, 20.0, "{rect:?}");
+    }
+
+    #[test]
     fn a_label_wraps_at_its_container_width() {
         let editing = TextEditing {
             wrap_width: Some(90.0),
@@ -393,6 +399,13 @@ mod tests {
         assert!(rect.height() > 20.0 * 1.25 * 1.5, "{rect:?}");
     }
 
+    /// With egui configured the way `napkin_app::configure_input` sets it up
+    /// (`SurrenderFocusOn::Presses`), the click that creates a text edit must not commit an
+    /// empty string on its own release: [`pointer_down`](scene::editor::Editor::pointer_down)
+    /// starts the edit and the overlay `request_focus`es in the very same frame, so the
+    /// matching pointer-up lands with the pointer still down over nothing but canvas (the
+    /// widget just appeared, at zero width) and would read as "clicked outside" under the
+    /// default `SurrenderFocusOn::Clicks`. A later press elsewhere still ends the edit.
     #[test]
     fn keeps_focus_through_its_own_creating_clicks_release_but_not_a_later_press() {
         let ctx = egui::Context::default();

@@ -29,7 +29,7 @@ pub const BOUND_TEXT_PADDING: f64 = 5.0;
 /// `DUMMY_TEXT`.
 const DUMMY_TEXT: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-fn is_container(element: &Element) -> bool {
+pub(crate) fn is_container(element: &Element) -> bool {
     matches!(
         element,
         Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)

@@ -688,10 +688,21 @@ fn apply_text_update(
     }
     style.apply_to(&mut next.elements[index]);
     if let Some(text_value) = &new_text {
+        // A fixed-width text keeps its width and rewraps at it (`redrawTextBoundingBox`).
+        let fixed_width = match &next.elements[index] {
+            Element::Text(t) if t.auto_resize == Some(false) => Some(t.base.width),
+            _ => None,
+        };
         update_label_text_fields(&mut next.elements[index], text_value, measure);
+        if let Some(width) = fixed_width {
+            if let Element::Text(t) = &mut next.elements[index] {
+                t.base.width = width;
+            }
+            redraw_text_bounding_box(next, index, None, measure, env);
+        }
     }
     if next.elements[index] != before {
-        bump_version(&mut next.elements[index], env);
+        bump_if_not_bumped(&mut next.elements[index], before.version(), env);
     }
     Ok(())
 }

@@ -651,7 +651,7 @@ pub fn resize_element(
 
     // A rectangle, diamond or ellipse with a live label cannot shrink below one character of
     // it, and keeps the label's font size, or scales it with the container (Shift).
-    let label = is_label_container(orig)
+    let label = crate::bound_text::is_container(orig)
         .then(|| live_bound_text(file, position))
         .flatten();
     let mut label_font_size = None;
@@ -816,15 +816,6 @@ pub fn resize_element(
     }
 
     changed
-}
-
-/// Whether `element` is a rectangle, diamond or ellipse, the containers whose labels are
-/// rewrapped.
-fn is_label_container(element: &Element) -> bool {
-    matches!(
-        element,
-        Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
-    )
 }
 
 /// Sets the label at `label_position`'s font size (and angle, when given), bumping its
@@ -1175,7 +1166,7 @@ pub fn resize_elements(
             }
             Element::Raw(_) => unreachable!("Raw targets are skipped above"),
         }
-        if is_label_container(orig)
+        if crate::bound_text::is_container(orig)
             && let Some(label_position) = live_bound_text(start, position)
             && let Element::Text(at_start) = &start.elements[label_position]
         {
@@ -1610,6 +1601,36 @@ mod tests {
         assert_rect(rect_of(&file, 0), [0.0, 0.0, 100.0, 100.0]);
         assert_rect(rect_of(&file, 1), [100.0, 100.0, 200.0, 50.0]);
         assert_eq!(file.elements[1].to_value()["fontSize"], json!(40.0));
+    }
+
+    #[test]
+    fn multi_resize_scales_a_labeled_containers_label_and_keeps_it_centered() {
+        let container = sample::with(
+            rect("r", [0.0, 0.0, 100.0, 50.0]),
+            json!({"boundElements": [{"id": "t", "type": "text"}]}),
+        );
+        let label = sample::with(
+            sample::text("t", [38.0, 12.5, 24.0, 25.0], "hi", Some("r")),
+            json!({"textAlign": "center", "verticalAlign": "middle"}),
+        );
+        let shift = ResizeOptions {
+            keep_aspect_ratio: true,
+            from_center: false,
+        };
+        // Common bounds are 150 x 50; the pointer doubles both.
+        let file = resize(
+            vec![container, label, rect("b", [100.0, 0.0, 50.0, 50.0])],
+            &[0, 2],
+            HandleKind::Se,
+            [300.0, 100.0],
+            shift,
+        );
+        assert_rect(rect_of(&file, 0), [0.0, 0.0, 200.0, 100.0]);
+        let v = file.elements[1].to_value();
+        assert_eq!(v["fontSize"], json!(40.0));
+        let [x, y, w, h] = ["x", "y", "width", "height"].map(|k| v[k].as_f64().unwrap());
+        assert!((x + w / 2.0 - 100.0).abs() < 1e-9, "{v}");
+        assert!((y + h / 2.0 - 50.0).abs() < 1e-9, "{v}");
     }
 
     #[test]

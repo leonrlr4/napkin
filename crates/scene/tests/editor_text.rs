@@ -286,3 +286,57 @@ fn growing_a_tiny_container_and_labelling_it_is_one_undo_step() {
             .all(|x| x.is_deleted() || x.id() == Some("r"))
     );
 }
+
+#[test]
+fn an_existing_centered_label_opens_with_its_overlay_on_the_label() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 300.0, 50.0],
+    )]);
+    e.double_click(at(150.0, 25.0), &mut CharWidthMeasure);
+    assert!(e.commit_text("hi", &mut CharWidthMeasure));
+    let label = e.file().elements[1].to_value();
+    let label_x = label["x"].as_f64().unwrap();
+    assert!(
+        label_x > 100.0,
+        "the label is centered in the wide box: {label}"
+    );
+
+    assert!(e.double_click(at(150.0, 25.0), &mut CharWidthMeasure));
+    let editing = e.text_editing().unwrap();
+    assert_eq!(editing.wrap_width, Some(290.0));
+    // The wrap box spans the container's text area; its centered line lands on the label.
+    assert_eq!(editing.origin[0], 5.0);
+    assert_eq!(
+        editing.origin[0] + 290.0 / 2.0,
+        label_x + editing.width / 2.0
+    );
+}
+
+#[test]
+fn a_label_that_grows_its_container_bumps_it_once() {
+    let mut e = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [0.0, 0.0, 100.0, 50.0],
+    )]);
+    e.double_click(at(50.0, 25.0), &mut CharWidthMeasure);
+    e.commit_text("hello world", &mut CharWidthMeasure);
+    assert_eq!(e.file().elements[0].version(), 4.0);
+}
+
+#[test]
+fn a_container_too_small_for_padding_has_no_wrap_width() {
+    let container = sample::with(
+        sample::generic("rectangle", "r", [0.0, 0.0, 8.0, 8.0]),
+        json!({"boundElements": [{"id": "t", "type": "text"}]}),
+    );
+    let label = sample::with(
+        sample::text("t", [-8.0, -8.0, 24.0, 25.0], "hi", Some("r")),
+        json!({"textAlign": "center", "verticalAlign": "middle"}),
+    );
+    let mut e = editor(vec![container, label]);
+    assert!(e.double_click(at(4.0, 4.0), &mut CharWidthMeasure));
+    assert_eq!(e.text_editing().unwrap().wrap_width, None);
+}
