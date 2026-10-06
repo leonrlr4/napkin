@@ -46,6 +46,7 @@ use std::sync::Arc;
 
 use serde_json::Map;
 
+use crate::bound_text;
 use crate::color::is_transparent;
 use crate::element::{Element, ElementBase, Roundness};
 use crate::env::{Env, random_integer};
@@ -53,7 +54,6 @@ use crate::file::SceneFile;
 use crate::json::Slot;
 use crate::new_element::bump_version;
 use crate::text::{self, TextMeasure};
-use crate::transform;
 
 use super::{ArrowType, EdgeStyle, Editor, ItemStyle, StrokeWidth, TextEditing, Tool, clone_scene};
 
@@ -734,7 +734,7 @@ fn mutate(
 /// `redrawTextBoundingBox`, without wrapping or growing the container to fit (a bound label is
 /// centred, does not wrap, and overflows when it does not fit, per spec §5.8): remeasures
 /// `next`'s (already-mutated) text at its current font, and repositions it. A container's
-/// label is recentred with [`transform::bound_text_position`] (silently left alone when that
+/// label is recentred with [`bound_text::bound_text_position`] (silently left alone when that
 /// returns `None`, e.g. an arrow's label: out of scope there too); a standalone `autoResize`
 /// text keeps its align-appropriate edge fixed horizontally and recentres vertically, as
 /// `offsetElementAfterFontResize` does for `actionChangeFontSize`.
@@ -768,7 +768,7 @@ fn redraw_text(next: &mut Element, file: &SceneFile, measure: &mut dyn TextMeasu
         else {
             return;
         };
-        if let Some([x, y]) = transform::bound_text_position(container, text) {
+        if let Some([x, y]) = bound_text::bound_text_position(container, text) {
             text.base.x = x;
             text.base.y = y;
         }

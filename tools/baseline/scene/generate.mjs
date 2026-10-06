@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, encode, runCase, writeGroup } from "../lib/harness.mjs";
-import { colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, zindexCases } from "./cases.mjs";
+import { boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -24,6 +24,7 @@ const lib = await bundleExcalidraw(
   export { newElement, newLinearElement, newArrowElement, newFreeDrawElement, newTextElement } from "@excalidraw/element/newElement";
   export { setCustomTextMetricsProvider } from "@excalidraw/element/textMeasurements";
   export { wrapText, parseTokens } from "@excalidraw/element/textWrapping";
+  export { redrawTextBoundingBox, handleBindTextResize } from "@excalidraw/element/textElement";
   export { syncMovedIndices, syncInvalidIndices } from "@excalidraw/element/fractionalIndex";
   export { moveOneLeft, moveOneRight } from "@excalidraw/element/zindex";
   export { Scene } from "@excalidraw/element/Scene";
@@ -253,6 +254,42 @@ writeGroup(
         ? lib.parseTokens(args[0])
         : lib.wrapText(args[0], lib.getFontString({ fontSize: args[1], fontFamily: args[2] }), args[3]),
     ),
+  })),
+);
+
+/** `[{id, x, y, width, height, text?}]` for every element, in input order. */
+function boundTextOutput(elements) {
+  return elements.map((el) => ({
+    id: el.id,
+    x: el.x,
+    y: el.y,
+    width: el.width,
+    height: el.height,
+    ...(el.type === "text" ? { text: el.text } : {}),
+  }));
+}
+
+writeGroup(
+  outDir,
+  "bound_text",
+  source,
+  boundTextCases.map(([name, elements, op]) => ({
+    name,
+    call: op.redraw ? "redrawTextBoundingBox" : "handleBindTextResize",
+    args: [elements, op],
+    ...runCase(name, () => {
+      const live = structuredClone(elements);
+      const scene = new lib.Scene(live);
+      const byId = (id) => live.find((el) => el.id === id);
+      if (op.redraw) {
+        lib.redrawTextBoundingBox(byId(op.redraw), op.container ? byId(op.container) : null, scene);
+      } else {
+        const container = byId("c");
+        scene.mutateElement(container, op.resize);
+        lib.handleBindTextResize(container, scene, op.handle, op.keepAspect, op.fromCenter, op.flipY);
+      }
+      return boundTextOutput(live);
+    }),
   })),
 );
 

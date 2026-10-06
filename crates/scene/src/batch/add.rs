@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Map, Value};
 
 use crate::binding::bind_arrow;
+use crate::bound_text::{bound_text_max_size, bound_text_position};
 use crate::editor::ItemStyle;
 use crate::element::{Element, LinearEnd};
 use crate::env::Env;
@@ -26,7 +27,6 @@ use crate::new_element::{
     new_generic_element, new_line_element, new_text_element,
 };
 use crate::text::TextMeasure;
-use crate::transform::{bound_text_max_size, bound_text_position};
 
 use super::OpError;
 use super::validate;

@@ -1,8 +1,8 @@
 //! Resize handles and pointer-driven resizing (`packages/element/src/transformHandles.ts`,
 //! `packages/element/src/resizeTest.ts`, the resize half of
 //! `packages/element/src/resizeElements.ts`, `packages/common/src/points.ts`'s
-//! `rescalePoints`, and `packages/element/src/textElement.ts`'s `computeBoundTextPosition`
-//! and its helpers, all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`).
+//! `rescalePoints`, all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`; a resized
+//! container's label is placed with [`crate::bound_text`]).
 //!
 //! napkin only ever draws and hit-tests the four corner squares: it never renders the
 //! `n`/`s`/`e`/`w` edge squares Excalidraw shows above a size threshold, and rather than
@@ -15,6 +15,7 @@
 //! all, and rewrapping needs the text measurement M5 adds); a resized container's bound text
 //! is only repositioned, keeping its own width, height and font size.
 
+use crate::bound_text::bound_text_position;
 use crate::collision::{DEFAULT_TRANSFORM_HANDLE_SPACING, SIDE_RESIZING_THRESHOLD};
 use crate::element::{Element, TextElement};
 use crate::env::Env;
@@ -25,8 +26,6 @@ use crate::geometry::{
 use crate::new_element::bump_version;
 use crate::selection::{Selection, selected_bounds};
 
-/// `BOUND_TEXT_PADDING` (`packages/common/src/constants.ts`).
-const BOUND_TEXT_PADDING: f64 = 5.0;
 /// `MIN_FONT_SIZE`.
 const MIN_FONT_SIZE: f64 = 1.0;
 /// `transformHandleSizes.mouse`: napkin has no pen/touch pointer type.
@@ -1023,82 +1022,6 @@ pub fn resize_elements(
     }
 
     changed
-}
-
-/// `getBoundTextMaxWidth`/`getBoundTextMaxHeight` for a rectangle, diamond or ellipse
-/// container; `None` for every other type (an arrow container's label has no such limit here,
-/// see [`bound_text_position`]'s doc comment).
-pub fn bound_text_max_size(container: &Element) -> Option<[f64; 2]> {
-    if !matches!(
-        container,
-        Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
-    ) {
-        return None;
-    }
-    let placement = container.placement()?;
-    let max_width = match container {
-        Element::Diamond(_) => {
-            rough::js::math_round(placement.width / 2.0) - BOUND_TEXT_PADDING * 2.0
-        }
-        Element::Ellipse(_) => {
-            rough::js::math_round(placement.width / 2.0 * std::f64::consts::SQRT_2)
-                - BOUND_TEXT_PADDING * 2.0
-        }
-        _ => placement.width - BOUND_TEXT_PADDING * 2.0,
-    };
-    let max_height = match container {
-        Element::Diamond(_) => {
-            rough::js::math_round(placement.height / 2.0) - BOUND_TEXT_PADDING * 2.0
-        }
-        Element::Ellipse(_) => {
-            rough::js::math_round(placement.height / 2.0 * std::f64::consts::SQRT_2)
-                - BOUND_TEXT_PADDING * 2.0
-        }
-        _ => placement.height - BOUND_TEXT_PADDING * 2.0,
-    };
-    Some([max_width, max_height])
-}
-
-/// `computeBoundTextPosition` for a rectangle, diamond or ellipse container; `None` otherwise
-/// (an arrow container's label follows `LinearElementEditor.getBoundTextElementPosition`
-/// instead, out of scope here).
-pub fn bound_text_position(container: &Element, text: &TextElement) -> Option<[f64; 2]> {
-    let placement = container.placement()?;
-    let [max_width, max_height] = bound_text_max_size(container)?;
-
-    // `getContainerCoords`.
-    let (offset_x, offset_y) = match container {
-        Element::Diamond(_) => (placement.width / 4.0, placement.height / 4.0),
-        Element::Ellipse(_) => {
-            let k = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
-            (placement.width / 2.0 * k, placement.height / 2.0 * k)
-        }
-        _ => (0.0, 0.0),
-    };
-    let container_x = placement.x + BOUND_TEXT_PADDING + offset_x;
-    let container_y = placement.y + BOUND_TEXT_PADDING + offset_y;
-
-    let y = match text.vertical_align.as_str() {
-        "top" => container_y,
-        "bottom" => container_y + (max_height - text.base.height),
-        _ => container_y + (max_height / 2.0 - text.base.height / 2.0),
-    };
-    let x = match text.text_align.as_str() {
-        "left" => container_x,
-        "right" => container_x + (max_width - text.base.width),
-        _ => container_x + (max_width / 2.0 - text.base.width / 2.0),
-    };
-
-    if placement.angle != 0.0 {
-        let content_center = [
-            container_x + max_width / 2.0,
-            container_y + max_height / 2.0,
-        ];
-        let text_center = [x + text.base.width / 2.0, y + text.base.height / 2.0];
-        let [rx, ry] = rotate_point(text_center, content_center, placement.angle);
-        return Some([rx - text.base.width / 2.0, ry - text.base.height / 2.0]);
-    }
-    Some([x, y])
 }
 
 /// Repositions `container_position`'s bound text (if it has one, and it is not deleted) with

@@ -439,3 +439,76 @@ export const textWrapCases = [
   ["wrapNaN", "wrapText", ["a b c", 20, 5, NaN]],
   ["wrapNegative", "wrapText", ["a b c", 20, 5, -1]],
 ];
+
+/** A container (id `c`) at the origin with a bound label (id `t`) reading `text`. */
+function labeled(kind, [width, height], text, labelOverrides = {}, containerOverrides = {}) {
+  const fontSize = labelOverrides.fontSize ?? 20;
+  const lineHeight = 1.25;
+  const lines = text.split("\n");
+  const chars = Math.max(...lines.map((line) => [...line].length));
+  return [
+    element(kind, {
+      id: "c", width, height, boundElements: [{ id: "t", type: "text" }], ...containerOverrides,
+    }),
+    element("text", {
+      id: "t", width: 0.6 * fontSize * chars, height: lines.length * fontSize * lineHeight,
+      text, originalText: text, fontSize, baseFontSize: fontSize, fontFamily: 5,
+      textAlign: "center", verticalAlign: "middle", containerId: "c", autoResize: true,
+      lineHeight, boundElements: null, ...labelOverrides,
+    }),
+  ];
+}
+
+const SENTENCE = "the quick brown fox jumps over the lazy dog";
+
+/**
+ * [name, elements, op] for the bound_text group. Each case builds a `Scene` from `elements`
+ * (container first, then its label), then:
+ * - `{redraw: textId, container: id | null}` runs redrawTextBoundingBox(text, container, scene);
+ * - `{resize: {width, height, x?, y?}, handle, keepAspect, fromCenter, flipY}` mutates the
+ *   container (`c`) to the given geometry, then runs handleBindTextResize.
+ * Output: `[{id, x, y, width, height, text?}]` for every element, in input order.
+ */
+export const boundTextCases = [
+  ["redrawRectangleGrows", labeled("rectangle", [120, 50], SENTENCE), { redraw: "t", container: "c" }],
+  ["redrawDiamondGrows", labeled("diamond", [200, 100], SENTENCE), { redraw: "t", container: "c" }],
+  ["redrawEllipseGrows", labeled("ellipse", [200, 100], SENTENCE), { redraw: "t", container: "c" }],
+  ["redrawFits", labeled("rectangle", [400, 200], "hello world"), { redraw: "t", container: "c" }],
+  ["redrawTop", labeled("rectangle", [400, 200], "hello", { verticalAlign: "top" }), { redraw: "t", container: "c" }],
+  ["redrawBottom", labeled("rectangle", [400, 200], "hello", { verticalAlign: "bottom" }), { redraw: "t", container: "c" }],
+  ["redrawLeft", labeled("rectangle", [400, 200], "hello", { textAlign: "left" }), { redraw: "t", container: "c" }],
+  ["redrawRight", labeled("rectangle", [400, 200], "hello", { textAlign: "right" }), { redraw: "t", container: "c" }],
+  ["redrawRotated", labeled("rectangle", [120, 50], SENTENCE, {}, { x: 30, y: 20, angle: 0.5 }), { redraw: "t", container: "c" }],
+  ["redrawCjk", labeled("rectangle", [100, 40], "這是一段很長的中文標籤，需要換行"), { redraw: "t", container: "c" }],
+  ["redrawHardBreak", labeled("rectangle", [300, 40], "first\nsecond line is longer"), { redraw: "t", container: "c" }],
+  ["redrawLargeFont", labeled("rectangle", [100, 100], "hello world", { fontSize: 36 }), { redraw: "t", container: "c" }],
+  [
+    "redrawFixedWidthStandalone",
+    [element("text", {
+      id: "t", x: 10, y: 20, width: 90, height: 25, text: "hello big world", originalText: "hello big world",
+      fontSize: 20, baseFontSize: 20, fontFamily: 5, textAlign: "left", verticalAlign: "top",
+      containerId: null, autoResize: false, lineHeight: 1.25,
+    })],
+    { redraw: "t", container: null },
+  ],
+  [
+    "redrawAutoResizeStandalone",
+    [element("text", {
+      id: "t", x: 10, y: 20, width: 10, height: 25, text: "hello big world", originalText: "hello big world",
+      fontSize: 20, baseFontSize: 20, fontFamily: 5, textAlign: "left", verticalAlign: "top",
+      containerId: null, autoResize: true, lineHeight: 1.25,
+    })],
+    { redraw: "t", container: null },
+  ],
+  ["resizeE", labeled("rectangle", [300, 100], SENTENCE), { resize: { width: 120, height: 100 }, handle: "e", keepAspect: false, fromCenter: false, flipY: false }],
+  ["resizeW", labeled("rectangle", [300, 100], SENTENCE), { resize: { x: 180, width: 120, height: 100 }, handle: "w", keepAspect: false, fromCenter: false, flipY: false }],
+  ["resizeN", labeled("rectangle", [300, 100], "hello world"), { resize: { y: 90, width: 300, height: 10 }, handle: "n", keepAspect: false, fromCenter: false, flipY: false }],
+  ["resizeS", labeled("rectangle", [300, 100], "hello world"), { resize: { width: 300, height: 10 }, handle: "s", keepAspect: false, fromCenter: false, flipY: false }],
+  ["resizeNKeepAspect", labeled("rectangle", [300, 100], SENTENCE), { resize: { y: 40, width: 120, height: 60 }, handle: "n", keepAspect: true, fromCenter: false, flipY: false }],
+  ["resizeSKeepAspect", labeled("rectangle", [300, 100], SENTENCE), { resize: { width: 120, height: 60 }, handle: "s", keepAspect: true, fromCenter: false, flipY: false }],
+  ["resizeNe", labeled("diamond", [300, 200], SENTENCE), { resize: { y: 100, width: 120, height: 100 }, handle: "ne", keepAspect: false, fromCenter: false, flipY: false }],
+  ["resizeSw", labeled("ellipse", [300, 200], SENTENCE), { resize: { x: 180, width: 120, height: 100 }, handle: "sw", keepAspect: false, fromCenter: false, flipY: false }],
+  ["resizeFromCenter", labeled("rectangle", [300, 100], SENTENCE), { resize: { x: 90, y: 20, width: 120, height: 60 }, handle: "se", keepAspect: false, fromCenter: true, flipY: false }],
+  ["resizeFlipY", labeled("rectangle", [300, 100], SENTENCE), { resize: { width: 120, height: 40 }, handle: "se", keepAspect: false, fromCenter: false, flipY: true }],
+  ["resizeRotated", labeled("rectangle", [300, 100], SENTENCE, {}, { x: 30, y: 20, angle: 0.5 }), { resize: { x: 30, y: 20, width: 120, height: 40 }, handle: "e", keepAspect: false, fromCenter: false, flipY: false }],
+];

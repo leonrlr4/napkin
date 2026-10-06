@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde_json::{Map, Value, json};
 
 use crate::binding::fixed_point_for;
+use crate::bound_text::bound_text_position;
 use crate::edit::delete_selection;
 use crate::editor::ItemStyle;
 use crate::element::{Element, LinearEnd};
@@ -22,7 +23,6 @@ use crate::geometry::size_from_points;
 use crate::new_element::bump_version;
 use crate::selection::Selection;
 use crate::text::{TextMeasure, measure_text, normalize_text};
-use crate::transform::bound_text_position;
 
 pub use add::{Added, LabelSpec, add_elements};
 

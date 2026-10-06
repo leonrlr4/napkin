@@ -34,6 +34,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::batch::add::{LabelSpec, bind_label};
+use crate::bound_text;
 use crate::collision;
 use crate::color::is_transparent;
 use crate::edit;
@@ -45,7 +46,6 @@ use crate::geometry::GeometryCache;
 use crate::new_element::{ElementProps, TextProps, bump_version, new_text_element};
 use crate::selection::{self, Selection};
 use crate::text::{self, TextMeasure};
-use crate::transform;
 
 use super::{Editor, PointerEvent, Tool, clone_scene};
 
@@ -375,7 +375,7 @@ pub(super) fn double_click(editor: &mut Editor<impl Env>, event: PointerEvent) -
 /// applies `editing`'s current font family/size, stroke color and opacity (`set_property` only
 /// ever wrote those to `editing` itself while the edit was open, via `apply_to_text_editing`),
 /// re-measures at that font, repositions a container's label with
-/// [`transform::bound_text_position`], and leaves a standalone text's top-left exactly where it
+/// [`bound_text::bound_text_position`], and leaves a standalone text's top-left exactly where it
 /// was. Unlike `properties.rs`'s `redraw_text` (the property panel's font-size/family change
 /// outside an edit), this does not recentre a standalone text at all: `getAdjustedDimensions`'
 /// anchor-preserving math keeps a left/top-aligned, unrotated text's top-left fixed on a content
@@ -426,7 +426,7 @@ fn update_existing_text(
         let Element::Text(t) = &file.elements[position] else {
             unreachable!("checked above")
         };
-        if let Some([x, y]) = transform::bound_text_position(&container, t) {
+        if let Some([x, y]) = bound_text::bound_text_position(&container, t) {
             let Element::Text(t) = &mut file.elements[position] else {
                 unreachable!("checked above")
             };

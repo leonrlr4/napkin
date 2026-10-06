@@ -3,6 +3,7 @@
 
 pub mod batch;
 pub mod binding;
+pub mod bound_text;
 pub mod clipboard;
 pub mod collision;
 pub mod color;
