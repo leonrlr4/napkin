@@ -23,6 +23,7 @@ pub mod sample;
 pub mod selection;
 pub mod shape;
 pub mod text;
+pub mod text_wrap;
 pub mod transform;
 pub mod zindex;
 

@@ -6,8 +6,8 @@
 import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
-import { REPO_ROOT, assertVersions, runCase, writeGroup } from "../lib/harness.mjs";
-import { colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, zindexCases } from "./cases.mjs";
+import { REPO_ROOT, assertVersions, encode, runCase, writeGroup } from "../lib/harness.mjs";
+import { colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -23,10 +23,11 @@ const lib = await bundleExcalidraw(
   export { ShapeCache, generateRoughOptions, getFreedrawOutlinePoints } from "@excalidraw/element/shape";
   export { newElement, newLinearElement, newArrowElement, newFreeDrawElement, newTextElement } from "@excalidraw/element/newElement";
   export { setCustomTextMetricsProvider } from "@excalidraw/element/textMeasurements";
+  export { wrapText, parseTokens } from "@excalidraw/element/textWrapping";
   export { syncMovedIndices, syncInvalidIndices } from "@excalidraw/element/fractionalIndex";
   export { moveOneLeft, moveOneRight } from "@excalidraw/element/zindex";
   export { Scene } from "@excalidraw/element/Scene";
-  export { applyDarkModeFilter, isTransparent, DEFAULT_GRID_SIZE } from "@excalidraw/common";
+  export { applyDarkModeFilter, isTransparent, getFontString, DEFAULT_GRID_SIZE } from "@excalidraw/common";
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
   export { duplicateElements } from "@excalidraw/element/duplicate";
@@ -238,6 +239,22 @@ writeGroup(
 // Canvas text metrics do not exist in node; every UTF-16 code unit is 0.6em wide. The Rust
 // side uses the same formula (`scene::sample::CharWidthMeasure`).
 lib.setCustomTextMetricsProvider({ getLineWidth: (text, font) => text.length * parseFloat(font) * 0.6 });
+
+writeGroup(
+  outDir,
+  "text_wrap",
+  source,
+  textWrapCases.map(([name, call, args]) => ({
+    name,
+    call,
+    args: encode(args),
+    ...runCase(name, () =>
+      call === "parseTokens"
+        ? lib.parseTokens(args[0])
+        : lib.wrapText(args[0], lib.getFontString({ fontSize: args[1], fontFamily: args[2] }), args[3]),
+    ),
+  })),
+);
 
 // newElement stamps `updated`/`created` with Date.now(); pin it so the defaults are comparable.
 // Callers pass id and seed, the two values that are random by design.

@@ -548,3 +548,20 @@ fn duplicate() {
         normalize_skeleton_output(&duplicated.elements)
     });
 }
+
+#[test]
+fn text_wrap() {
+    check_group(&dir(), "text_wrap", |case| match case.call.as_str() {
+        "parseTokens" => json!(scene::text_wrap::parse_tokens(
+            case.args[0].as_str().expect("line")
+        )),
+        "wrapText" => json!(scene::text_wrap::wrap_text(
+            case.args[0].as_str().expect("text"),
+            case.num(2),
+            case.num(1),
+            case.num(3),
+            &mut CharWidthMeasure,
+        )),
+        other => panic!("unknown call {other}"),
+    });
+}

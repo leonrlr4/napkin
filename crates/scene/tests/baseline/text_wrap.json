@@ -1,0 +1,19 @@
+{"source":"excalidraw@afa3a653fc5d2b742adcbd5a6063187b056d2419 (roughjs@4.6.4, perfect-freehand@1.2.0, tinycolor2@1.6.0)","cases":[
+{"name":"tokensLatin","call":"parseTokens","args":["Hello-world, this is (a) test."],"compare":"exact","expected":["Hello-","world,"," ","this"," ","is"," ","(a)"," ","test."]},
+{"name":"tokensCjkPunctuation","call":"parseTokens","args":["Hello 「世界。」🌎🗺"],"compare":"exact","expected":["Hello"," ","「世","界。」","🌎","🗺"]},
+{"name":"tokensKorean","call":"parseTokens","args":["Hello(한글)"],"compare":"exact","expected":["Hello(한","글)"]},
+{"name":"tokensCurrency","call":"parseTokens","args":["Price￥100 and $5"],"compare":"exact","expected":["Price","￥100"," ","and"," ","$5"]},
+{"name":"tokensEmojiSequences","call":"parseTokens","args":["👨‍👩‍👧‍👦 👍🏽 ☂️ 1️⃣ 🇨🇿🇯🇵 🏳️‍🌈"],"compare":"exact","expected":["👨‍👩‍👧‍👦"," ","👍🏽"," ","☂️"," ","1️⃣"," ","🇨🇿","🇯🇵"," ","🏳️‍🌈"]},
+{"name":"tokensMixed","call":"parseTokens","args":["日本語のテキスト、English words-with-hyphens！"],"compare":"exact","expected":["日","本","語","の","テ","キ","ス","ト、","English"," ","words-","with-","hyphens！"]},
+{"name":"tokensDecomposed","call":"parseTokens","args":["českyで"],"compare":"exact","expected":["česky","で"]},
+{"name":"wrapLatin","call":"wrapText","args":["The quick brown fox jumps over the lazy dog",20,5,150],"compare":"exact","expected":"The quick\nbrown fox\njumps over\nthe lazy dog"},
+{"name":"wrapLongWord","call":"wrapText","args":["Supercalifragilisticexpialidocious",20,5,100],"compare":"exact","expected":"Supercal\nifragili\nsticexpi\nalidocio\nus"},
+{"name":"wrapTrailingSpaces","call":"wrapText","args":["ab      ",20,5,40],"compare":"exact","expected":"ab "},
+{"name":"wrapHardBreaks","call":"wrapText","args":["first line\n\nthird line is long",16,6,90],"compare":"exact","expected":"first\nline\n\nthird\nline is\nlong"},
+{"name":"wrapCjk","call":"wrapText","args":["這是一段很長的中文句子，需要換行。",20,5,100],"compare":"exact","expected":"這是一段很長的中\n文句子，需要換\n行。"},
+{"name":"wrapEmoji","call":"wrapText","args":["hi 👨‍👩‍👧‍👦👨‍👩‍👧‍👦 there",20,5,30],"compare":"exact","expected":"hi\n👨‍👩‍👧‍👦\n👨‍👩‍👧‍👦\nth\ner\ne"},
+{"name":"wrapExactFit","call":"wrapText","args":["abc def",20,5,84],"compare":"exact","expected":"abc def"},
+{"name":"wrapNarrowerThanAChar","call":"wrapText","args":["abc",20,5,5],"compare":"exact","expected":"a\nb\nc"},
+{"name":"wrapNaN","call":"wrapText","args":["a b c",20,5,"NaN"],"compare":"exact","expected":"a b c"},
+{"name":"wrapNegative","call":"wrapText","args":["a b c",20,5,-1],"compare":"exact","expected":"a b c"}
+]}

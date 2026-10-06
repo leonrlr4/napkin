@@ -414,3 +414,28 @@ export const duplicateCases = [
     element("ellipse", { id: "e", x: 300 }),
   ], null, "everything"],
 ];
+
+/**
+ * [name, call, args] for the text_wrap group. `wrapText` args are
+ * [text, fontSize, fontFamily, maxWidth]; the font string is built with `getFontString`.
+ * `parseTokens` takes one line.
+ */
+export const textWrapCases = [
+  ["tokensLatin", "parseTokens", ["Hello-world, this is (a) test."]],
+  ["tokensCjkPunctuation", "parseTokens", ["Hello 「世界。」🌎🗺"]],
+  ["tokensKorean", "parseTokens", ["Hello(한글)"]],
+  ["tokensCurrency", "parseTokens", ["Price￥100 and $5"]],
+  ["tokensEmojiSequences", "parseTokens", ["👨‍👩‍👧‍👦 👍🏽 ☂️ 1️⃣ 🇨🇿🇯🇵 🏳️‍🌈"]],
+  ["tokensMixed", "parseTokens", ["日本語のテキスト、English words-with-hyphens！"]],
+  ["tokensDecomposed", "parseTokens", ["českyで"]],
+  ["wrapLatin", "wrapText", ["The quick brown fox jumps over the lazy dog", 20, 5, 150]],
+  ["wrapLongWord", "wrapText", ["Supercalifragilisticexpialidocious", 20, 5, 100]],
+  ["wrapTrailingSpaces", "wrapText", ["ab      ", 20, 5, 40]],
+  ["wrapHardBreaks", "wrapText", ["first line\n\nthird line is long", 16, 6, 90]],
+  ["wrapCjk", "wrapText", ["這是一段很長的中文句子，需要換行。", 20, 5, 100]],
+  ["wrapEmoji", "wrapText", ["hi 👨‍👩‍👧‍👦👨‍👩‍👧‍👦 there", 20, 5, 30]],
+  ["wrapExactFit", "wrapText", ["abc def", 20, 5, 84]],
+  ["wrapNarrowerThanAChar", "wrapText", ["abc", 20, 5, 5]],
+  ["wrapNaN", "wrapText", ["a b c", 20, 5, NaN]],
+  ["wrapNegative", "wrapText", ["a b c", 20, 5, -1]],
+];
