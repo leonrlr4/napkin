@@ -131,18 +131,28 @@ pub fn show(
                 // fresh edit's very first Ctrl+Z could restore that earlier edit's text here.
                 egui::text_edit::TextEditState::default().store(ui.ctx(), text_edit_id());
             }
-            // Lines break only where the user pressed Enter, as napkin's text elements never
-            // wrap; egui would otherwise wrap at the (zero) desired width, one character per
-            // line. The box starts one row tall, and line spacing follows the element's own
-            // `lineHeight`.
+            // Without a `wrap_width`, lines break only where the user pressed Enter; egui
+            // would otherwise wrap at the (zero) desired width, one character per line. With
+            // one (a container label, or a fixed-width text) the job wraps at that width in
+            // screen pixels and each line is aligned within it. This is only the live preview:
+            // the committed text wraps by `scene::text_wrap`. The box starts one row tall, and
+            // line spacing follows the element's own `lineHeight`.
+            let wrap_px = editing.wrap_width.map(|w| (w * camera.zoom) as f32);
             let line_height_px = font_size * editing.line_height as f32;
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
                 let mut job = egui::text::LayoutJob::simple(
                     text.as_str().to_owned(),
                     font_id.clone(),
                     color,
-                    f32::INFINITY,
+                    wrap_px.unwrap_or(f32::INFINITY),
                 );
+                if wrap_px.is_some() {
+                    job.halign = match editing.text_align.as_str() {
+                        "center" => egui::Align::Center,
+                        "right" => egui::Align::RIGHT,
+                        _ => egui::Align::LEFT,
+                    };
+                }
                 job.keep_trailing_whitespace = true;
                 for section in &mut job.sections {
                     section.format.line_height = Some(line_height_px);
@@ -157,7 +167,7 @@ pub fn show(
                     .text_color(color)
                     .clip_text(false)
                     .desired_rows(1)
-                    .desired_width(0.0)
+                    .desired_width(wrap_px.unwrap_or(0.0))
                     .layouter(&mut layouter),
             );
             if first_frame {
@@ -340,32 +350,47 @@ mod tests {
     /// matching pointer-up lands with the pointer still down over nothing but canvas (the
     /// widget just appeared, at zero width) and would read as "clicked outside" under the
     /// default `SurrenderFocusOn::Clicks`. A later press elsewhere still ends the edit.
-    #[test]
-    fn typed_text_stays_on_one_line_instead_of_wrapping_every_character() {
+    /// Types `text` into a fresh overlay over `editing` and returns the overlay area's rect
+    /// after layout has settled.
+    fn show_once(editing: &TextEditing, text: &str) -> egui::Rect {
         let ctx = egui::Context::default();
         fonts::install(&ctx, &glyphon::fontdb::Database::new());
         let mut warmup = ctx.run_ui(egui::RawInput::default(), |_| {});
         warmup.textures_delta.clear();
-        let editing = sample_editing("left");
         let mut buffer = String::new();
-        run_frame(&ctx, 0.0, vec![], &editing, &mut buffer, true);
+        run_frame(&ctx, 0.0, vec![], editing, &mut buffer, true);
         run_frame(
             &ctx,
             0.01,
-            vec![egui::Event::Text("understand".to_owned())],
-            &editing,
+            vec![egui::Event::Text(text.to_owned())],
+            editing,
             &mut buffer,
             false,
         );
-        run_frame(&ctx, 0.02, vec![], &editing, &mut buffer, false);
-        assert_eq!(buffer, "understand");
-        let rect = ctx
-            .memory(|memory| memory.area_rect(egui::Id::new("napkin-text-edit")))
-            .expect("the overlay area was laid out");
+        run_frame(&ctx, 0.02, vec![], editing, &mut buffer, false);
+        assert_eq!(buffer, text);
+        ctx.memory(|memory| memory.area_rect(egui::Id::new("napkin-text-edit")))
+            .expect("the overlay area was laid out")
+    }
+
+    #[test]
+    fn typed_text_stays_on_one_line_instead_of_wrapping_every_character() {
+        let rect = show_once(&sample_editing("left"), "understand");
         assert!(
             rect.width() > rect.height() * 3.0,
             "one line of ten characters should be much wider than tall: {rect:?}"
         );
+    }
+
+    #[test]
+    fn a_label_wraps_at_its_container_width() {
+        let editing = TextEditing {
+            wrap_width: Some(90.0),
+            ..sample_editing("center")
+        };
+        let rect = show_once(&editing, "hello world hello world hello world");
+        assert!(rect.width() <= 90.0 + 1.0, "{rect:?}");
+        assert!(rect.height() > 20.0 * 1.25 * 1.5, "{rect:?}");
     }
 
     #[test]
