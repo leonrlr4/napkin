@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## 這是什麼
 
 napkin 是常駐的原生 Rust 手繪白板，存檔格式就是 `.excalidraw`，對同一個 seed 要畫出和 excalidraw.com 一樣的線條。Cargo workspace，依賴方向只有 `app → scene → rough`：
