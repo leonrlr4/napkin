@@ -61,9 +61,9 @@ fn paste_is_refused_while_drawing_a_multi_point_line() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Line);
     click(&mut e, at(0.0, 0.0));
-    e.pointer_move(at(100.0, 0.0));
+    e.pointer_move(at(100.0, 0.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 0.0));
-    e.pointer_move(at(100.0, 100.0));
+    e.pointer_move(at(100.0, 100.0), &mut CharWidthMeasure);
 
     assert!(!e.paste("hello", [500.0, 500.0], &mut CharWidthMeasure));
     assert!(!e.is_idle(), "the line gesture must still be in progress");
@@ -88,12 +88,12 @@ fn paste_is_refused_mid_selection_drag() {
         json!({"backgroundColor": "#ffc9c9"}),
     )]);
     e.pointer_down(at(50.0, 50.0));
-    e.pointer_move(at(80.0, 50.0));
+    e.pointer_move(at(80.0, 50.0), &mut CharWidthMeasure);
 
     assert!(!e.paste("hello", [500.0, 500.0], &mut CharWidthMeasure));
 
-    e.pointer_move(at(120.0, 50.0));
-    e.pointer_up(at(120.0, 50.0));
+    e.pointer_move(at(120.0, 50.0), &mut CharWidthMeasure);
+    e.pointer_up(at(120.0, 50.0), &mut CharWidthMeasure);
     let live: Vec<Value> = e
         .file()
         .elements

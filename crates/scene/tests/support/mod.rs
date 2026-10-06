@@ -4,6 +4,7 @@
 
 use scene::editor::{Editor, Modifiers, PointerEvent};
 use scene::env::Env;
+pub use scene::sample::CharWidthMeasure;
 use scene::{Element, sample};
 use serde_json::Value;
 
@@ -72,7 +73,7 @@ pub fn alt(x: f64, y: f64) -> PointerEvent {
 
 pub fn click(editor: &mut Editor<TestEnv>, event: PointerEvent) {
     editor.pointer_down(event);
-    editor.pointer_up(event);
+    editor.pointer_up(event, &mut CharWidthMeasure);
 }
 
 /// Presses at `from`, moves to `to` in four equal steps and releases there, keeping `from`'s
@@ -85,9 +86,9 @@ pub fn drag(editor: &mut Editor<TestEnv>, from: PointerEvent, to: [f64; 2]) {
             from.at[0] + (to[0] - from.at[0]) * t,
             from.at[1] + (to[1] - from.at[1]) * t,
         ];
-        editor.pointer_move(PointerEvent { at, ..from });
+        editor.pointer_move(PointerEvent { at, ..from }, &mut CharWidthMeasure);
     }
-    editor.pointer_up(PointerEvent { at: to, ..from });
+    editor.pointer_up(PointerEvent { at: to, ..from }, &mut CharWidthMeasure);
 }
 
 pub fn element<'a>(editor: &'a Editor<TestEnv>, id: &str) -> &'a Element {

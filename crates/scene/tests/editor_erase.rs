@@ -14,11 +14,11 @@ fn a_stroke_across_two_shapes_erases_both_in_one_step() {
     ]);
     e.set_tool(Tool::Eraser);
     e.pointer_down(at(-10.0, 25.0));
-    e.pointer_move(at(60.0, 25.0));
+    e.pointer_move(at(60.0, 25.0), &mut CharWidthMeasure);
     assert!(e.pending_erasure().contains("a"));
-    e.pointer_move(at(160.0, 25.0));
+    e.pointer_move(at(160.0, 25.0), &mut CharWidthMeasure);
     assert_eq!(e.pending_erasure().len(), 2);
-    e.pointer_up(at(160.0, 25.0));
+    e.pointer_up(at(160.0, 25.0), &mut CharWidthMeasure);
     assert!(e.pending_erasure().is_empty());
     let deleted: Vec<bool> = e.file().elements.iter().map(|x| x.is_deleted()).collect();
     assert_eq!(deleted, vec![true, true, false]);
@@ -40,7 +40,7 @@ fn a_click_erases_the_element_under_it_with_its_label() {
     ]);
     e.set_tool(Tool::Eraser);
     e.pointer_down(at(50.0, 25.0));
-    e.pointer_up(at(50.0, 25.0));
+    e.pointer_up(at(50.0, 25.0), &mut CharWidthMeasure);
     assert!(e.file().elements.iter().all(|x| x.is_deleted()));
 }
 
@@ -55,10 +55,10 @@ fn escape_abandons_the_stroke_and_locked_elements_survive() {
     ]);
     e.set_tool(Tool::Eraser);
     e.pointer_down(at(-10.0, 25.0));
-    e.pointer_move(at(160.0, 25.0));
+    e.pointer_move(at(160.0, 25.0), &mut CharWidthMeasure);
     assert!(!e.pending_erasure().contains("l"));
     assert!(e.command(Command::Escape));
-    e.pointer_up(at(160.0, 25.0));
+    e.pointer_up(at(160.0, 25.0), &mut CharWidthMeasure);
     assert!(e.file().elements.iter().all(|x| !x.is_deleted()));
 }
 
@@ -87,7 +87,7 @@ fn erasing_a_frame_deletes_its_children_and_one_undo_restores_all() {
     e.pointer_down(at(0.0, 100.0));
     assert_eq!(e.pending_erasure().len(), 1);
     assert!(e.pending_erasure().contains("f"));
-    e.pointer_up(at(0.0, 100.0));
+    e.pointer_up(at(0.0, 100.0), &mut CharWidthMeasure);
 
     for id in ["f", "c1", "c2", "lbl"] {
         assert!(element(&e, id).is_deleted(), "{id} should be deleted");
@@ -119,11 +119,11 @@ fn a_grouped_labels_container_is_untouched_unless_the_container_itself_is_hit() 
     ]);
     e.set_tool(Tool::Eraser);
     e.pointer_down(at(-10.0, 25.0));
-    e.pointer_move(at(60.0, 25.0));
+    e.pointer_move(at(60.0, 25.0), &mut CharWidthMeasure);
     assert!(e.pending_erasure().contains("s"));
     assert!(e.pending_erasure().contains("t"));
     assert!(!e.pending_erasure().contains("c"));
-    e.pointer_up(at(60.0, 25.0));
+    e.pointer_up(at(60.0, 25.0), &mut CharWidthMeasure);
 
     assert!(element(&e, "s").is_deleted());
     assert!(element(&e, "t").is_deleted());
@@ -141,8 +141,8 @@ fn a_stroke_crosses_an_ellipse_outline() {
     )]);
     e.set_tool(Tool::Eraser);
     e.pointer_down(at(-10.0, 25.0));
-    e.pointer_move(at(110.0, 25.0));
+    e.pointer_move(at(110.0, 25.0), &mut CharWidthMeasure);
     assert!(e.pending_erasure().contains("e"));
-    e.pointer_up(at(110.0, 25.0));
+    e.pointer_up(at(110.0, 25.0), &mut CharWidthMeasure);
     assert!(element(&e, "e").is_deleted());
 }

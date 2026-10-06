@@ -80,7 +80,7 @@ fn random_step(e: &mut Editor<TestEnv>, ops: &mut Ops) {
         3 => {
             e.set_tool(Tool::Line);
             click(e, at(x, y));
-            e.pointer_move(at(to[0], to[1]));
+            e.pointer_move(at(to[0], to[1]), &mut CharWidthMeasure);
             click(e, at(to[0], to[1]));
             e.command(Command::Finalize);
         }

@@ -38,7 +38,7 @@ fn shift_click_adds_and_removes_on_release() {
     assert_eq!(selected(&e), ["a", "b"]);
     e.pointer_down(shift(50.0, 50.0));
     assert_eq!(selected(&e), ["a", "b"], "removal waits for pointer up");
-    e.pointer_up(shift(50.0, 50.0));
+    e.pointer_up(shift(50.0, 50.0), &mut CharWidthMeasure);
     assert_eq!(selected(&e), ["b"]);
 }
 
@@ -71,12 +71,12 @@ fn box_selection_updates_while_dragging() {
         solid("b", [100.0, 100.0, 50.0, 50.0]),
     ]);
     e.pointer_down(at(0.0, 0.0));
-    e.pointer_move(at(70.0, 70.0));
+    e.pointer_move(at(70.0, 70.0), &mut CharWidthMeasure);
     assert_eq!(selected(&e), ["a"]);
     assert_eq!(e.overlay(1.0).box_selection, Some([0.0, 0.0, 70.0, 70.0]));
-    e.pointer_move(at(200.0, 200.0));
+    e.pointer_move(at(200.0, 200.0), &mut CharWidthMeasure);
     assert_eq!(selected(&e), ["a", "b"]);
-    e.pointer_up(at(200.0, 200.0));
+    e.pointer_up(at(200.0, 200.0), &mut CharWidthMeasure);
     assert_eq!(selected(&e), ["a", "b"]);
     assert_eq!(e.overlay(1.0).box_selection, None);
     assert_eq!(e.revision(), 0);
@@ -130,7 +130,7 @@ fn dragging_inside_the_box_of_a_multi_selection_moves_everything() {
 fn corner_handle_resizes_and_shows_a_resize_cursor() {
     let mut e = editor(vec![solid("a", [0.0, 0.0, 100.0, 50.0])]);
     click(&mut e, at(50.0, 25.0));
-    e.pointer_move(at(104.0, 54.0));
+    e.pointer_move(at(104.0, 54.0), &mut CharWidthMeasure);
     assert_eq!(e.cursor(), Cursor::ResizeNwse);
     // Grabbed 4 units past the corner: the offset is kept, so the corner ends at (150, 100).
     drag(&mut e, at(104.0, 54.0), [154.0, 104.0]);
@@ -201,10 +201,10 @@ fn undo_waits_for_the_gesture_and_revision_counts_edits() {
     let after_first = e.revision();
     assert!(after_first > 0);
     e.pointer_down(at(15.0, 5.0));
-    e.pointer_move(at(25.0, 5.0));
+    e.pointer_move(at(25.0, 5.0), &mut CharWidthMeasure);
     assert!(!e.is_idle());
     assert!(!e.command(Command::Undo));
-    e.pointer_up(at(25.0, 5.0));
+    e.pointer_up(at(25.0, 5.0), &mut CharWidthMeasure);
     assert!(e.is_idle());
     assert!(e.command(Command::Undo));
     assert_eq!(rect_of(&e, "a")[..2], [10.0, 0.0]);
@@ -320,11 +320,73 @@ fn bring_forward_reorders_and_undoes_in_one_step() {
 fn changing_tool_mid_drag_finishes_the_gesture_as_one_undo_step() {
     let mut e = editor(vec![solid("a", [0.0, 0.0, 10.0, 10.0])]);
     e.pointer_down(at(5.0, 5.0));
-    e.pointer_move(at(15.0, 5.0));
+    e.pointer_move(at(15.0, 5.0), &mut CharWidthMeasure);
     assert!(!e.is_idle());
     e.set_tool(Tool::Rectangle);
     assert!(e.is_idle());
     assert_eq!(rect_of(&e, "a")[..2], [10.0, 0.0]);
     assert!(e.command(Command::Undo));
     assert_eq!(rect_of(&e, "a")[..2], [0.0, 0.0]);
+}
+
+fn labeled_box(width: f64) -> Vec<Value> {
+    vec![
+        sample::with(
+            solid("r", [0.0, 0.0, width, 50.0]),
+            json!({"boundElements": [{"id": "t", "type": "text"}]}),
+        ),
+        sample::with(
+            sample::text("t", [0.0, 12.5, 132.0, 25.0], "hello world", Some("r")),
+            json!({"textAlign": "center", "verticalAlign": "middle"}),
+        ),
+    ]
+}
+
+#[test]
+fn narrowing_a_container_rewraps_its_label_and_grows_it() {
+    let mut e = editor(labeled_box(300.0));
+    click(&mut e, at(150.0, 25.0));
+    // Grab the right edge midpoint (4 units outside it) and pull it to x = 100.
+    drag(&mut e, at(304.0, 25.0), [104.0, 25.0]);
+    assert_eq!(element(&e, "t").to_value()["text"], json!("hello\nworld"));
+    assert_eq!(rect_of(&e, "r"), [0.0, 0.0, 100.0, 60.0]);
+    assert!(e.command(Command::Undo));
+    assert_eq!(element(&e, "t").to_value()["text"], json!("hello world"));
+    assert_eq!(rect_of(&e, "r"), [0.0, 0.0, 300.0, 50.0]);
+}
+
+#[test]
+fn a_labeled_container_stops_at_its_minimum_width() {
+    let mut e = editor(labeled_box(300.0));
+    click(&mut e, at(150.0, 25.0));
+    drag(&mut e, at(304.0, 25.0), [7.0, 25.0]);
+    // approx_min_container_size with CharWidthMeasure: 12 + 10.
+    assert_eq!(rect_of(&e, "r")[2], 22.0);
+}
+
+#[test]
+fn a_text_side_handle_fixes_its_width_and_wraps() {
+    let mut e = editor(vec![sample::text(
+        "t",
+        [0.0, 0.0, 132.0, 25.0],
+        "hello world",
+        None,
+    )]);
+    click(&mut e, at(60.0, 12.0));
+    drag(&mut e, at(136.0, 12.5), [74.0, 12.5]);
+    let v = element(&e, "t").to_value();
+    assert_eq!(v["text"], json!("hello\nworld"));
+    assert_eq!(v["autoResize"], json!(false));
+    assert_eq!(v["width"], json!(70.0));
+    assert_eq!(v["height"], json!(50.0));
+}
+
+#[test]
+fn scaling_a_labeled_container_with_shift_scales_its_label_font() {
+    let mut e = editor(labeled_box(300.0));
+    click(&mut e, at(150.0, 25.0));
+    // Se corner to double both dimensions.
+    drag(&mut e, shift(304.0, 54.0), [604.0, 104.0]);
+    let font = element(&e, "t").to_value()["fontSize"].as_f64().unwrap();
+    assert!(font > 20.0, "{font}");
 }

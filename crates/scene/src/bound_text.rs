@@ -168,7 +168,7 @@ enum Anchor {
 }
 
 /// The position of `container`'s live (typed, not deleted) text label.
-fn live_bound_text(file: &SceneFile, container: usize) -> Option<usize> {
+pub(crate) fn live_bound_text(file: &SceneFile, container: usize) -> Option<usize> {
     let (text_id, _) = file.elements[container]
         .bound_elements()
         .into_iter()
@@ -178,7 +178,7 @@ fn live_bound_text(file: &SceneFile, container: usize) -> Option<usize> {
         .position(|e| matches!(e, Element::Text(_)) && !e.is_deleted() && e.id() == Some(text_id))
 }
 
-fn text_line_height(text: &TextElement) -> f64 {
+pub(crate) fn text_line_height(text: &TextElement) -> f64 {
     text.line_height
         .unwrap_or_else(|| line_height(text.font_family))
 }

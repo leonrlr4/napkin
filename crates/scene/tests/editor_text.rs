@@ -10,7 +10,7 @@ fn text_tool_creates_a_measured_text_element_in_one_step() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Text);
     e.pointer_down(at(100.0, 100.0));
-    e.pointer_up(at(100.0, 100.0));
+    e.pointer_up(at(100.0, 100.0), &mut CharWidthMeasure);
     let editing = e.text_editing().expect("editing").clone();
     assert_eq!(editing.element_id, None);
     assert_eq!(editing.font_size, 20.0);
@@ -31,7 +31,7 @@ fn committing_empty_new_text_creates_nothing() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Text);
     e.pointer_down(at(0.0, 0.0));
-    e.pointer_up(at(0.0, 0.0));
+    e.pointer_up(at(0.0, 0.0), &mut CharWidthMeasure);
     assert!(!e.commit_text("", &mut CharWidthMeasure));
     assert!(e.file().elements.is_empty());
     assert!(!e.command(Command::Undo));
@@ -116,13 +116,13 @@ fn switching_to_another_tool_while_editing_does_not_lose_or_erase_the_text() {
     // The eraser tool would otherwise delete "t" out from under this edit.
     e.set_tool(Tool::Eraser);
     e.pointer_down(at(10.0, 10.0));
-    e.pointer_up(at(10.0, 10.0));
+    e.pointer_up(at(10.0, 10.0), &mut CharWidthMeasure);
     assert!(!e.file().elements[0].is_deleted());
 
     // A creation tool would otherwise start drawing a new shape underneath the editor.
     e.set_tool(Tool::Rectangle);
     e.pointer_down(at(50.0, 50.0));
-    e.pointer_up(at(80.0, 80.0));
+    e.pointer_up(at(80.0, 80.0), &mut CharWidthMeasure);
     assert_eq!(e.file().elements.len(), 1);
 
     assert!(e.text_editing().is_some());
@@ -141,7 +141,7 @@ fn text_tool_click_far_from_a_containers_center_creates_free_text_not_a_label() 
     // (20, 20) is inside the rectangle's bounding box but about 85 units from its center
     // (100, 50), well past the 30-unit center-snap threshold.
     e.pointer_down(at(20.0, 20.0));
-    e.pointer_up(at(20.0, 20.0));
+    e.pointer_up(at(20.0, 20.0), &mut CharWidthMeasure);
     assert_eq!(e.text_editing().unwrap().container_id, None);
     assert!(e.commit_text("free", &mut CharWidthMeasure));
     assert_eq!(e.file().elements.len(), 2);
@@ -158,7 +158,7 @@ fn text_tool_click_near_a_containers_center_binds_its_label() {
     e.set_tool(Tool::Text);
     // (110, 60) is about 14 units from the center (100, 50), within the threshold.
     e.pointer_down(at(110.0, 60.0));
-    e.pointer_up(at(110.0, 60.0));
+    e.pointer_up(at(110.0, 60.0), &mut CharWidthMeasure);
     assert_eq!(e.text_editing().unwrap().container_id.as_deref(), Some("r"));
 }
 
@@ -212,7 +212,7 @@ fn font_size_set_while_editing_applies_to_the_committed_text() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Text);
     e.pointer_down(at(0.0, 0.0));
-    e.pointer_up(at(0.0, 0.0));
+    e.pointer_up(at(0.0, 0.0), &mut CharWidthMeasure);
     e.set_property(Property::FontSize(36.0), &mut CharWidthMeasure);
     assert_eq!(e.text_editing().unwrap().font_size, 36.0);
     assert!(e.commit_text("hi", &mut CharWidthMeasure));

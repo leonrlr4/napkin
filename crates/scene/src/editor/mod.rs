@@ -294,14 +294,16 @@ impl<E: Env> Editor<E> {
         text::pointer_down(self, event);
     }
 
-    pub fn pointer_move(&mut self, event: PointerEvent) {
-        select::pointer_move(self, event);
+    /// `measure` is only consulted when the move resizes a container's label or a standalone
+    /// text.
+    pub fn pointer_move(&mut self, event: PointerEvent, measure: &mut dyn TextMeasure) {
+        select::pointer_move(self, event, measure);
         create::pointer_move(self, event);
         erase::pointer_move(self, event);
     }
 
-    pub fn pointer_up(&mut self, event: PointerEvent) {
-        select::pointer_up(self, event);
+    pub fn pointer_up(&mut self, event: PointerEvent, measure: &mut dyn TextMeasure) {
+        select::pointer_up(self, event, measure);
         create::pointer_up(self, event);
         erase::pointer_up(self, event);
     }
