@@ -324,9 +324,20 @@ export const newElementCalls = [
   ["text/unknownFamily", "newTextElement", { type: "text", id: "t6", seed: 18, x: 0, y: 0, text: "?", fontFamily: 42 }],
 ];
 
-/** [case name, skeleton list] for convertToExcalidrawElements. Every label fits its container
- * under the generator's 0.6em text metrics: napkin never wraps or grows (AI spec §4.5). */
+/** [case name, skeleton list] for convertToExcalidrawElements. Labels wrap to their container
+ * and grow it (redrawTextBoundingBox) under the generator's 0.6em text metrics; the
+ * labelsWrapAndGrow and arrowBetweenGrownBoxes cases exercise that. */
 export const skeletonBatches = [
+  ["labelsWrapAndGrow", [
+    { type: "rectangle", id: "r", x: 0, y: 0, width: 100, height: 40, label: { text: "Parse the input file" } },
+    { type: "diamond", id: "d", x: 200, y: 0, width: 120, height: 60, label: { text: "Is it valid?" } },
+    { type: "ellipse", id: "e", x: 0, y: 200, width: 90, height: 50, label: { text: "這是很長的中文標籤" } },
+  ]],
+  ["arrowBetweenGrownBoxes", [
+    { type: "rectangle", id: "a", x: 0, y: 0, width: 80, height: 30, label: { text: "first step here" } },
+    { type: "rectangle", id: "b", x: 300, y: 0, width: 80, height: 30, label: { text: "second" } },
+    { type: "arrow", x: 85, y: 15, points: [[0, 0], [210, 0]], start: { id: "a" }, end: { id: "b" } },
+  ]],
   ["shapes", [
     { type: "rectangle", x: 0, y: 0, width: 120, height: 60, strokeColor: "#1971c2", backgroundColor: "#a5d8ff" },
     { type: "diamond", x: 200, y: 0, width: 100, height: 80, fillStyle: "hachure", strokeWidth: 4, strokeStyle: "dashed" },

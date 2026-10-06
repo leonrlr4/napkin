@@ -150,7 +150,6 @@ fn apply<E: Env>(session: &mut Session<'_, E>, batch: &Value) -> Response {
                 "added": report.added,
                 "updated": report.updated,
                 "deleted": report.deleted,
-                "warnings": report.warnings,
             });
             Response::ok(output.to_string())
         }

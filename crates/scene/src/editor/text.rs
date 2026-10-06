@@ -10,9 +10,8 @@
 //! by `onSubmit`; an existing one that ends up empty is soft-deleted the same way
 //! [`edit::delete_selection`] deletes a selection. Creating a new container label goes through
 //! `batch::add::bind_label` (the same primitive the AI batch interface uses), not a second copy
-//! of `startTextEditing`'s own container-binding branch: napkin has no sticky notes and does not
-//! grow a container to fit its label, so that branch's remaining logic is just what `bind_label`
-//! already does.
+//! of `startTextEditing`'s own container-binding branch: napkin has no sticky notes, so that
+//! branch's remaining logic is just what `bind_label` already does.
 //!
 //! Left out of this port, matching the rest of `scene`'s scope: frames, sticky notes, elbow
 //! arrow endpoint labels (an arrow is never a text container here), the autoshape tool, and
@@ -441,8 +440,8 @@ fn update_existing_text(
 }
 
 /// A new label on `container_id`, via the same `bindTextToContainer`/`redrawTextBoundingBox`
-/// primitive the AI batch interface uses (`batch::add::bind_label`): centered, not wrapped,
-/// left overflowing when it does not fit, colored and made opaque per
+/// primitive the AI batch interface uses (`batch::add::bind_label`): centered, wrapped to
+/// the container and growing it when it does not fit, colored and made opaque per
 /// `editing`'s stroke color and opacity (`currentItemStrokeColor`/`currentItemOpacity` at
 /// `startTextEditing` time) rather than `bind_label`'s AI-batch default of the container's own
 /// color. Bumps the container's own version for gaining the `boundElements` entry: unlike
@@ -470,16 +469,7 @@ fn create_new_label(
         stroke_color: Some(editing.stroke_color.clone()),
         opacity: Some(editing.opacity),
     };
-    let mut warnings = Vec::new();
-    let label_position = bind_label(
-        file,
-        position,
-        &label,
-        container_id,
-        measure,
-        env,
-        &mut warnings,
-    );
+    let label_position = bind_label(file, position, &label, measure, env);
     if file.elements[position] != container_before {
         bump_version(&mut file.elements[position], env);
     }

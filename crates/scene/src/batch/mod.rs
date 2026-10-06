@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde_json::{Map, Value, json};
 
 use crate::binding::fixed_point_for;
-use crate::bound_text::bound_text_position;
+use crate::bound_text::{bound_text_position, handle_bind_text_resize, redraw_text_bounding_box};
 use crate::edit::delete_selection;
 use crate::editor::ItemStyle;
 use crate::element::{Element, LinearEnd};
@@ -49,7 +49,6 @@ pub struct BatchReport {
     pub updated: Vec<String>,
     /// Ids named by `delete` ops, deduplicated.
     pub deleted: Vec<String>,
-    pub warnings: Vec<String>,
 }
 
 fn op_err(pos: usize, field: Option<&str>, message: impl Into<String>) -> OpError {
@@ -125,7 +124,6 @@ pub fn apply_batch(
         Ok(added) => {
             report.created = added.aliases;
             report.added = added.ids;
-            report.warnings = added.warnings;
         }
         Err(add_errors) => errors.extend(add_errors),
     }
@@ -140,7 +138,6 @@ pub fn apply_batch(
                 measure,
                 env,
                 &mut report.updated,
-                &mut report.warnings,
             ),
             "delete" => apply_delete_op(
                 &mut next,
@@ -228,14 +225,8 @@ fn update_label_text_fields(label: &mut Element, text_value: &str, measure: &mut
 }
 
 /// Repositions `label_index`'s text with [`bound_text_position`] against `container_index`'s
-/// current state, and pushes an overflow warning if it no longer fits. A no-op (position-wise)
-/// when `container_index` is not a rectangle/diamond/ellipse container.
-fn reposition_label_and_warn(
-    next: &mut SceneFile,
-    container_index: usize,
-    label_index: usize,
-    warnings: &mut Vec<String>,
-) {
+/// current state. A no-op when `container_index` is not a rectangle/diamond/ellipse container.
+fn reposition_label(next: &mut SceneFile, container_index: usize, label_index: usize) {
     let container = next.elements[container_index].clone();
     if let Element::Text(t) = &next.elements[label_index]
         && let Some([x, y]) = bound_text_position(&container, t)
@@ -244,8 +235,15 @@ fn reposition_label_and_warn(
         t.base.x = x;
         t.base.y = y;
     }
-    let name = container.id().unwrap_or_default().to_owned();
-    add::warn_if_label_overflows(&container, &next.elements[label_index], &name, warnings);
+}
+
+/// Bumps `element` unless it already carries a version newer than `version_before`: the
+/// bound-text primitives bump what they change themselves, so an element they touched must
+/// not be bumped a second time for the same `update`.
+fn bump_if_not_bumped(element: &mut Element, version_before: f64, env: &mut impl Env) {
+    if element.version() == version_before {
+        bump_version(element, env);
+    }
 }
 
 /// Recomputes `fixedPoint` for the arrow at `arrow_index`'s binding to `target_index` at `end`
@@ -438,14 +436,13 @@ fn apply_update(
     set: &Map<String, Value>,
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
-    warnings: &mut Vec<String>,
 ) -> Result<(), OpError> {
     match &next.elements[index] {
         Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_) => {
-            apply_generic_update(next, pos, index, set, measure, env, warnings)
+            apply_generic_update(next, pos, index, set, measure, env)
         }
         Element::Text(t) if t.container_id.value().is_some() => {
-            apply_bound_text_update(next, pos, index, set, measure, env, warnings)
+            apply_bound_text_update(next, pos, index, set, measure, env)
         }
         Element::Text(_) => apply_text_update(next, pos, index, set, measure, env),
         Element::Line(_) | Element::Arrow(_) => apply_linear_update(next, pos, index, set, env),
@@ -464,7 +461,6 @@ fn apply_generic_update(
     set: &Map<String, Value>,
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
-    warnings: &mut Vec<String>,
 ) -> Result<(), OpError> {
     let mut new_x = None;
     let mut new_y = None;
@@ -516,11 +512,19 @@ fn apply_generic_update(
         }
     }
     style.apply_to(&mut next.elements[index]);
-    let geometry_changed = next.elements[index].placement() != container_before.placement();
+    let size_changed = match (
+        next.elements[index].placement(),
+        container_before.placement(),
+    ) {
+        (Some(after), Some(before)) => after.width != before.width || after.height != before.height,
+        _ => false,
+    };
+    let moved = next.elements[index].placement() != container_before.placement();
 
     match (live_label_index(next, index), &new_text) {
         (Some(label_index), _) => {
             let label_before = next.elements[label_index].clone();
+            let label_version_before = label_before.version();
             if let Some(text_value) = &new_text {
                 update_label_text_fields(&mut next.elements[label_index], text_value, measure);
             }
@@ -534,15 +538,18 @@ fn apply_generic_update(
                     base.stroke_color = color;
                 }
             }
-            if new_text.is_some() || geometry_changed {
-                reposition_label_and_warn(next, index, label_index, warnings);
+            if size_changed {
+                handle_bind_text_resize(next, index, None, false, false, false, measure, env);
+            } else if new_text.is_some() {
+                redraw_text_bounding_box(next, label_index, Some(index), measure, env);
+            } else if moved {
+                reposition_label(next, index, label_index);
             }
             if next.elements[label_index] != label_before {
-                bump_version(&mut next.elements[label_index], env);
+                bump_if_not_bumped(&mut next.elements[label_index], label_version_before, env);
             }
         }
         (None, Some(text_value)) => {
-            let name = next.elements[index].id().unwrap_or_default().to_owned();
             let label = LabelSpec {
                 text: text_value.clone(),
                 font_size: None,
@@ -552,7 +559,7 @@ fn apply_generic_update(
                 stroke_color: None,
                 opacity: None,
             };
-            let label_index = add::bind_label(next, index, &label, &name, measure, env, warnings);
+            let label_index = add::bind_label(next, index, &label, measure, env);
             let label_id = next.elements[label_index]
                 .id()
                 .expect("label has an id")
@@ -562,12 +569,12 @@ fn apply_generic_update(
         (None, None) => {}
     }
 
-    if geometry_changed {
+    if next.elements[index].placement() != container_before.placement() {
         refresh_bound_arrow_fixed_points(next, index, env);
     }
 
     if next.elements[index] != container_before {
-        bump_version(&mut next.elements[index], env);
+        bump_if_not_bumped(&mut next.elements[index], container_before.version(), env);
     }
 
     Ok(())
@@ -581,7 +588,6 @@ fn apply_bound_text_update(
     set: &Map<String, Value>,
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
-    warnings: &mut Vec<String>,
 ) -> Result<(), OpError> {
     let mut new_text: Option<String> = None;
     let mut style = StyleSet::default();
@@ -614,21 +620,28 @@ fn apply_bound_text_update(
     };
 
     let before = next.elements[index].clone();
+    let container_before = container_id
+        .as_deref()
+        .and_then(|cid| find_alive_by_id(&next.elements, cid))
+        .map(|position| (position, next.elements[position].clone()));
     if let Some(text_value) = &new_text {
         update_label_text_fields(&mut next.elements[index], text_value, measure);
     }
     style.apply_to(&mut next.elements[index]);
 
     if new_text.is_some()
-        && let Some(container_index) = container_id
-            .as_deref()
-            .and_then(|cid| find_alive_by_id(&next.elements, cid))
+        && let Some((container_index, _)) = &container_before
     {
-        reposition_label_and_warn(next, container_index, index, warnings);
+        redraw_text_bounding_box(next, index, Some(*container_index), measure, env);
     }
 
     if next.elements[index] != before {
-        bump_version(&mut next.elements[index], env);
+        bump_if_not_bumped(&mut next.elements[index], before.version(), env);
+    }
+    if let Some((container_index, container_before)) = &container_before
+        && next.elements[*container_index] != *container_before
+    {
+        refresh_bound_arrow_fixed_points(next, *container_index, env);
     }
     Ok(())
 }
@@ -867,7 +880,6 @@ fn apply_update_op(
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
     updated: &mut Vec<String>,
-    warnings: &mut Vec<String>,
 ) -> Result<(), OpError> {
     let obj = value
         .as_object()
@@ -884,7 +896,7 @@ fn apply_update_op(
     let (index, real_id) =
         resolve_target(id, created, next).map_err(|m| op_err(pos, Some("id"), m))?;
 
-    apply_update(next, pos, index, set, measure, env, warnings)?;
+    apply_update(next, pos, index, set, measure, env)?;
 
     if !updated.contains(&real_id) {
         updated.push(real_id);
@@ -1045,7 +1057,9 @@ mod tests {
         .unwrap();
         assert_eq!(report.updated, vec!["r"]);
         let label = get(&next, "t").placement().unwrap();
-        assert_eq!((label.x, label.y), (76.0, 117.5));
+        // The label is remeasured on a resize: "box" is 36 wide (the fixture's 48 is stale),
+        // centered on the wider rectangle's x = 100.
+        assert_eq!((label.x, label.y), (82.0, 117.5));
         // The arrow stayed where it was; its start's fixedPoint now describes (105, 30)
         // relative to the moved, wider rectangle.
         let binding = get(&next, "a").to_value()["startBinding"].clone();

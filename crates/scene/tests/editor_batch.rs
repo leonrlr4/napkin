@@ -115,3 +115,50 @@ fn refuses_while_a_gesture_is_in_progress() {
         .unwrap_err();
     assert!(errors[0].message.contains("gesture"), "{errors:?}");
 }
+
+#[test]
+fn a_long_label_wraps_and_its_box_grows() {
+    let mut editor = editor(vec![]);
+    let report = editor
+        .apply_batch(
+            &json!({"ops": [{"op": "add", "type": "rectangle", "id": "r", "x": 0, "y": 0,
+                "width": 100, "height": 50, "label": {"text": "hello world"}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let id = &report.created["r"];
+    let container = editor
+        .file()
+        .elements
+        .iter()
+        .find(|e| e.id() == Some(id))
+        .unwrap();
+    assert_eq!(container.placement().unwrap().height, 60.0);
+    let label = editor.file().elements[1].to_value();
+    assert_eq!(label["text"], json!("hello\nworld"));
+    assert_eq!(label["originalText"], json!("hello world"));
+}
+
+#[test]
+fn narrowing_a_box_by_update_rewraps_its_label() {
+    let mut editor = editor(vec![]);
+    let report = editor
+        .apply_batch(
+            &json!({"ops": [{"op": "add", "type": "rectangle", "id": "r", "x": 0, "y": 0,
+                "width": 300, "height": 50, "label": {"text": "hello world"}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let id = report.created["r"].clone();
+    editor
+        .apply_batch(
+            &json!({"ops": [{"op": "update", "id": id, "set": {"width": 100}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid update");
+    assert_eq!(
+        editor.file().elements[1].to_value()["text"],
+        json!("hello\nworld")
+    );
+    assert_eq!(editor.file().elements[0].placement().unwrap().height, 60.0);
+}

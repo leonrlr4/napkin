@@ -3,8 +3,7 @@
 //! `afa3a653fc5d2b742adcbd5a6063187b056d2419`): rectangles, diamonds, ellipses, text, lines,
 //! arrows and freedraw, with labels (`bindTextToContainer`) and arrow bindings
 //! (`bindLinearElementToElement`). Differences from the JS this ports are the AI interface
-//! design's, not bugs: shapes must always give `width`/`height` (napkin never grows a
-//! container to fit a label, see [`bind_label`]), line/arrow/freedraw `points` are normalized
+//! design's, not bugs: shapes must always give `width`/`height`, line/arrow/freedraw `points` are normalized
 //! so the first point is `[0, 0]` (napkin's editing code assumes that), and a line or
 //! freedraw's stored `width`/`height` always comes from its points rather than being kept
 //! separately.
@@ -14,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Map, Value};
 
 use crate::binding::bind_arrow;
-use crate::bound_text::{bound_text_max_size, bound_text_position};
+use crate::bound_text::redraw_text_bounding_box;
 use crate::editor::ItemStyle;
 use crate::element::{Element, LinearEnd};
 use crate::env::Env;
@@ -23,7 +22,7 @@ use crate::fractional_index::sync_moved_indices;
 use crate::geometry::size_from_points;
 use crate::json::Slot;
 use crate::new_element::{
-    ElementProps, GenericKind, TextProps, bump_version, new_arrow_element, new_freedraw_element,
+    ElementProps, GenericKind, TextProps, new_arrow_element, new_freedraw_element,
     new_generic_element, new_line_element, new_text_element,
 };
 use crate::text::TextMeasure;
@@ -42,8 +41,6 @@ pub struct Added {
     pub aliases: BTreeMap<String, String>,
     /// Generated ids of the skeletons, in input order (labels not included).
     pub ids: Vec<String>,
-    /// Labels that do not fit their container.
-    pub warnings: Vec<String>,
 }
 
 /// A skeleton's `label`, or `update`'s `text` on a container without one.
@@ -788,14 +785,11 @@ pub fn add_elements(
         op_positions.push(file.elements.len() - 1);
     }
 
-    let mut warnings: Vec<String> = Vec::new();
     for (i, p) in parsed.iter().enumerate() {
         let p = p.as_ref().expect("validated above");
         let position = op_positions[i];
         if let Some(label) = &p.label {
-            let name = p.id.as_deref().unwrap_or(ids[i].as_str());
-            let label_position =
-                bind_label(file, position, label, name, measure, env, &mut warnings);
+            let label_position = bind_label(file, position, label, measure, env);
             moved.insert(
                 file.elements[label_position]
                     .id()
@@ -818,32 +812,27 @@ pub fn add_elements(
 
     sync_moved_indices(&mut file.elements, &moved, env);
 
-    Ok(Added {
-        aliases,
-        ids,
-        warnings,
-    })
+    Ok(Added { aliases, ids })
 }
 
-/// `bindTextToContainer` + `redrawTextBoundingBox` without wrapping or growing the container:
-/// appends a label to the container at `container`, returns its position, and pushes a warning
-/// when it does not fit (`name` is how the warning refers to the container). The label's
+/// `bindTextToContainer` + `redrawTextBoundingBox`: appends a label to the container at
+/// `container`, wraps it to the container's width, grows the container when the wrapped text
+/// is too tall or wide, and returns the label's position. The label's
 /// stroke color and opacity default to the container's own color and `ElementProps::default()`'s
 /// opacity (the AI batch interface's behavior); `label.stroke_color`/`label.opacity` override
-/// either, for the editor's own text tool. Does not bump `container`'s own version even though
-/// it gains a `boundElements` entry: the AI batch interface's `add_elements` always calls this
-/// on a container it just created in the same batch (version 1 throughout, matching the JS
-/// baseline's `Object.assign`), and `batch::apply_update`'s own container-vs-`container_before`
-/// diff already bumps it for a pre-existing one; a caller binding to a pre-existing container
-/// outside those two paths (the editor's `text::create_new_label`) must bump it itself.
+/// either, for the editor's own text tool. Does not bump `container`'s own version for gaining
+/// a `boundElements` entry (growing it does, through `redraw_text_bounding_box`): the AI batch
+/// interface's `add_elements` always calls this on a container it just created in the same
+/// batch (version 1 throughout, matching the JS baseline's `Object.assign`), and
+/// `batch::apply_update`'s own container-vs-`container_before` diff already bumps it for a
+/// pre-existing one; a caller binding to a pre-existing container outside those two paths
+/// (the editor's `text::create_new_label`) must bump it itself.
 pub(crate) fn bind_label(
     file: &mut SceneFile,
     container: usize,
     label: &LabelSpec,
-    name: &str,
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
-    warnings: &mut Vec<String>,
 ) -> usize {
     let container_before = file.elements[container].clone();
     let stroke_color = label.stroke_color.clone().unwrap_or_else(|| {
@@ -903,56 +892,9 @@ pub(crate) fn bind_label(
 
     file.elements[container].add_bound_element(&label_id, "text");
 
-    let container_after = file.elements[container].clone();
-    let new_position = match &file.elements[label_position] {
-        Element::Text(t) => bound_text_position(&container_after, t),
-        _ => None,
-    };
-    if let Some([x, y]) = new_position
-        && let Element::Text(t) = &mut file.elements[label_position]
-        && (t.base.x != x || t.base.y != y)
-    {
-        t.base.x = x;
-        t.base.y = y;
-        bump_version(&mut file.elements[label_position], env);
-    }
-
-    warn_if_label_overflows(
-        &container_after,
-        &file.elements[label_position],
-        name,
-        warnings,
-    );
+    redraw_text_bounding_box(file, label_position, Some(container), measure, env);
 
     label_position
-}
-
-/// Pushes a warning to `warnings` when `label`'s width or height exceeds what `container`
-/// fits (`name` is how the warning refers to `container`); a no-op when it fits, when
-/// `label` is not a text element, or for a container type [`bound_text_max_size`] has no
-/// limit for.
-pub(crate) fn warn_if_label_overflows(
-    container: &Element,
-    label: &Element,
-    name: &str,
-    warnings: &mut Vec<String>,
-) {
-    let Element::Text(t) = label else { return };
-    let Some([max_w, max_h]) = bound_text_max_size(container) else {
-        return;
-    };
-    if t.base.width > max_w || t.base.height > max_h {
-        let kind = container.kind();
-        let fmt = |v: f64| format!("{v:.0}");
-        warnings.push(format!(
-            "{name}: label needs {}x{} but the {kind} fits {}x{}; make the {kind} larger or \
-             add line breaks",
-            fmt(t.base.width),
-            fmt(t.base.height),
-            fmt(max_w),
-            fmt(max_h)
-        ));
-    }
 }
 
 /// First point moved to `[0, 0]`, the offset added to the origin (`getNormalizedPoints`).
@@ -1087,7 +1029,6 @@ mod tests {
         .expect("valid batch");
         assert_eq!(added.ids.len(), 2);
         assert_eq!(added.aliases.get("r"), Some(&added.ids[0]));
-        assert_eq!(added.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -1263,29 +1204,6 @@ mod tests {
         };
         assert_eq!(l.points, vec![[0.0, 0.0], [20.0, 0.0]]);
         assert_eq!((l.base.x, l.base.y), (15.0, 15.0));
-    }
-
-    #[test]
-    fn label_that_does_not_fit_warns_without_growing_the_container() {
-        let mut file = SceneFile::new();
-        let ops = [json!({
-            "type": "rectangle", "id": "r", "x": 0, "y": 0, "width": 10, "height": 10,
-            "label": {"text": "way too long for this box"}
-        })];
-        let ops = pairs(&ops);
-        let added = add_elements(
-            &mut file,
-            &ops,
-            &ItemStyle::default(),
-            &mut CharWidthMeasure,
-            &mut env(),
-        )
-        .expect("valid batch");
-        assert_eq!(added.warnings.len(), 1, "{:?}", added.warnings);
-        assert!(added.warnings[0].starts_with('r'), "{:?}", added.warnings);
-        let rect = &file.elements[0];
-        assert_eq!(rect.placement().unwrap().width, 10.0);
-        assert_eq!(rect.placement().unwrap().height, 10.0);
     }
 
     #[test]

@@ -28,7 +28,8 @@ they ask you to.
 
 followed by whichever of these apply, in this order: `label="..."` (the bound text of a
 container, folded into the container's line rather than shown on its own), `text="..."`
-(a standalone text element's own content), `stroke=<color>` (omitted when it's the default
+(a standalone text element's own content). Both show the text as typed, without the line
+breaks napkin added to wrap it, `stroke=<color>` (omitted when it's the default
 `#1e1e1e`), `bg=<color>` (omitted when `transparent`), `start=<id>` / `end=<id>` (an
 arrow's bindings), `points=<JSON>` (lines and arrows only), `groups=<id,id>`,
 `angle=<radians>` (omitted when 0) and `locked`. Numbers are rounded to 2 decimals.
@@ -76,9 +77,10 @@ batches, since aliases don't carry over.
 
 - `rectangle` / `diamond` / `ellipse`: `x`, `y`, `width` (> 0), `height` (> 0), optionally
   `label: {"text": "...", "fontSize": ..., "fontFamily": ..., "textAlign": ...,
-  "verticalAlign": ...}`. Both `width` and `height` are required; napkin never grows a
-  shape to fit its label, so size the box yourself (see Layout below) and check for the
-  `warnings` a too-small box produces.
+  "verticalAlign": ...}`. Both `width` and `height` are required. A label wraps
+  automatically inside the box, and the box grows downward when the wrapped text doesn't
+  fit; `\n` in the text is still a forced line break. Size the box for the shape you want
+  (see Layout below), since the box's final height can be taller than the `height` you sent.
 - `text`: `x`, `y`, `text` (required), optionally `fontSize`, `fontFamily`, `textAlign`
   (`left`/`center`/`right`, default `left`). `y` is always the top of the text; there is no
   `verticalAlign` for a standalone text element. `x` is the anchor `textAlign` describes,
@@ -115,11 +117,9 @@ unbinds any arrows pointing at it.
 A batch is all-or-nothing: if any op fails, the whole batch is rejected and nothing
 changes. `apply`'s error response looks like
 `{"errors": [{"op": 0, "field": "id", "message": "no element \"does-not-exist\""}]}` —
-`op` is the failing op's position in your `ops` array. On success, the response's
-`warnings` array flags any label that doesn't fit its container, e.g.
-`"r1: label needs 468x25 but the rectangle fits 50x30; make the rectangle larger or add
-line breaks"` — napkin doesn't wrap text or resize the box for you, so widen it or add
-`\n` and send an `update`.
+`op` is the failing op's position in your `ops` array. On success, the response lists
+`created`, `added`, `updated` and `deleted` ids; a box that grew to fit its label is
+visible in the next `napkin summary`.
 
 ### Example: a three-box flow with bound arrows
 
@@ -170,9 +170,10 @@ directory (`~/.claude/skills/napkin/design.md`) and follow it: decide what the p
 say, pick the structure that matches it, plan coordinates on a 20 px grid before the first
 `apply`, and use type size and a small palette for hierarchy instead of more boxes.
 
-Plan box sizes from text width, since napkin doesn't wrap or resize for you: about
+Plan box sizes from text width so labels stay on one line: about
 `0.55 x fontSize` per Latin character, about `1 x fontSize` for CJK. Give a labeled box at
-least `text width + 40` for its width.
+least `text width + 40` for its width. A narrower box still works (the label wraps and the
+box grows taller), but then neighbors and arrows may need to move.
 
 ## Pacing
 
@@ -183,7 +184,7 @@ shape and can undo one step at a time. Keep a batch under about 15 elements.
 ## Check your work
 
 After drawing, `napkin render --out /tmp/napkin.png` and `Read` it. Look for overlapping
-shapes, text that doesn't fit its box (also check the `warnings` from `apply`), and arrows
+shapes, boxes that grew taller than planned and now touch their neighbors, and arrows
 that don't visually reach their targets. Fix what's wrong with another batch before
 reporting back to the user.
 

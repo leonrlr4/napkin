@@ -103,7 +103,7 @@ After the last batch, `napkin render --out /tmp/napkin.png` and Read the image. 
 order:
 
 1. Does the structure match the sentence from step 1?
-2. Text overflowing a box, or any `warnings` from `apply`?
+2. A box that grew taller than planned because its label wrapped?
 3. Anything overlapping? Any arrow crossing a box or ending in empty space?
 4. Uneven gaps or misaligned rows/columns?
 5. Text too small to read in the PNG?
