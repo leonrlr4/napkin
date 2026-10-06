@@ -1,19 +1,22 @@
 //! Compares scene with Excalidraw's own code at the pinned commit, recorded in
 //! `tests/baseline/*.json` by tools/baseline/scene/generate.mjs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use scene::batch::add_elements;
 use scene::color::{apply_dark_mode_filter, is_transparent};
+use scene::editor::{ArrowType, EdgeStyle, ItemStyle};
 use scene::element::{Element, Roundness, StrokeOptions};
 use scene::env::Env;
 use scene::fractional_index::{
     generate_key_between, generate_n_keys_between, sync_invalid_indices, sync_moved_indices,
 };
 use scene::new_element::{
-    ElementProps, GenericKind, new_arrow_element, new_freedraw_element, new_generic_element,
-    new_line_element,
+    ElementProps, GenericKind, TextProps, new_arrow_element, new_freedraw_element,
+    new_generic_element, new_line_element, new_text_element,
 };
+use scene::sample::CharWidthMeasure;
 use scene::shape::{
     ElementShape, PathOp, ShapeContext, freedraw_outline_points, generate_element_shape,
     generate_rough_options,
@@ -65,7 +68,8 @@ fn props_from(opts: &Value) -> ElementProps {
             }
             "locked" => props.locked = v.as_bool().expect("locked"),
             "type" | "id" | "seed" | "points" | "pressures" | "simulatePressure"
-            | "strokeOptions" | "startArrowhead" | "endArrowhead" => {}
+            | "strokeOptions" | "startArrowhead" | "endArrowhead" | "text" | "fontSize"
+            | "fontFamily" | "textAlign" | "verticalAlign" | "containerId" | "lineHeight" => {}
             other => panic!("unknown newElement option {other}"),
         }
     }
@@ -110,6 +114,20 @@ fn new_element() {
                 opts.get("strokeOptions").map(|o| {
                     serde_json::from_value::<StrokeOptions>(o.clone()).expect("strokeOptions")
                 }),
+                env,
+            ),
+            ("newTextElement", _) => new_text_element(
+                props,
+                TextProps {
+                    text: opts["text"].as_str().expect("text").to_owned(),
+                    font_size: opts.get("fontSize").map(num),
+                    font_family: opts.get("fontFamily").map(num),
+                    text_align: head("textAlign"),
+                    vertical_align: head("verticalAlign"),
+                    container_id: head("containerId"),
+                    line_height: opts.get("lineHeight").map(num),
+                },
+                &mut CharWidthMeasure,
                 env,
             ),
             other => panic!("unknown constructor {other:?}"),
@@ -316,5 +334,94 @@ fn freedraw_outline() {
                 .map(point_value)
                 .collect(),
         )
+    });
+}
+
+/// `generate.mjs`'s `normalizeSkeletonOutput`: drops `seed` and `versionNonce`, renames ids to
+/// `e<position>` in order, references included.
+fn normalize_skeleton_output(elements: &[Element]) -> Value {
+    let values: Vec<Value> = elements.iter().map(Element::to_value).collect();
+    let rename: HashMap<String, String> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v["id"].as_str().expect("id").to_owned(), format!("e{i}")))
+        .collect();
+    let id = |v: &Value| {
+        json!(
+            rename
+                .get(v.as_str().unwrap_or(""))
+                .cloned()
+                .unwrap_or_default()
+        )
+    };
+    Value::Array(
+        values
+            .into_iter()
+            .map(|mut v| {
+                let map = v.as_object_mut().expect("object");
+                map.remove("seed");
+                map.remove("versionNonce");
+                map["id"] = id(&map["id"]);
+                if map.get("containerId").is_some_and(Value::is_string) {
+                    map["containerId"] = id(&map["containerId"]);
+                }
+                if let Some(Value::Array(bound)) = map.get_mut("boundElements") {
+                    for b in bound {
+                        b["id"] = id(&b["id"]);
+                    }
+                }
+                for key in ["startBinding", "endBinding"] {
+                    if let Some(binding) = map.get_mut(key).filter(|b| b.is_object()) {
+                        binding["elementId"] = id(&binding["elementId"]);
+                    }
+                }
+                v
+            })
+            .collect(),
+    )
+}
+
+/// Random bytes that advance on every call, unlike [`FixedEnv`]'s constant zero bytes: the
+/// skeleton conversion creates several elements per case, and `normalize_skeleton_output`
+/// needs each one's generated id to be distinct in order to rename them correctly. `FixedEnv`
+/// itself can stay constant because every other group either ignores the generated id
+/// (`new_element` overwrites it from the case's own `opts.id`) or never generates one
+/// (`fractional_index`'s elements get an explicit `id` directly).
+#[derive(Default)]
+struct DistinctIdEnv {
+    next: u8,
+}
+
+impl Env for DistinctIdEnv {
+    fn fill_random(&mut self, bytes: &mut [u8]) {
+        bytes.fill(self.next);
+        self.next = self.next.wrapping_add(1);
+    }
+
+    fn now_ms(&mut self) -> f64 {
+        1.0
+    }
+}
+
+#[test]
+fn skeleton() {
+    let style = ItemStyle {
+        edges: EdgeStyle::Sharp,
+        arrow_type: ArrowType::Sharp,
+        ..ItemStyle::default()
+    };
+    check_group(&dir(), "skeleton", |case| {
+        let skeletons = case.args[0].as_array().expect("skeletons");
+        let pairs: Vec<(usize, &Value)> = skeletons.iter().enumerate().collect();
+        let mut file = scene::SceneFile::new();
+        add_elements(
+            &mut file,
+            &pairs,
+            &style,
+            &mut CharWidthMeasure,
+            &mut DistinctIdEnv::default(),
+        )
+        .unwrap_or_else(|errors| panic!("{errors:?}"));
+        normalize_skeleton_output(&file.elements)
     });
 }

@@ -8,6 +8,7 @@ pub mod cache;
 pub mod callback;
 pub mod color;
 pub mod gpu;
+pub mod offscreen;
 pub mod path;
 pub mod plan;
 pub mod tessellate;

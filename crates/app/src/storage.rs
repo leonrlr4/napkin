@@ -6,6 +6,16 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::{fs, io};
 
+/// `$HOME`, when it is set and non-empty. The single source every caller that needs the home
+/// directory itself (as opposed to napkin's own subdirectories under it, see [`Paths::from_env`])
+/// should read it from, so a future change to what counts as "no `$HOME`" only has one place to
+/// happen.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The directory canvases live in, and the file that remembers which one was last open.
 pub struct Paths {
     pub canvases: PathBuf,
@@ -27,15 +37,24 @@ impl Paths {
 
     /// From `$HOME`; `None` when it is unset or empty.
     pub fn from_env() -> Option<Paths> {
-        let home = std::env::var_os("HOME")?;
-        if home.is_empty() {
-            return None;
-        }
-        Some(Paths::from_home(Path::new(&home)))
+        Some(Paths::from_home(&home_dir()?))
     }
 
     pub fn scratch(&self) -> PathBuf {
         self.canvases.join("scratch.excalidraw")
+    }
+}
+
+/// `path`, made absolute by joining it onto the current working directory when it is relative;
+/// `path` itself is already absolute, this is a no-op. Every path napkin remembers, reports
+/// (`status`, the corner label's copy) or writes to should go through this first, so they all
+/// agree on the same absolute path regardless of how a file argument was spelled on the command
+/// line.
+pub fn absolute(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 
@@ -97,6 +116,37 @@ fn name_of(path: &Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// A path split for display: the folder (with a trailing `/`) and the file name, so the file
+/// name can be shown in a different weight than the folder it sits in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayPath {
+    /// The folder with a trailing `/`, `~`-abbreviated under `home`.
+    pub dir: String,
+    pub name: String,
+}
+
+/// Splits `path` into a [`DisplayPath`]. The folder is abbreviated to `~` when it is `home` or a
+/// descendant of it (matched by whole path components, not by string prefix); otherwise it is
+/// shown in full. A path with no file name (for example `/`) puts the whole path in `name` and
+/// leaves `dir` empty.
+pub fn display_path(path: &Path, home: Option<&Path>) -> DisplayPath {
+    let Some(file_name) = path.file_name() else {
+        return DisplayPath {
+            dir: String::new(),
+            name: path.display().to_string(),
+        };
+    };
+    let name = file_name.to_string_lossy().into_owned();
+    let folder = path.parent().unwrap_or_else(|| Path::new(""));
+    let dir = match home.and_then(|home| folder.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~/".to_string(),
+        Some(rest) => format!("~/{}/", rest.display()),
+        None if folder.as_os_str().is_empty() => String::new(),
+        None => format!("{}/", folder.display()),
+    };
+    DisplayPath { dir, name }
 }
 
 fn open_scratch(paths: &Paths, notice: Option<String>) -> Opened {
@@ -175,17 +225,13 @@ pub fn open_at_startup(paths: &Paths, requested: Option<&Path>) -> Opened {
     }
 }
 
-/// Stores `path` (made absolute) in `last`, creating its directory.
+/// Stores `path` (made absolute, see [`absolute`]) in `last`, creating its directory.
 pub fn remember(paths: &Paths, path: &Path) -> io::Result<()> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
+    let path = absolute(path)?;
     if let Some(parent) = paths.last.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&paths.last, absolute.to_string_lossy().as_bytes())
+    fs::write(&paths.last, path.to_string_lossy().as_bytes())
 }
 
 /// `path` with every symlink component resolved, including a symlink `path` itself: the real
@@ -299,6 +345,50 @@ mod tests {
     }
 
     const VALID: &str = r#"{"type":"excalidraw","version":2,"elements":[],"appState":{}}"#;
+
+    #[test]
+    fn display_path_abbreviates_home() {
+        let home = Path::new("/home/leon");
+        assert_eq!(
+            display_path(
+                Path::new("/home/leon/Documents/napkin/scratch.excalidraw"),
+                Some(home)
+            ),
+            DisplayPath {
+                dir: "~/Documents/napkin/".into(),
+                name: "scratch.excalidraw".into()
+            }
+        );
+        assert_eq!(
+            display_path(Path::new("/tmp/a.excalidraw"), Some(home)),
+            DisplayPath {
+                dir: "/tmp/".into(),
+                name: "a.excalidraw".into()
+            }
+        );
+        assert_eq!(
+            display_path(Path::new("/home/leonard/x.excalidraw"), Some(home)).dir,
+            "/home/leonard/",
+            "only whole path components match"
+        );
+    }
+
+    #[test]
+    fn absolute_joins_relative_paths_onto_the_current_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute(Path::new("a.excalidraw")).unwrap(),
+            cwd.join("a.excalidraw")
+        );
+        assert_eq!(
+            absolute(Path::new("sub/b.excalidraw")).unwrap(),
+            cwd.join("sub/b.excalidraw")
+        );
+        assert_eq!(
+            absolute(Path::new("/already/absolute.excalidraw")).unwrap(),
+            PathBuf::from("/already/absolute.excalidraw")
+        );
+    }
 
     #[test]
     fn paths_follow_the_spec() {

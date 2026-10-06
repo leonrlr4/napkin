@@ -47,12 +47,12 @@ fn diff(before: &SceneFile, after: &SceneFile) -> Vec<Change> {
     let len = before.elements.len().max(after.elements.len());
     (0..len)
         .filter_map(|position| {
-            let before_element = before.elements.get(position).cloned();
-            let after_element = after.elements.get(position).cloned();
-            (before_element != after_element).then_some(Change {
+            let before_element = before.elements.get(position);
+            let after_element = after.elements.get(position);
+            (before_element != after_element).then(|| Change {
                 position,
-                before: before_element,
-                after: after_element,
+                before: before_element.cloned(),
+                after: after_element.cloned(),
             })
         })
         .collect()

@@ -26,15 +26,14 @@ use serde_json::{Map, json};
 
 use crate::collision;
 use crate::edit;
-use crate::element::{Element, Roundness, StrokeOptions};
+use crate::element::{Element, StrokeOptions};
 use crate::env::Env;
 use crate::file::SceneFile;
 use crate::geometry;
 use crate::json::Slot;
-use crate::new_element::{self, ElementProps, GenericKind, bump_version};
+use crate::new_element::{self, GenericKind, bump_version};
 use crate::selection::Selection;
 
-use super::style::{ArrowType, EdgeStyle, ItemStyle};
 use super::{Editor, PointerEvent, Tool, clone_scene};
 
 /// `MINIMUM_ARROW_SIZE` (`packages/common/src/constants.ts`).
@@ -243,9 +242,11 @@ fn start_shape(editor: &mut Editor<impl Env>, event: PointerEvent) {
     };
     let start = Arc::clone(&editor.file);
     let selection_before = editor.selection.clone();
-    let roundness = generic_roundness(&editor.style, kind);
+    let roundness = editor.style.generic_roundness(kind);
     let stroke_width = editor.style.stroke_width.value(false);
-    let props = item_props(&editor.style, event.at, 0.0, 0.0, roundness, stroke_width);
+    let props = editor
+        .style
+        .props(event.at, 0.0, 0.0, roundness, stroke_width);
     let element = new_element::new_generic_element(kind, props, &mut editor.env);
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     let position = edit::append_element(file, element, &mut editor.env);
@@ -307,12 +308,16 @@ fn start_linear(editor: &mut Editor<impl Env>, event: PointerEvent) {
     let selection_before = editor.selection.clone();
     let stroke_width = editor.style.stroke_width.value(false);
     let element = if editor.tool == Tool::Line {
-        let roundness = (editor.style.edges == EdgeStyle::Round).then(round_proportional);
-        let props = item_props(&editor.style, event.at, 0.0, 0.0, roundness, stroke_width);
+        let roundness = editor.style.line_roundness();
+        let props = editor
+            .style
+            .props(event.at, 0.0, 0.0, roundness, stroke_width);
         new_element::new_line_element(props, vec![[0.0, 0.0], [0.0, 0.0]], &mut editor.env)
     } else {
-        let roundness = (editor.style.arrow_type == ArrowType::Round).then(round_proportional);
-        let props = item_props(&editor.style, event.at, 0.0, 0.0, roundness, stroke_width);
+        let roundness = editor.style.arrow_roundness();
+        let props = editor
+            .style
+            .props(event.at, 0.0, 0.0, roundness, stroke_width);
         new_element::new_arrow_element(
             props,
             vec![[0.0, 0.0], [0.0, 0.0]],
@@ -504,7 +509,7 @@ fn start_freedraw(editor: &mut Editor<impl Env>, event: PointerEvent) {
     let start = Arc::clone(&editor.file);
     let selection_before = editor.selection.clone();
     let stroke_width = editor.style.stroke_width.value(true);
-    let props = item_props(&editor.style, event.at, 0.0, 0.0, None, stroke_width);
+    let props = editor.style.props(event.at, 0.0, 0.0, None, stroke_width);
     let stroke_options = StrokeOptions {
         variability: Slot::Value(editor.style.stroke_variability.clone()),
         streamline: Slot::Value(new_element::DEFAULT_STROKE_STREAMLINE),
@@ -761,58 +766,4 @@ fn drag_new_shape_geometry(
     }
 
     (new_x, new_y, width, height)
-}
-
-/// `{type: ROUNDNESS.PROPORTIONAL_RADIUS}`, a diamond, ellipse, line or round-arrow's roundness.
-fn round_proportional() -> Roundness {
-    Roundness {
-        kind: 2.0,
-        value: Slot::Missing,
-        extra: Map::new(),
-    }
-}
-
-/// `getCurrentItemRoundness`: a rectangle uses the adaptive radius (`{type: 3}`), a diamond or
-/// ellipse the proportional one (`{type: 2}`); `None` when `style.edges` is sharp.
-fn generic_roundness(style: &ItemStyle, kind: GenericKind) -> Option<Roundness> {
-    if style.edges != EdgeStyle::Round {
-        return None;
-    }
-    let radius_kind = if kind == GenericKind::Rectangle {
-        3.0
-    } else {
-        2.0
-    };
-    Some(Roundness {
-        kind: radius_kind,
-        value: Slot::Missing,
-        extra: Map::new(),
-    })
-}
-
-fn item_props(
-    style: &ItemStyle,
-    origin: [f64; 2],
-    width: f64,
-    height: f64,
-    roundness: Option<Roundness>,
-    stroke_width: f64,
-) -> ElementProps {
-    ElementProps {
-        x: origin[0],
-        y: origin[1],
-        width,
-        height,
-        angle: 0.0,
-        stroke_color: style.stroke_color.clone(),
-        background_color: style.background_color.clone(),
-        fill_style: style.fill_style.clone(),
-        stroke_width,
-        stroke_style: style.stroke_style.clone(),
-        roughness: style.roughness,
-        opacity: style.opacity,
-        group_ids: Vec::new(),
-        roundness,
-        locked: false,
-    }
 }

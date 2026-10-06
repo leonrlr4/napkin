@@ -3,12 +3,16 @@
 //! [`CanvasInput::pinch`](crate::input::CanvasInput::pinch) alongside egui's own
 //! `Event::Zoom` (trackpad pinch reported through the platform, e.g. macOS).
 //!
+//! The same event queue also binds a `wl_keyboard` to track whether a Super key is down
+//! ([`PinchListener::super_held`]): egui-winit drops the Super modifier on Linux, so Hyprland's
+//! unbound SUPER+letter combinations would otherwise reach napkin's own tool shortcuts.
+//!
 //! Derived from the M0 spike (`spikes/m0/src/bin/pinch_probe.rs`, commit `7e14330`), which
 //! proved the binding flow works on this machine (Hyprland 0.56, `zwp_pointer_gestures_v1`
 //! version 3).
 
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use eframe::egui;
@@ -17,7 +21,7 @@ use rustix::event::{PollFd, PollFlags};
 use rustix::fd::OwnedFd;
 use wayland_backend::client::Backend;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::{wl_pointer, wl_registry, wl_seat};
+use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop};
 use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_pinch_v1::{
     self, ZwpPointerGesturePinchV1,
@@ -65,7 +69,47 @@ impl PinchTracker {
     }
 }
 
-/// State for the dedicated queue's registry/seat/gestures `Dispatch` impls.
+/// Linux evdev `KEY_LEFTMETA` / `KEY_RIGHTMETA`.
+pub const SUPER_KEYS: [u32; 2] = [125, 126];
+
+/// Which Super keys are down, from `wl_keyboard` `enter`/`key`/`leave`.
+#[derive(Debug, Default)]
+pub struct SuperTracker {
+    left: bool,
+    right: bool,
+}
+
+impl SuperTracker {
+    /// `enter` reports every key logically down on the surface that just gained focus; this
+    /// sets each Super key's state from whether it appears in that list, rather than only ever
+    /// turning a key on.
+    pub fn enter(&mut self, pressed_keys: &[u32]) {
+        self.left = pressed_keys.contains(&SUPER_KEYS[0]);
+        self.right = pressed_keys.contains(&SUPER_KEYS[1]);
+    }
+
+    /// Updates one key's state; keys other than [`SUPER_KEYS`] are ignored.
+    pub fn key(&mut self, key: u32, pressed: bool) {
+        if key == SUPER_KEYS[0] {
+            self.left = pressed;
+        } else if key == SUPER_KEYS[1] {
+            self.right = pressed;
+        }
+    }
+
+    /// The keyboard left the surface: the compositor resets all key state, and no matching
+    /// `key` release events follow.
+    pub fn leave(&mut self) {
+        self.left = false;
+        self.right = false;
+    }
+
+    pub fn held(&self) -> bool {
+        self.left || self.right
+    }
+}
+
+/// State for the dedicated queue's registry/seat/gestures/keyboard `Dispatch` impls.
 struct GestureState {
     gestures: ZwpPointerGesturesV1,
     ctx: egui::Context,
@@ -73,6 +117,10 @@ struct GestureState {
     /// Guards against binding a second `wl_pointer`/pinch gesture if `wl_seat` reports the
     /// pointer capability more than once (e.g. capability lost and regained).
     pointer_gesture_bound: bool,
+    /// Guards against binding a second `wl_keyboard`, for the same reason.
+    keyboard_bound: bool,
+    /// Shared with [`PinchListener::super_held`].
+    super_tracker: Arc<Mutex<SuperTracker>>,
 }
 
 // The registry can add/remove globals after the initial roundtrip; this listener only needs
@@ -102,14 +150,61 @@ impl Dispatch<wl_seat::WlSeat, ()> for GestureState {
             let Ok(capabilities) = capabilities.into_result() else {
                 return;
             };
-            if state.pointer_gesture_bound || !capabilities.contains(wl_seat::Capability::Pointer) {
-                return;
+            if !state.pointer_gesture_bound && capabilities.contains(wl_seat::Capability::Pointer) {
+                // A second `wl_pointer` on the same seat is valid Wayland; winit keeps its own
+                // and never sees this one.
+                let pointer = seat.get_pointer(qh, ());
+                state.gestures.get_pinch_gesture(&pointer, qh, ());
+                state.pointer_gesture_bound = true;
             }
-            // A second `wl_pointer` on the same seat is valid Wayland; winit keeps its own and
-            // never sees this one.
-            let pointer = seat.get_pointer(qh, ());
-            state.gestures.get_pinch_gesture(&pointer, qh, ());
-            state.pointer_gesture_bound = true;
+            if !state.keyboard_bound && capabilities.contains(wl_seat::Capability::Keyboard) {
+                // Likewise a second `wl_keyboard`; winit's own keeps delivering key events to
+                // egui as before.
+                seat.get_keyboard(qh, ());
+                state.keyboard_bound = true;
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for GestureState {
+    fn event(
+        state: &mut Self,
+        _proxy: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let Ok(mut tracker) = state.super_tracker.lock() else {
+            return;
+        };
+        match event {
+            wl_keyboard::Event::Enter { keys, .. } => {
+                // `keys` packs the evdev keycodes logically down on the surface that just
+                // gained focus as little-endian u32s.
+                let pressed: Vec<u32> = keys
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| u32::from_le_bytes(*chunk))
+                    .collect();
+                tracker.enter(&pressed);
+            }
+            wl_keyboard::Event::Leave { .. } => tracker.leave(),
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                if let Ok(key_state) = key_state.into_result() {
+                    tracker.key(key, key_state == wl_keyboard::KeyState::Pressed);
+                }
+            }
+            // `Keymap` carries a file descriptor this listener has no use for; dropping the
+            // event closes it (`OwnedFd`'s `Drop`). `Modifiers` and `RepeatInfo` don't affect
+            // whether a Super key is down.
+            _ => {}
         }
     }
 }
@@ -165,6 +260,8 @@ pub struct PinchListener {
     stop_fd: Arc<OwnedFd>,
     /// `None` once [`PinchListener::stop`] has joined the thread.
     join_handle: Option<JoinHandle<()>>,
+    /// Updated by the dispatch thread's `wl_keyboard` handling; read by [`PinchListener::super_held`].
+    super_tracker: Arc<Mutex<SuperTracker>>,
 }
 
 impl PinchListener {
@@ -211,11 +308,14 @@ impl PinchListener {
         let thread_stop = Arc::clone(&stop_fd);
 
         let (tx, rx) = mpsc::channel();
+        let super_tracker = Arc::new(Mutex::new(SuperTracker::default()));
         let mut state = GestureState {
             gestures,
             ctx: cc.egui_ctx.clone(),
             tx,
             pointer_gesture_bound: false,
+            keyboard_bound: false,
+            super_tracker: Arc::clone(&super_tracker),
         };
 
         let join_handle = std::thread::Builder::new()
@@ -270,12 +370,22 @@ impl PinchListener {
             receiver: rx,
             stop_fd,
             join_handle: Some(join_handle),
+            super_tracker,
         })
     }
 
     /// This frame's pinch events, in arrival order.
     pub fn events(&self) -> Vec<PinchEvent> {
         self.receiver.try_iter().collect()
+    }
+
+    /// Whether a Super key is down right now; `false` when the keyboard was never bound (e.g.
+    /// the seat never reported the keyboard capability).
+    pub fn super_held(&self) -> bool {
+        self.super_tracker
+            .lock()
+            .map(|tracker| tracker.held())
+            .unwrap_or(false)
     }
 
     /// Wakes the dispatch thread and joins it. Idempotent.
@@ -301,6 +411,24 @@ impl Drop for PinchListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracks_either_super_key() {
+        let mut tracker = SuperTracker::default();
+        assert!(!tracker.held());
+        tracker.key(125, true);
+        tracker.key(126, true);
+        tracker.key(125, false);
+        assert!(tracker.held(), "right Super still down");
+        tracker.key(126, false);
+        assert!(!tracker.held());
+        tracker.enter(&[30, 126]);
+        assert!(tracker.held());
+        tracker.leave();
+        assert!(!tracker.held());
+        tracker.key(30, true);
+        assert!(!tracker.held(), "other keys do not count");
+    }
 
     #[test]
     fn scale_becomes_per_event_factors() {

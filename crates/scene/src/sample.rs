@@ -91,6 +91,17 @@ pub fn text(id: &str, rect: [f64; 4], text: &str, container: Option<&str>) -> Va
     })
 }
 
+/// The text metrics `tools/baseline/scene/generate.mjs` installs with
+/// `setCustomTextMetricsProvider`: every UTF-16 code unit is `0.6 * fontSize` wide, whatever
+/// the font.
+pub struct CharWidthMeasure;
+
+impl crate::text::TextMeasure for CharWidthMeasure {
+    fn line_width(&mut self, line: &str, _font_family: f64, font_size: f64) -> f64 {
+        line.encode_utf16().count() as f64 * font_size * 0.6
+    }
+}
+
 /// Shallow merge: every key of `overrides` replaces the same key of `value`.
 pub fn with(value: Value, overrides: Value) -> Value {
     let mut value = value;

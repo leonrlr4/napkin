@@ -1,6 +1,8 @@
 //! Excalidraw's file format and element rules at commit afa3a653fc5d2b742adcbd5a6063187b056d2419.
 //! No egui, no rendering: shape output is data (spec §4.2).
 
+pub mod batch;
+pub mod binding;
 pub mod collision;
 pub mod color;
 pub mod edit;
@@ -18,6 +20,7 @@ mod perfect_freehand;
 pub mod sample;
 pub mod selection;
 pub mod shape;
+pub mod text;
 pub mod transform;
 
 pub use crate::element::{Element, Placement};

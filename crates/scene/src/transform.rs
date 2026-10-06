@@ -1025,10 +1025,10 @@ pub fn resize_elements(
     changed
 }
 
-/// `computeBoundTextPosition` for a rectangle, diamond or ellipse container; `None` otherwise
-/// (an arrow container's label follows `LinearElementEditor.getBoundTextElementPosition`
-/// instead, out of scope here).
-pub fn bound_text_position(container: &Element, text: &TextElement) -> Option<[f64; 2]> {
+/// `getBoundTextMaxWidth`/`getBoundTextMaxHeight` for a rectangle, diamond or ellipse
+/// container; `None` for every other type (an arrow container's label has no such limit here,
+/// see [`bound_text_position`]'s doc comment).
+pub fn bound_text_max_size(container: &Element) -> Option<[f64; 2]> {
     if !matches!(
         container,
         Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
@@ -1036,20 +1036,6 @@ pub fn bound_text_position(container: &Element, text: &TextElement) -> Option<[f
         return None;
     }
     let placement = container.placement()?;
-
-    // `getContainerCoords`.
-    let (offset_x, offset_y) = match container {
-        Element::Diamond(_) => (placement.width / 4.0, placement.height / 4.0),
-        Element::Ellipse(_) => {
-            let k = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
-            (placement.width / 2.0 * k, placement.height / 2.0 * k)
-        }
-        _ => (0.0, 0.0),
-    };
-    let container_x = placement.x + BOUND_TEXT_PADDING + offset_x;
-    let container_y = placement.y + BOUND_TEXT_PADDING + offset_y;
-
-    // `getBoundTextMaxWidth`/`getBoundTextMaxHeight`.
     let max_width = match container {
         Element::Diamond(_) => {
             rough::js::math_round(placement.width / 2.0) - BOUND_TEXT_PADDING * 2.0
@@ -1070,6 +1056,27 @@ pub fn bound_text_position(container: &Element, text: &TextElement) -> Option<[f
         }
         _ => placement.height - BOUND_TEXT_PADDING * 2.0,
     };
+    Some([max_width, max_height])
+}
+
+/// `computeBoundTextPosition` for a rectangle, diamond or ellipse container; `None` otherwise
+/// (an arrow container's label follows `LinearElementEditor.getBoundTextElementPosition`
+/// instead, out of scope here).
+pub fn bound_text_position(container: &Element, text: &TextElement) -> Option<[f64; 2]> {
+    let placement = container.placement()?;
+    let [max_width, max_height] = bound_text_max_size(container)?;
+
+    // `getContainerCoords`.
+    let (offset_x, offset_y) = match container {
+        Element::Diamond(_) => (placement.width / 4.0, placement.height / 4.0),
+        Element::Ellipse(_) => {
+            let k = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
+            (placement.width / 2.0 * k, placement.height / 2.0 * k)
+        }
+        _ => (0.0, 0.0),
+    };
+    let container_x = placement.x + BOUND_TEXT_PADDING + offset_x;
+    let container_y = placement.y + BOUND_TEXT_PADDING + offset_y;
 
     let y = match text.vertical_align.as_str() {
         "top" => container_y,

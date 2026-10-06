@@ -1,6 +1,7 @@
 //! The eframe [`App`](eframe::App) that hosts the canvas: theme, document title, the camera,
 //! the scene editor and its overlay, the load-error banner and the GPU canvas itself.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -8,10 +9,16 @@ use eframe::egui;
 use scene::editor::{Editor, Modifiers, PointerEvent, Tool};
 use scene::env::SystemEnv;
 use scene::file::NapkinView;
+use scene::text::TextMeasure;
 
+use crate::agent;
 use crate::autosave::{Autosave, DocumentState, Trigger};
 use crate::bench;
 use crate::camera::{Camera, SceneRect, normalized_zoom};
+use crate::control::Response;
+use crate::control::handler::{self, Session, handle};
+use crate::control::render::Rasterize;
+use crate::control::server::{BindError, Incoming, Server, socket_path};
 use crate::edit_input::{self, EditorInput, PointerCapture};
 use crate::input::{self, CanvasInput};
 use crate::overlay::{self, OverlayColors};
@@ -19,10 +26,17 @@ use crate::pinch::{PinchListener, PinchTracker};
 use crate::render::callback::{self, CanvasCallback};
 use crate::render::color::render_color;
 use crate::render::gpu::{CanvasFrame, CanvasRenderer};
+use crate::render::offscreen::GpuRasterizer;
+use crate::render::text::FontMeasure;
 use crate::stats::FrameStats;
 use crate::storage::{self, Content};
 use crate::theme::{self, Theme};
 use crate::writer::{SaveJob, SaveWorker};
+
+/// How often a mutating request at the front of the queue re-checks `Editor::is_idle` while a
+/// user gesture is in progress: frequent enough that the request runs soon after the gesture
+/// ends, without polling on every single frame.
+const PENDING_REQUEST_RETRY: Duration = Duration::from_millis(50);
 
 /// How long a notice stays on screen (spec §8).
 const NOTICE_DURATION: Duration = Duration::from_secs(10);
@@ -57,7 +71,8 @@ enum BenchState {
 }
 
 pub struct NapkinApp {
-    name: String,
+    /// The open canvas's path, split for the corner label and the window title.
+    display: storage::DisplayPath,
     load_error: Option<String>,
     /// `Some` whenever `load_error` is `None`: the scene editor driving pointer and keyboard
     /// input, undo/redo and the selection overlay. `None` on a load error, same as M3's
@@ -113,16 +128,79 @@ pub struct NapkinApp {
     /// without this flag, that single frame's `gained_focus` edge would be the only chance to
     /// notice an external change, and the next autosave would silently overwrite it.
     reload_check_pending: bool,
+    /// `None` in `--bench`, without `$XDG_RUNTIME_DIR`, or when another napkin owns the socket.
+    control: Option<Server>,
+    /// Requests in arrival order; a mutating one at the front waits for `Editor::is_idle`.
+    pending: VecDeque<Incoming>,
+    /// Created on the first request that measures text.
+    measure: Option<FontMeasure>,
+    /// The renderer `render` requests draw with (its own format, `offscreen::FORMAT`).
+    offscreen: Option<CanvasRenderer>,
+    /// The canvas size in points, from the latest laid-out frame.
+    canvas_size: [f64; 2],
+}
+
+/// A [`Rasterize`] for a `render` request that arrives before the first frame has a GPU render
+/// state (`frame.wgpu_render_state()` is `None` until eframe's wgpu backend is ready).
+struct NoGpu;
+
+/// Stands in for `Session::measure` on a request that never reads it, so building the real
+/// `FontMeasure` (which sets up its own `cosmic_text::FontSystem`) can wait for a request
+/// that actually needs to lay out text.
+struct NoMeasure;
+
+impl TextMeasure for NoMeasure {
+    fn line_width(&mut self, _line: &str, _font_family: f64, _font_size: f64) -> f64 {
+        unreachable!("only `apply` measures text, and it always gets the real FontMeasure")
+    }
+}
+
+impl Rasterize for NoGpu {
+    fn rasterize(
+        &mut self,
+        _scene: std::sync::Arc<scene::SceneFile>,
+        _camera: Camera,
+        _size_px: [u32; 2],
+        _dark: bool,
+    ) -> Result<Vec<u8>, String> {
+        Err("no GPU".to_string())
+    }
+}
+
+/// Binds the control socket, unless `bench` is set (spec §9.3: `--bench` never opens it). `None`
+/// without `$XDG_RUNTIME_DIR`/`$NAPKIN_SOCKET` and no notice; `None` with a notice when the
+/// socket exists but cannot be used, either because another napkin already owns it or because
+/// binding failed outright (logged to stderr too, since that failure has no other visible cause).
+fn bind_control(cc: &eframe::CreationContext<'_>, bench: bool) -> (Option<Server>, Option<String>) {
+    if bench {
+        return (None, None);
+    }
+    let Some(path) = socket_path() else {
+        return (None, None);
+    };
+    let ctx = cc.egui_ctx.clone();
+    match Server::bind(&path, move || ctx.request_repaint()) {
+        Ok(server) => (Some(server), None),
+        Err(BindError::AlreadyRunning) => (
+            None,
+            Some("another napkin owns the control socket; napkin commands go to it".to_string()),
+        ),
+        Err(BindError::Io(error)) => {
+            eprintln!("napkin: control socket unavailable: {error}");
+            (None, Some(format!("control socket unavailable: {error}")))
+        }
+    }
 }
 
 impl NapkinApp {
     /// `content` is what [`storage::open_at_startup`] (or, for `--bench` and a missing
     /// `$HOME`, [`storage::load`]) found at `path`; `path` is `None` when nothing should ever
     /// be written. `notice` is shown for [`NOTICE_DURATION`], such as which requested file
-    /// fell back to another one.
+    /// fell back to another one; a control socket bind failure takes priority over it,
+    /// so the rarer, more actionable message isn't hidden by a startup one.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        name: String,
+        display: storage::DisplayPath,
         path: Option<PathBuf>,
         content: Content,
         notice: Option<String>,
@@ -131,6 +209,8 @@ impl NapkinApp {
         if let Some(render_state) = &cc.wgpu_render_state {
             callback::install(render_state);
         }
+        let (control, control_notice) = bind_control(cc, bench);
+        let notice = control_notice.or(notice);
         let pinch = PinchListener::start(cc)
             .inspect_err(|reason| {
                 eprintln!("napkin: touchpad pinch zoom unavailable: {reason}");
@@ -156,7 +236,7 @@ impl NapkinApp {
             SaveWorker::spawn(move || ctx.request_repaint())
         });
         NapkinApp {
-            name,
+            display,
             load_error,
             editor,
             capture: PointerCapture::default(),
@@ -181,6 +261,11 @@ impl NapkinApp {
             known_mtime,
             generation: 0,
             reload_check_pending: false,
+            control,
+            pending: VecDeque::new(),
+            measure: None,
+            offscreen: None,
+            canvas_size: [0.0, 0.0],
         }
     }
 
@@ -196,6 +281,103 @@ impl NapkinApp {
             Err(message) => self.autosave.finished(now, Err(message)),
         }
     }
+
+    /// Serves requests from the front of `self.pending`, in the order they arrived, until the
+    /// queue is empty or the front one has to wait. A mutating request (`apply`) on a
+    /// read-write canvas waits for `editor.is_idle()` rather than running mid-gesture or being
+    /// skipped over, so it never interrupts something the user is dragging: it is left at the
+    /// front, a repaint is requested after [`PENDING_REQUEST_RETRY`] so the wait is retried
+    /// without new input, and nothing behind it runs out of order. Every request actually
+    /// served gets a fresh `Session` built from the current editor, save and camera state.
+    fn serve_requests(&mut self, frame: &eframe::Frame, ctx: &egui::Context, camera: Camera) {
+        loop {
+            let Some(incoming) = self.pending.front() else {
+                return;
+            };
+            if incoming.is_expired(Instant::now()) {
+                // The client already gave up and read a timeout error off the socket, and may
+                // have retried by now; running this late reply would apply it a second time.
+                self.pending.pop_front();
+                continue;
+            }
+            let Some(editor) = self.editor.as_ref() else {
+                // No `Editor` at all: `ui`'s load-error branch already drains `self.pending`
+                // every frame in that case, so this is never actually reached; kept as a guard
+                // rather than an `expect` since serving requests has nothing to do with that
+                // invariant.
+                return;
+            };
+            if handler::is_mutating(&incoming.request)
+                && self.unreadable.is_none()
+                && !editor.is_idle()
+            {
+                ctx.request_repaint_after(PENDING_REQUEST_RETRY);
+                return;
+            }
+
+            let incoming = self
+                .pending
+                .pop_front()
+                .expect("front just matched Some above");
+            let path = self.path.as_deref();
+            let readonly = self.unreadable.as_deref();
+            let save_error = self.autosave.error();
+            let editor = self.editor.as_mut().expect(EDITOR_INVARIANT);
+            let unsaved = self.autosave.has_unsaved_changes(editor.revision());
+            let mut no_measure = NoMeasure;
+            let measure: &mut dyn TextMeasure = if handler::is_mutating(&incoming.request) {
+                self.measure.get_or_insert_with(FontMeasure::new)
+            } else {
+                &mut no_measure
+            };
+            let mut no_gpu = NoGpu;
+            let render_state = frame.wgpu_render_state();
+            let mut gpu_rasterizer;
+            let rasterizer: &mut dyn Rasterize = match &render_state {
+                Some(render_state) => {
+                    gpu_rasterizer = GpuRasterizer {
+                        device: &render_state.device,
+                        queue: &render_state.queue,
+                        renderer: &mut self.offscreen,
+                    };
+                    &mut gpu_rasterizer
+                }
+                None => &mut no_gpu,
+            };
+            let mut session = Session {
+                editor,
+                path,
+                unsaved,
+                save_error,
+                readonly,
+                camera,
+                canvas_size: self.canvas_size,
+                measure,
+                dark: self.theme.dark,
+                rasterizer,
+            };
+            let response = handle(&mut session, &incoming.request);
+            incoming.reply(response);
+        }
+    }
+}
+
+/// Whether `events` holds a fresh (non-repeat) `Ctrl+K`/`Cmd+K` press this frame. Only the
+/// initial press opens a terminal; holding the key down must not launch a second one from the
+/// OS's key-repeat events.
+fn ctrl_k_just_pressed(events: &[egui::Event]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::K,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } if modifiers.command
+        )
+    })
 }
 
 /// The tool's lowercase name, as shown above the canvas.
@@ -314,6 +496,12 @@ pub fn should_reload(
     }
 }
 
+/// A read-only canvas (a failed reload) whose file has since been deleted becomes editable
+/// again: nothing on disk is left to protect, and the next save recreates the file.
+pub fn should_clear_unreadable(unreadable: bool, disk_mtime: Option<SystemTime>) -> bool {
+    unreadable && disk_mtime.is_none()
+}
+
 impl eframe::App for NapkinApp {
     /// Stops the pinch dispatch thread before eframe disconnects the Wayland display it
     /// borrows from (see [`PinchListener`]'s doc comment), finishes any queued save and hands
@@ -321,6 +509,9 @@ impl eframe::App for NapkinApp {
     /// unwritten, saves once more directly on this thread (spec §5.5). A panic skips
     /// `on_exit` entirely, so nothing is saved after one (spec §8).
     fn on_exit(&mut self) {
+        while let Some(incoming) = self.pending.pop_front() {
+            incoming.reply(Response::error("napkin is closing"));
+        }
         if let Some(pinch) = &mut self.pinch {
             pinch.stop();
         }
@@ -367,6 +558,12 @@ impl eframe::App for NapkinApp {
         let frame_start = Instant::now();
         self.stats.frame_started(frame_start);
 
+        if let Some(control) = &self.control {
+            while let Some(incoming) = control.try_recv() {
+                self.pending.push_back(incoming);
+            }
+        }
+
         let save_result = self.writer.as_ref().and_then(|writer| writer.try_result());
         if let Some(result) = save_result {
             self.record_save_result(frame_start, result);
@@ -389,10 +586,16 @@ impl eframe::App for NapkinApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(self.theme.background))
             .show(ui, |ui| {
-                if let Some(error) = &self.load_error {
+                if let Some(error) = self.load_error.clone() {
                     ui.centered_and_justified(|ui| {
-                        ui.colored_label(egui::Color32::RED, error);
+                        ui.colored_label(egui::Color32::RED, &error);
                     });
+                    // There is no `Editor` at all to serve requests against; every request
+                    // gets the same answer instead of waiting in the queue forever.
+                    let message = format!("napkin could not open the canvas: {error}");
+                    while let Some(incoming) = self.pending.pop_front() {
+                        incoming.reply(Response::error(message.clone()));
+                    }
                     // `--bench` has no editor to drive a script with; without this, the
                     // window would sit open indefinitely instead of finishing the run.
                     if self.bench && !matches!(self.bench_state, BenchState::Done) {
@@ -406,6 +609,7 @@ impl eframe::App for NapkinApp {
                 let (_, response) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
                 let view_size = [response.rect.width() as f64, response.rect.height() as f64];
+                self.canvas_size = view_size;
                 if self.camera.is_none() {
                     self.camera = initial_camera(
                         self.editor.as_ref().expect(EDITOR_INVARIANT).file(),
@@ -583,12 +787,19 @@ impl eframe::App for NapkinApp {
                                         }
                                         storage::Loaded::Missing => {}
                                     }
+                                } else if should_clear_unreadable(
+                                    self.unreadable.is_some(),
+                                    disk_mtime,
+                                ) {
+                                    self.unreadable = None;
+                                    self.known_mtime = None;
                                 }
                             } else if self.reload_check_pending {
                                 ui.ctx().request_repaint();
                             }
                         }
 
+                        let super_held = self.pinch.as_ref().is_some_and(PinchListener::super_held);
                         if self.unreadable.is_none() {
                             let events = ui.input(|i| i.events.clone());
                             let frame_input = edit_input::FrameInput {
@@ -599,6 +810,7 @@ impl eframe::App for NapkinApp {
                                 panning,
                                 keyboard_taken: ui.ctx().egui_wants_keyboard_input(),
                                 focused: self.focused,
+                                super_held,
                             };
                             for action in edit_input::translate(&frame_input, &mut self.capture) {
                                 match action {
@@ -618,46 +830,63 @@ impl eframe::App for NapkinApp {
                             edit_input::cursor_icon(editor.cursor())
                         });
 
-                        if self.unreadable.is_none()
-                            && let (Some(path), Some(writer)) =
-                                (self.path.clone(), self.writer.as_ref())
+                        if !ui.ctx().egui_wants_keyboard_input()
+                            && !super_held
+                            && ui.input(|i| ctrl_k_just_pressed(&i.events))
+                            && let Some(home) = storage::home_dir()
+                            && let Err(error) = agent::open(&home)
                         {
-                            if lost_focus {
-                                // See `on_exit`'s identical comment: a multi-point line's
-                                // follow point must be committed before a focus-loss save, or
-                                // the save would either capture that uncommitted point as if
-                                // confirmed, or, if nothing else changed, miss it entirely.
-                                editor.finish_pending_gesture();
-                            }
-                            let view = camera_view(*camera);
-                            let state = DocumentState {
-                                revision: editor.revision(),
+                            self.notice = Some((error, Instant::now()));
+                        }
+                    }
+
+                    // Serving requests here, after this frame's input and reload check but
+                    // before the autosave decision below, means a scene change an `apply`
+                    // makes is covered by the save this same frame decides to make, rather than
+                    // waiting for the next one.
+                    let camera_for_requests = *camera;
+                    self.serve_requests(frame, ui.ctx(), camera_for_requests);
+
+                    if let Some(editor) = self.editor.as_mut()
+                        && self.unreadable.is_none()
+                        && let (Some(path), Some(writer)) =
+                            (self.path.clone(), self.writer.as_ref())
+                    {
+                        if lost_focus {
+                            // See `on_exit`'s identical comment: a multi-point line's follow
+                            // point must be committed before a focus-loss save, or the save
+                            // would either capture that uncommitted point as if confirmed, or,
+                            // if nothing else changed, miss it entirely.
+                            editor.finish_pending_gesture();
+                        }
+                        let view = camera_view(camera_for_requests);
+                        let state = DocumentState {
+                            revision: editor.revision(),
+                            view,
+                            idle: editor.is_idle(),
+                        };
+                        if self
+                            .autosave
+                            .should_save(frame_start, state, Trigger::Frame)
+                        {
+                            self.autosave.started(state);
+                            writer.submit(SaveJob {
+                                path: path.clone(),
+                                file: editor.file().clone(),
                                 view,
-                                idle: editor.is_idle(),
-                            };
-                            if self
+                            });
+                        }
+                        if lost_focus
+                            && self
                                 .autosave
-                                .should_save(frame_start, state, Trigger::Frame)
-                            {
-                                self.autosave.started(state);
-                                writer.submit(SaveJob {
-                                    path: path.clone(),
-                                    file: editor.file().clone(),
-                                    view,
-                                });
-                            }
-                            if lost_focus
-                                && self
-                                    .autosave
-                                    .should_save(frame_start, state, Trigger::FocusLost)
-                            {
-                                self.autosave.started(state);
-                                writer.submit(SaveJob {
-                                    path,
-                                    file: editor.file().clone(),
-                                    view,
-                                });
-                            }
+                                .should_save(frame_start, state, Trigger::FocusLost)
+                        {
+                            self.autosave.started(state);
+                            writer.submit(SaveJob {
+                                path,
+                                file: editor.file().clone(),
+                                view,
+                            });
                         }
                     }
                     if let Some(wake_after) = self.autosave.wake_after(frame_start) {
@@ -665,6 +894,10 @@ impl eframe::App for NapkinApp {
                     }
                 }
 
+                // Read back the current value instead of reusing the mutable borrow above:
+                // that borrow's scope ends at the last of its own writes, above, so the drawing
+                // code below (and `serve_requests`, in between) works from a plain copy.
+                let camera = self.camera.expect("camera was initialized above");
                 let file = self.editor.as_ref().expect(EDITOR_INVARIANT).file().clone();
 
                 let background = render_color(file.view_background_color(), self.theme.dark);
@@ -686,7 +919,7 @@ impl eframe::App for NapkinApp {
                 ];
                 let frame = CanvasFrame {
                     file,
-                    camera: *camera,
+                    camera,
                     size_px,
                     pixels_per_point,
                     dark: self.theme.dark,
@@ -702,7 +935,7 @@ impl eframe::App for NapkinApp {
                     let colors = OverlayColors::from_theme(&self.theme);
                     ui.painter().extend(overlay::shapes(
                         &overlay,
-                        camera,
+                        &camera,
                         response.rect.min,
                         colors,
                     ));
@@ -742,7 +975,25 @@ impl eframe::App for NapkinApp {
         egui::Area::new(egui::Id::new("napkin-document-name"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
             .show(ui.ctx(), |ui| {
-                ui.label(&self.name);
+                ui.horizontal(|ui| {
+                    // No gap between the two labels: together they read as one path.
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let dir = ui.add(
+                        egui::Label::new(egui::RichText::new(&self.display.dir).weak())
+                            .sense(egui::Sense::click()),
+                    );
+                    let name = ui.add(
+                        egui::Label::new(egui::RichText::new(&self.display.name))
+                            .sense(egui::Sense::click()),
+                    );
+                    if (dir.clicked() || name.clicked())
+                        && let Some(path) = &self.path
+                    {
+                        let absolute = path.display().to_string();
+                        ui.ctx().copy_text(absolute.clone());
+                        self.notice = Some((format!("Copied {absolute}"), Instant::now()));
+                    }
+                });
             });
 
         if let Some(error) = self.autosave.error() {
@@ -808,6 +1059,40 @@ mod tests {
     use crate::camera::MAX_ZOOM;
 
     #[test]
+    fn ctrl_k_ignores_key_repeat_but_not_a_fresh_press() {
+        let key_event =
+            |pressed: bool, repeat: bool, modifiers: egui::Modifiers| egui::Event::Key {
+                key: egui::Key::K,
+                physical_key: None,
+                pressed,
+                repeat,
+                modifiers,
+            };
+        assert!(ctrl_k_just_pressed(&[key_event(
+            true,
+            false,
+            egui::Modifiers::COMMAND
+        )]));
+        assert!(!ctrl_k_just_pressed(&[key_event(
+            true,
+            true,
+            egui::Modifiers::COMMAND
+        )]));
+        assert!(!ctrl_k_just_pressed(&[]));
+        // A release, or the same key without the command modifier, isn't a press either.
+        assert!(!ctrl_k_just_pressed(&[key_event(
+            false,
+            false,
+            egui::Modifiers::COMMAND
+        )]));
+        assert!(!ctrl_k_just_pressed(&[key_event(
+            true,
+            false,
+            egui::Modifiers::NONE
+        )]));
+    }
+
+    #[test]
     fn reload_check_waits_out_an_in_flight_save() {
         assert!(!reload_check_ready(false, false), "nothing pending");
         assert!(
@@ -836,6 +1121,14 @@ mod tests {
         );
         assert!(!should_reload(Some(t(10)), Some(t(11)), true, false));
         assert!(!should_reload(Some(t(10)), Some(t(11)), false, true));
+    }
+
+    #[test]
+    fn a_deleted_unreadable_file_makes_the_canvas_editable_again() {
+        let t = SystemTime::UNIX_EPOCH;
+        assert!(should_clear_unreadable(true, None));
+        assert!(!should_clear_unreadable(true, Some(t)));
+        assert!(!should_clear_unreadable(false, None));
     }
 
     #[test]

@@ -445,6 +445,41 @@ impl Element {
         }
     }
 
+    /// Sets `startBinding` or `endBinding` to `binding`, when `self` is a typed line or arrow.
+    /// A no-op otherwise, `Raw` included (spec §5.2's restricted `Raw` mutation surface has no
+    /// binding fields).
+    pub fn set_binding(&mut self, end: LinearEnd, binding: Value) {
+        if matches!(self, Element::Line(_) | Element::Arrow(_))
+            && let Some(extra) = self.extra_mut()
+        {
+            extra.insert(binding_key(end).into(), binding);
+        }
+    }
+
+    /// Appends `{id, type: kind}` to `boundElements` unless an entry with that `id` already
+    /// exists; a missing or `null` array becomes a one-entry array. Typed elements only
+    /// (`Raw`'s restricted mutation surface has no `boundElements`, spec §5.2).
+    pub fn add_bound_element(&mut self, id: &str, kind: &str) {
+        let Some(extra) = self.extra_mut() else {
+            return;
+        };
+        let entry = extra
+            .entry("boundElements".to_owned())
+            .or_insert(Value::Null);
+        if !matches!(entry, Value::Array(_)) {
+            *entry = Value::Array(Vec::new());
+        }
+        let Value::Array(entries) = entry else {
+            unreachable!("just normalized to an array above")
+        };
+        let exists = entries
+            .iter()
+            .any(|e| e.get("id").and_then(Value::as_str) == Some(id));
+        if !exists {
+            entries.push(json!({"id": id, "type": kind}));
+        }
+    }
+
     /// Sets a text element's `containerId` to `null`. A no-op for every other element.
     pub fn clear_container_id(&mut self) {
         if let Element::Text(t) = self {
@@ -699,6 +734,30 @@ mod tests {
             Some("r"),
         ));
         assert_eq!(text.container_id(), Some("r"));
+    }
+
+    #[test]
+    fn binding_and_bound_element_setters() {
+        let mut arrow = Element::from_value(crate::sample::linear(
+            "arrow",
+            "a",
+            [0.0, 0.0],
+            &[[0.0, 0.0], [10.0, 0.0]],
+        ));
+        let binding = json!({"elementId": "r", "mode": "orbit", "fixedPoint": [1.0, 0.5001]});
+        arrow.set_binding(LinearEnd::End, binding.clone());
+        assert_eq!(arrow.to_value()["endBinding"], binding);
+        assert_eq!(arrow.binding_target(LinearEnd::End), Some("r"));
+
+        let mut rect = Element::from_value(rectangle());
+        rect.add_bound_element("a", "arrow");
+        rect.add_bound_element("a", "arrow");
+        rect.add_bound_element("t", "text");
+        assert_eq!(rect.bound_elements(), vec![("a", "arrow"), ("t", "text")]);
+
+        let mut image = Element::from_value(json!({"id": "i", "type": "image"}));
+        image.add_bound_element("a", "arrow");
+        assert_eq!(image.to_value(), json!({"id": "i", "type": "image"}));
     }
 
     #[test]
