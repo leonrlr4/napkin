@@ -1,11 +1,11 @@
 //! Resize handles and pointer-driven resizing (`packages/element/src/transformHandles.ts`,
-//! `packages/element/src/resizeTest.ts`, the resize half of
+//! `packages/element/src/resizeTest.ts`, the resize and rotation halves of
 //! `packages/element/src/resizeElements.ts`, `packages/common/src/points.ts`'s
-//! `rescalePoints`, all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`; a resized
+//! `rescalePoints`, all at the pinned commit; a resized
 //! container's label is placed with [`crate::bound_text`]).
 //!
-//! napkin only ever draws and hit-tests the four corner squares: it never renders the
-//! `n`/`s`/`e`/`w` edge squares Excalidraw shows above a size threshold, and rather than
+//! napkin draws and hit-tests the four corner squares and the rotation handle: it never renders
+//! the `n`/`s`/`e`/`w` edge squares Excalidraw shows above a size threshold, and rather than
 //! porting the slash/backslash corner omission for a two-point line or arrow, it shows no
 //! corner handles at all for that case. Resizing from an edge still works everywhere else
 //! through the line-proximity test in [`handle_at`], which mirrors `resizeTest`'s fallback
@@ -15,12 +15,15 @@
 //! A resized rectangle, diamond or ellipse rewraps its label, and a standalone text resized
 //! from its left or right side gets a fixed width and wraps to it.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::bound_text::{
-    approx_min_container_size, bound_text_max_size, handle_bind_text_resize, live_bound_text,
-    min_text_element_width, text_line_height,
+    approx_min_container_size, bound_text_max_size, bound_text_position, handle_bind_text_resize,
+    live_bound_text, min_text_element_width, text_line_height,
 };
 use crate::collision::{DEFAULT_TRANSFORM_HANDLE_SPACING, SIDE_RESIZING_THRESHOLD};
-use crate::element::{Element, TextElement};
+use crate::edit::unbind_arrow_end;
+use crate::element::{Element, LinearEnd, TextElement};
 use crate::env::Env;
 use crate::file::SceneFile;
 use crate::geometry::{
@@ -46,6 +49,15 @@ pub enum HandleKind {
     Ne,
     Sw,
     Se,
+    Rotation,
+}
+
+/// What [`selection_handles`] shows: the corner resize squares and the rotation square, all
+/// axis-aligned.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SelectionHandles {
+    pub resize: Vec<(HandleKind, Bounds)>,
+    pub rotation: Option<Bounds>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -88,6 +100,44 @@ pub fn corner_handles(
     .collect()
 }
 
+/// `ROTATION_RESIZE_HANDLE_GAP`.
+const ROTATION_RESIZE_HANDLE_GAP: f64 = 16.0;
+
+/// `generateTransformHandle`: the square whose unrotated center is the center of `square`,
+/// moved to where that center lands after turning by `angle` around `center`.
+fn turn_square(square: Bounds, center: [f64; 2], angle: f64) -> Bounds {
+    let (half_w, half_h) = ((square[2] - square[0]) / 2.0, (square[3] - square[1]) / 2.0);
+    let [x, y] = rotate_point([square[0] + half_w, square[1] + half_h], center, angle);
+    [x - half_w, y - half_h, x + half_w, y + half_h]
+}
+
+/// `getTransformHandlesFromCoords`'s corner and rotation squares for a selection whose
+/// absolute coords are `bounds` (center `center`) turned by `angle`.
+fn transform_handles(
+    bounds: Bounds,
+    center: [f64; 2],
+    angle: f64,
+    zoom: f64,
+    margin: f64,
+    omit: &[HandleKind],
+) -> SelectionHandles {
+    let resize = corner_handles(bounds, zoom, margin, omit)
+        .into_iter()
+        .map(|(kind, square)| (kind, turn_square(square, center, angle)))
+        .collect();
+
+    let [x1, y1, x2, _] = bounds;
+    let handle = HANDLE_SIZE / zoom;
+    let centering_offset = (HANDLE_SIZE - DEFAULT_TRANSFORM_HANDLE_SPACING * 2.0) / (2.0 * zoom);
+    let left = x1 + (x2 - x1) / 2.0 - handle / 2.0;
+    let top = y1 - margin / zoom - handle + centering_offset - ROTATION_RESIZE_HANDLE_GAP / zoom;
+    let rotation = turn_square([left, top, left + handle, top + handle], center, angle);
+    SelectionHandles {
+        resize,
+        rotation: Some(rotation),
+    }
+}
+
 /// Whether `element` alone, as the sole member of a selection, is a two-point line or arrow:
 /// napkin shows no handles at all for that case (see the module doc comment) rather than
 /// porting `OMIT_SIDES_FOR_LINE_SLASH`/`BACKSLASH` for it. A two-point freedraw is different:
@@ -117,16 +167,25 @@ fn freedraw_two_point_omit(points: &[[f64; 2]]) -> Vec<HandleKind> {
     }
 }
 
-/// The bounds, margin and corner omission [`corner_handles`] should use for `selection`'s
-/// corner squares, or `None` when napkin shows no handles at all: an empty selection, a single
-/// two-point line or arrow, or a selection containing a rotated, locked, elbow-arrow or
-/// [`Element::Raw`] element (`hasBoundingBox` plus `getTransformHandles`'s own locked/
-/// elbow-arrow checks).
+/// Where a selection's handles sit.
+struct HandleFrame {
+    bounds: Bounds,
+    center: [f64; 2],
+    angle: f64,
+    margin: f64,
+    omit: Vec<HandleKind>,
+}
+
+/// The frame [`transform_handles`] should use for `selection`, or `None` when napkin shows no
+/// handles at all: an empty selection, a single two-point line or arrow, or a selection
+/// containing a locked, elbow-arrow or [`Element::Raw`] element (`hasBoundingBox` plus
+/// `getTransformHandles`'s own locked/elbow-arrow checks). A single element keeps its own
+/// angle; several elements share their common bounds at angle 0.
 fn resizable_bounds(
     geometry: &mut GeometryCache,
     file: &SceneFile,
     selection: &Selection,
-) -> Option<(Bounds, f64, Vec<HandleKind>)> {
+) -> Option<HandleFrame> {
     let positions = selection.positions(file);
     if positions.is_empty() {
         return None;
@@ -142,9 +201,6 @@ fn resizable_bounds(
         if let Element::Arrow(l) = element
             && l.elbowed == Some(true)
         {
-            return None;
-        }
-        if element.placement()?.angle != 0.0 {
             return None;
         }
     }
@@ -163,23 +219,47 @@ fn resizable_bounds(
             Element::Freedraw(f) if f.points.len() == 2 => freedraw_two_point_omit(&f.points),
             _ => Vec::new(),
         };
-        Some((element_absolute_coords(element)?.0, margin, omit))
+        let (bounds, center) = element_absolute_coords(element)?;
+        Some(HandleFrame {
+            bounds,
+            center,
+            angle: element.placement()?.angle,
+            margin,
+            omit,
+        })
     } else {
-        Some((selected_bounds(geometry, file, selection)?, 4.0, Vec::new()))
+        let bounds = selected_bounds(geometry, file, selection)?;
+        Some(HandleFrame {
+            bounds,
+            center: [(bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0],
+            angle: 0.0,
+            margin: 4.0,
+            omit: Vec::new(),
+        })
     }
 }
 
-/// The corner handles the selection shows: none for an empty selection, a single two-point
-/// line or arrow, or a selection containing a rotated, locked, elbow-arrow or `Raw` element.
+/// The selection's resize squares and its rotation handle (`getTransformHandles` /
+/// `getTransformHandlesFromCoords`): each square is axis-aligned, centered where the
+/// unrotated square's center lands after turning by the element's angle around its center.
+/// Empty for an empty selection, a single two-point line or arrow, or a selection containing
+/// a locked, elbow-arrow or `Raw` element.
 pub fn selection_handles(
     geometry: &mut GeometryCache,
     file: &SceneFile,
     selection: &Selection,
     zoom: f64,
-) -> Vec<(HandleKind, Bounds)> {
+) -> SelectionHandles {
     match resizable_bounds(geometry, file, selection) {
-        Some((bounds, margin, omit)) => corner_handles(bounds, zoom, margin, &omit),
-        None => Vec::new(),
+        Some(frame) => transform_handles(
+            frame.bounds,
+            frame.center,
+            frame.angle,
+            zoom,
+            frame.margin,
+            &frame.omit,
+        ),
+        None => SelectionHandles::default(),
     }
 }
 
@@ -202,8 +282,9 @@ fn distance_to_segment(point: [f64; 2], seg: [[f64; 2]; 2]) -> f64 {
     rough::js::hypot(point[0] - q[0], point[1] - q[1])
 }
 
-/// `resizeTest` / `getTransformHandleTypeFromCoords`: corner squares first, then the edges of
-/// the padded bounds (never edges for a single line or arrow with two points).
+/// `resizeTest` / `getTransformHandleTypeFromCoords`: the rotation handle, then the corner
+/// squares, then the edges of the padded bounds turned with the element (never edges for a
+/// single line or arrow with two points).
 pub fn handle_at(
     geometry: &mut GeometryCache,
     file: &SceneFile,
@@ -211,31 +292,45 @@ pub fn handle_at(
     point: [f64; 2],
     zoom: f64,
 ) -> Option<HandleKind> {
-    let (corner_bounds, margin, omit) = resizable_bounds(geometry, file, selection)?;
-    for (kind, bounds) in corner_handles(corner_bounds, zoom, margin, &omit) {
-        if point[0] >= bounds[0]
+    let frame = resizable_bounds(geometry, file, selection)?;
+    let handles = transform_handles(
+        frame.bounds,
+        frame.center,
+        frame.angle,
+        zoom,
+        frame.margin,
+        &frame.omit,
+    );
+    let inside = |bounds: Bounds| {
+        point[0] >= bounds[0]
             && point[0] <= bounds[2]
             && point[1] >= bounds[1]
             && point[1] <= bounds[3]
-        {
+    };
+    if let Some(rotation) = handles.rotation
+        && inside(rotation)
+    {
+        return Some(HandleKind::Rotation);
+    }
+    for (kind, bounds) in handles.resize {
+        if inside(bounds) {
             return Some(kind);
         }
     }
 
-    let positions = selection.positions(file);
-    let edge_bounds = if positions.len() == 1 {
-        element_absolute_coords(&file.elements[positions[0]])?.0
-    } else {
-        selected_bounds(geometry, file, selection)?
-    };
+    // `resizeTest` measures the edges from the element's own coords; a multi-selection uses
+    // its common bounds at angle 0.
     let spacing = SIDE_RESIZING_THRESHOLD / zoom;
-    let [x1, y1, x2, y2] = edge_bounds;
+    let [x1, y1, x2, y2] = frame.bounds;
     let (px1, py1, px2, py2) = (x1 - spacing, y1 - spacing, x2 + spacing, y2 + spacing);
+    let turn = |p: [f64; 2]| rotate_point(p, frame.center, frame.angle);
+    let (top_left, top_right) = (turn([px1, py1]), turn([px2, py1]));
+    let (bottom_left, bottom_right) = (turn([px1, py2]), turn([px2, py2]));
     let sides = [
-        (HandleKind::N, [[px1, py1], [px2, py1]]),
-        (HandleKind::E, [[px2, py1], [px2, py2]]),
-        (HandleKind::S, [[px2, py2], [px1, py2]]),
-        (HandleKind::W, [[px1, py2], [px1, py1]]),
+        (HandleKind::N, [top_left, top_right]),
+        (HandleKind::E, [top_right, bottom_right]),
+        (HandleKind::S, [bottom_right, bottom_left]),
+        (HandleKind::W, [bottom_left, top_left]),
     ];
     for (kind, segment) in sides {
         if distance_to_segment(point, segment) < spacing {
@@ -278,6 +373,7 @@ pub fn resize_offset(
         Ne => [x - x2, y - y1],
         Sw => [x - x1, y - y2],
         Se => [x - x2, y - y2],
+        Rotation => [0.0, 0.0],
     };
     rotate_point(offset, [0.0, 0.0], angle)
 }
@@ -415,6 +511,7 @@ fn resize_anchor(handle: HandleKind, keep_aspect_ratio: bool, from_center: bool)
             Nw => Anchor::BottomRight,
             Se => Anchor::TopLeft,
             Sw => Anchor::TopRight,
+            Rotation => unreachable!("rotation is not a resize"),
         };
     }
     match handle {
@@ -422,13 +519,12 @@ fn resize_anchor(handle: HandleKind, keep_aspect_ratio: bool, from_center: bool)
         N | Nw | W => Anchor::BottomRight,
         Ne => Anchor::BottomLeft,
         Sw => Anchor::TopRight,
+        Rotation => unreachable!("rotation is not a resize"),
     }
 }
 
-/// `getResizedOrigin`. The trigonometric terms are kept exactly as JS writes them even though
-/// every caller in this task only ever passes `angle: 0.0` (see [`resize_element`]'s doc
-/// comment): at that angle `cos(angle) == 1.0` and `sin(angle) == 0.0` collapse each branch to
-/// the same value a angle-free version would compute.
+/// `getResizedOrigin`: the new top-left after resizing from `handle`, keeping the opposite
+/// anchor fixed in the element's own rotated frame.
 fn get_resized_origin(
     prev_origin: [f64; 2],
     prev_size: [f64; 2],
@@ -565,6 +661,9 @@ pub fn resize_element(
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) -> bool {
+    if handle == HandleKind::Rotation {
+        return false;
+    }
     let orig = &start.elements[position];
     // A `Raw` element's restricted mutation surface has no width/height/points/fontSize, so
     // it never resizes (spec §5.2).
@@ -928,6 +1027,7 @@ fn multi_anchor(
         W => [max_x, min_y + height / 2.0],
         N => [min_x + width / 2.0, max_y],
         S => [min_x + width / 2.0, min_y],
+        Rotation => unreachable!("rotation is not a resize"),
     }
 }
 
@@ -945,7 +1045,167 @@ fn multi_flip(handle: HandleKind, pointer: [f64; 2], anchor: [f64; 2]) -> (bool,
         W => (px > ax, false),
         N => (false, py > ay),
         S => (false, py < ay),
+        Rotation => unreachable!("rotation is not a resize"),
     }
+}
+
+/// `SHIFT_LOCKING_ANGLE`.
+const SHIFT_LOCKING_ANGLE: f64 = std::f64::consts::PI / 12.0;
+
+/// Sets `angle` on a typed element; whether the value changed. `Raw` never rotates.
+fn set_angle(element: &mut Element, angle: f64) -> bool {
+    match element {
+        Element::Raw(_) => false,
+        _ => {
+            let base = element.base_mut().expect("typed element");
+            let changed = base.angle != angle;
+            base.angle = angle;
+            changed
+        }
+    }
+}
+
+fn is_elbow_arrow(element: &Element) -> bool {
+    matches!(element, Element::Arrow(l) if l.elbowed == Some(true))
+}
+
+/// `transformElements`' rotation branch: `rotateSingleElement` when `targets` (ascending
+/// positions, bound text excluded the same way `resize_elements` excludes it) holds one
+/// element, `rotateMultipleElements` around `center` otherwise. Recomputed from `start` on
+/// every call, so repeated calls with the same arguments are idempotent. `discrete` is Shift
+/// (`shouldRotateWithDiscreteAngle`). Returns whether anything changed. Raw and elbow-arrow
+/// elements never rotate. Rotating a bound arrow unbinds the ends whose target is not
+/// rotated with it; arrows do not follow a rotated shape.
+pub fn rotate_elements(
+    file: &mut SceneFile,
+    start: &SceneFile,
+    targets: &[usize],
+    pointer: [f64; 2],
+    center: [f64; 2],
+    discrete: bool,
+    env: &mut impl Env,
+) -> bool {
+    let id_to_pos: HashMap<&str, usize> = start
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| e.id().map(|id| (id, i)))
+        .collect();
+    let mut changed = false;
+
+    if let [only] = targets {
+        let orig = &start.elements[*only];
+        if is_elbow_arrow(orig) || matches!(orig, Element::Raw(_)) {
+            return false;
+        }
+        let Some((bounds, _)) = element_absolute_coords(orig) else {
+            return false;
+        };
+        let cx = (bounds[0] + bounds[2]) / 2.0;
+        let cy = (bounds[1] + bounds[3]) / 2.0;
+        let mut angle =
+            5.0 * std::f64::consts::PI / 2.0 + rough::js::atan2(pointer[1] - cy, pointer[0] - cx);
+        if discrete {
+            angle += SHIFT_LOCKING_ANGLE / 2.0;
+            angle -= angle % SHIFT_LOCKING_ANGLE;
+        }
+        let angle = normalize_radians(angle);
+
+        if orig.kind() == "arrow" {
+            for end in [LinearEnd::Start, LinearEnd::End] {
+                if file.elements[*only].binding_target(end).is_some() {
+                    unbind_arrow_end(file, &id_to_pos, *only, end, env);
+                    changed = true;
+                }
+            }
+        }
+        if set_angle(&mut file.elements[*only], angle) {
+            bump_version(&mut file.elements[*only], env);
+            changed = true;
+        }
+        if orig.kind() != "arrow" {
+            changed |= rotate_label(file, *only, angle, env);
+        }
+        return changed;
+    }
+
+    let mut center_angle = 5.0 * std::f64::consts::PI / 2.0
+        + rough::js::atan2(pointer[1] - center[1], pointer[0] - center[0]);
+    if discrete {
+        center_angle += SHIFT_LOCKING_ANGLE / 2.0;
+        center_angle -= center_angle % SHIFT_LOCKING_ANGLE;
+    }
+    let rotated_ids: HashSet<&str> = targets
+        .iter()
+        .filter_map(|&i| start.elements[i].id())
+        .collect();
+
+    for &position in targets {
+        let orig = &start.elements[position];
+        if orig.container_id().is_some() || matches!(orig, Element::Raw(_)) || is_elbow_arrow(orig)
+        {
+            continue;
+        }
+        let (Some(placement), Some((bounds, _))) =
+            (orig.placement(), element_absolute_coords(orig))
+        else {
+            continue;
+        };
+        let cx = (bounds[0] + bounds[2]) / 2.0;
+        let cy = (bounds[1] + bounds[3]) / 2.0;
+        // JS rotates by `centerAngle + origAngle - element.angle`; recomputing from `start`
+        // makes the last two terms cancel.
+        let [rotated_cx, rotated_cy] = rotate_point([cx, cy], center, center_angle);
+        let angle = normalize_radians(center_angle + placement.angle);
+
+        let before = file.elements[position].clone();
+        file.elements[position].set_position(
+            placement.x + (rotated_cx - cx),
+            placement.y + (rotated_cy - cy),
+        );
+        set_angle(&mut file.elements[position], angle);
+        if file.elements[position] != before {
+            bump_version(&mut file.elements[position], env);
+            changed = true;
+        }
+
+        if orig.kind() == "arrow" {
+            for end in [LinearEnd::Start, LinearEnd::End] {
+                let Some(target_id) = file.elements[position].binding_target(end) else {
+                    continue;
+                };
+                if !rotated_ids.contains(target_id) {
+                    unbind_arrow_end(file, &id_to_pos, position, end, env);
+                    changed = true;
+                }
+            }
+        } else {
+            changed |= rotate_label(file, position, angle, env);
+        }
+    }
+    changed
+}
+
+/// Gives `container`'s label the container's `angle` and its `computeBoundTextPosition`
+/// position, bumping its version when either differs.
+fn rotate_label(file: &mut SceneFile, container: usize, angle: f64, env: &mut impl Env) -> bool {
+    let Some(label) = live_bound_text(file, container) else {
+        return false;
+    };
+    let Element::Text(text) = &file.elements[label] else {
+        return false;
+    };
+    let Some([x, y]) = bound_text_position(&file.elements[container], text) else {
+        return false;
+    };
+    let before = file.elements[label].clone();
+    file.elements[label].set_position(x, y);
+    set_angle(&mut file.elements[label], angle);
+    if file.elements[label] != before {
+        bump_version(&mut file.elements[label], env);
+        return true;
+    }
+    false
 }
 
 /// `resizeMultipleElements` for `targets` (ascending positions), from their state in `start`.
@@ -964,7 +1224,7 @@ pub fn resize_elements(
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) -> bool {
-    if targets.is_empty() {
+    if targets.is_empty() || handle == HandleKind::Rotation {
         return false;
     }
     if let [only] = targets {
@@ -1038,6 +1298,11 @@ pub fn resize_elements(
     };
 
     let keep_aspect_ratio = options.keep_aspect_ratio
+        || targets.iter().any(|&i| {
+            start.elements[i]
+                .placement()
+                .is_some_and(|p| p.angle != 0.0)
+        })
         || targets
             .iter()
             .any(|&i| matches!(start.elements[i], Element::Text(_)))
@@ -1335,6 +1600,7 @@ mod tests {
 
         let slash = Selection::from_ids(["slash"]);
         let kinds: Vec<HandleKind> = selection_handles(&mut g, &file, &slash, 1.0)
+            .resize
             .into_iter()
             .map(|(k, _)| k)
             .collect();
@@ -1352,6 +1618,7 @@ mod tests {
 
         let backslash = Selection::from_ids(["backslash"]);
         let kinds: Vec<HandleKind> = selection_handles(&mut g, &file, &backslash, 1.0)
+            .resize
             .into_iter()
             .map(|(k, _)| k)
             .collect();
@@ -1375,16 +1642,15 @@ mod tests {
         let mut g = GeometryCache::default();
         let sel = |ids: &[&str]| Selection::from_ids(ids.iter().copied());
 
-        assert_eq!(selection_handles(&mut g, &file, &sel(&["r"]), 1.0).len(), 4);
-        for ids in [
-            &["rotated"][..],
-            &["a"][..],
-            &["i"][..],
-            &["r", "i"][..],
-            &[][..],
-        ] {
+        assert_eq!(
+            selection_handles(&mut g, &file, &sel(&["r"]), 1.0)
+                .resize
+                .len(),
+            4
+        );
+        for ids in [&["a"][..], &["i"][..], &["r", "i"][..], &[][..]] {
             assert!(
-                selection_handles(&mut g, &file, &sel(ids), 1.0).is_empty(),
+                selection_handles(&mut g, &file, &sel(ids), 1.0) == SelectionHandles::default(),
                 "{ids:?}"
             );
             assert_eq!(
@@ -1407,7 +1673,7 @@ mod tests {
 
         // Multiple elements: common bounds [0, 0, 250, 100] with the default margin of 4.
         let multi = selection_handles(&mut g, &file, &sel(&["r", "s"]), 1.0);
-        assert_eq!(multi[0], (Nw, [-10.0, -10.0, -2.0, -2.0]));
+        assert_eq!(multi.resize[0], (Nw, [-10.0, -10.0, -2.0, -2.0]));
         assert_eq!(
             resize_offset(&mut g, &file, &r, Se, [104.0, 103.0]),
             [4.0, 3.0]
@@ -1703,5 +1969,175 @@ mod tests {
         assert!((rect[0] - 87.789_321_881_345_24).abs() < 1e-9, "{rect:?}");
         assert!((rect[1] - 37.644_660_940_672_62).abs() < 1e-9, "{rect:?}");
         assert_eq!((rect[2], rect[3]), (24.0, 25.0));
+    }
+
+    #[test]
+    fn rotating_a_single_element_sets_its_angle_from_the_pointer() {
+        let start = sample::file(vec![rect("r", [0.0, 0.0, 100.0, 50.0])]);
+        let mut file = start.clone();
+        // Pointer straight right of the center (50, 25): 5π/2 + atan2(0, 50), normalized.
+        assert!(rotate_elements(
+            &mut file,
+            &start,
+            &[0],
+            [100.0, 25.0],
+            [50.0, 25.0],
+            false,
+            &mut TestEnv
+        ));
+        let p = file.elements[0].placement().unwrap();
+        assert!(
+            (p.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+            "{}",
+            p.angle
+        );
+        assert_eq!([p.x, p.y, p.width, p.height], [0.0, 0.0, 100.0, 50.0]);
+    }
+
+    #[test]
+    fn shift_snaps_to_fifteen_degrees() {
+        let start = sample::file(vec![rect("r", [0.0, 0.0, 100.0, 50.0])]);
+        let mut file = start.clone();
+        rotate_elements(
+            &mut file,
+            &start,
+            &[0],
+            [100.0, 30.0],
+            [50.0, 25.0],
+            true,
+            &mut TestEnv,
+        );
+        let angle = file.elements[0].placement().unwrap().angle;
+        assert!(
+            (angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+            "{angle}"
+        );
+    }
+
+    #[test]
+    fn rotating_two_elements_turns_them_around_the_common_center() {
+        let start = sample::file(vec![
+            rect("a", [0.0, 0.0, 40.0, 20.0]),
+            rect("b", [60.0, 0.0, 40.0, 20.0]),
+        ]);
+        let mut file = start.clone();
+        rotate_elements(
+            &mut file,
+            &start,
+            &[0, 1],
+            [100.0, 10.0],
+            [50.0, 10.0],
+            false,
+            &mut TestEnv,
+        );
+        let a = file.elements[0].placement().unwrap();
+        let b = file.elements[1].placement().unwrap();
+        // a's center (20, 10) turns a quarter clockwise around (50, 10) to (50, -20).
+        assert!(
+            (a.x - 30.0).abs() < 1e-9 && (a.y + 30.0).abs() < 1e-9,
+            "{a:?}"
+        );
+        assert!(
+            (b.x - 30.0).abs() < 1e-9 && (b.y - 30.0).abs() < 1e-9,
+            "{b:?}"
+        );
+        assert!((a.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_container_label_turns_with_its_container() {
+        let start = sample::file(vec![
+            sample::with(
+                rect("r", [0.0, 0.0, 100.0, 50.0]),
+                json!({"boundElements": [{"id": "t", "type": "text"}]}),
+            ),
+            sample::with(
+                sample::text("t", [26.0, 12.5, 48.0, 25.0], "hi", Some("r")),
+                json!({"textAlign": "center", "verticalAlign": "middle"}),
+            ),
+        ]);
+        let mut file = start.clone();
+        rotate_elements(
+            &mut file,
+            &start,
+            &[0],
+            [100.0, 25.0],
+            [50.0, 25.0],
+            false,
+            &mut TestEnv,
+        );
+        let t = file.elements[1].placement().unwrap();
+        assert!((t.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_selected_rectangle_has_a_rotation_handle_above_its_top_edge() {
+        let file = sample::file(vec![rect("r", [0.0, 0.0, 100.0, 50.0])]);
+        let selection = Selection::from_ids(["r"]);
+        let handles = selection_handles(&mut GeometryCache::default(), &file, &selection, 1.0);
+        // margin 2, handle 8, centering (8 - 4) / 2 = 2: top = 0 - 2 - 8 + 2 = -8, minus the gap 16.
+        assert_eq!(handles.rotation, Some([46.0, -24.0, 54.0, -16.0]));
+        assert_eq!(handles.resize.len(), 4);
+    }
+
+    #[test]
+    fn a_rotated_rectangle_keeps_its_handles_and_they_turn_with_it() {
+        let file = sample::file(vec![sample::with(
+            rect("r", [0.0, 0.0, 100.0, 50.0]),
+            json!({"angle": std::f64::consts::FRAC_PI_2}),
+        )]);
+        let selection = Selection::from_ids(["r"]);
+        let mut geometry = GeometryCache::default();
+        let handles = selection_handles(&mut geometry, &file, &selection, 1.0);
+        let rotation = handles.rotation.expect("rotation handle");
+        // The unrotated handle center (50, -20) turns a quarter around (50, 25) to (95, 25).
+        let center = [
+            (rotation[0] + rotation[2]) / 2.0,
+            (rotation[1] + rotation[3]) / 2.0,
+        ];
+        assert!(
+            (center[0] - 95.0).abs() < 1e-9 && (center[1] - 25.0).abs() < 1e-9,
+            "{center:?}"
+        );
+        assert_eq!(
+            handle_at(&mut geometry, &file, &selection, [95.0, 25.0], 1.0),
+            Some(HandleKind::Rotation)
+        );
+        // The local east side now faces down; its border, padded by SIDE_RESIZING_THRESHOLD (4),
+        // runs along y = 79, and (50, 77) is within that threshold of it.
+        assert_eq!(
+            handle_at(&mut geometry, &file, &selection, [50.0, 77.0], 1.0),
+            Some(HandleKind::E)
+        );
+    }
+
+    #[test]
+    fn two_point_arrows_and_raw_elements_have_no_rotation_handle() {
+        let file = sample::file(vec![
+            sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [100.0, 40.0]]),
+            json!({"id": "img", "type": "frame", "x": 200, "y": 0, "width": 50, "height": 50}),
+        ]);
+        let mut geometry = GeometryCache::default();
+        for id in ["a", "img"] {
+            let handles = selection_handles(&mut geometry, &file, &Selection::from_ids([id]), 1.0);
+            assert_eq!(handles, SelectionHandles::default(), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_multi_selection_keeps_its_rotation_handle_at_angle_zero() {
+        let file = sample::file(vec![
+            rect("r", [0.0, 0.0, 100.0, 50.0]),
+            sample::with(rect("s", [200.0, 0.0, 50.0, 50.0]), json!({"angle": 0.7})),
+        ]);
+        let mut g = GeometryCache::default();
+        let handles = selection_handles(&mut g, &file, &Selection::from_ids(["r", "s"]), 1.0);
+        assert_eq!(handles.resize.len(), 4);
+        let rotation = handles.rotation.expect("rotation handle");
+        assert_eq!(
+            rotation[0] + rotation[2],
+            handles.resize[0].1[0] + handles.resize[1].1[2]
+        );
+        assert!(rotation[3] < handles.resize[0].1[1]);
     }
 }

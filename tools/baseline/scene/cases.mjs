@@ -528,3 +528,119 @@ export const boundTextCases = [
   ["resizeFlipY", labeled("rectangle", [300, 100], SENTENCE), { resize: { width: 120, height: 40 }, handle: "se", keepAspect: false, fromCenter: false, flipY: true }],
   ["resizeRotated", labeled("rectangle", [300, 100], SENTENCE, {}, { x: 30, y: 20, angle: 0.5 }), { resize: { x: 30, y: 20, width: 120, height: 40 }, handle: "e", keepAspect: false, fromCenter: false, flipY: false }],
 ];
+
+
+/** `p` rotated clockwise by `angle` about the center of `el`'s unrotated box. */
+function aroundCenter(el, p, angle = el.angle) {
+  const cx = el.x + el.width / 2;
+  const cy = el.y + el.height / 2;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return [(p[0] - cx) * cos - (p[1] - cy) * sin + cx, (p[0] - cx) * sin + (p[1] - cy) * cos + cy];
+}
+
+/** `labeled` with the label centered in its container and both turned by `angle`. */
+function labeledAt(kind, [x, y, width, height], text, angle = 0) {
+  const [container, label] = labeled(kind, [width, height], text, {}, { x, y, angle });
+  label.x = x + (width - label.width) / 2;
+  label.y = y + (height - label.height) / 2;
+  label.angle = angle;
+  return [container, label];
+}
+
+function plainText(id, x, y, text, overrides = {}) {
+  return element("text", {
+    id, x, y, width: 0.6 * 20 * text.length, height: 25, text, originalText: text, fontSize: 20,
+    baseFontSize: 20, fontFamily: 5, textAlign: "left", verticalAlign: "top", containerId: null,
+    autoResize: true, lineHeight: 1.25, ...overrides,
+  });
+}
+
+const rotRect = element("rectangle", { id: "a", x: 20, y: 30, width: 100, height: 60 });
+const rotEllipse = element("ellipse", { id: "a", x: 20, y: 30, width: 100, height: 60 });
+const rotDiamond = element("diamond", { id: "a", x: 20, y: 30, width: 100, height: 60 });
+const rotText = plainText("a", 20, 30, "hello world");
+const rotFreedraw = freedraw([[0, 0], [20, 30], [50, 10], [80, 40]], { id: "a", x: 20, y: 30 });
+const rotLine = linear("line", [[0, 0], [60, 40], [120, 10]], { id: "a", x: 20, y: 30 });
+const resizeRect = (angle) => element("rectangle", { id: "a", x: 100, y: 100, width: 120, height: 80, angle });
+const LOCAL_CORNERS = { nw: [0, 0], ne: [1, 0], sw: [0, 1], se: [1, 1], n: [0.5, 0], s: [0.5, 1], e: [1, 0.5], w: [0, 0.5] };
+/** A pointer 12px past `handle` of `el` (in the element's own frame), then turned with it. */
+function dragged(el, handle, [dx, dy] = [12, 9]) {
+  const [fx, fy] = LOCAL_CORNERS[handle];
+  const sx = handle.includes("w") ? -1 : 1;
+  const sy = handle.includes("n") ? -1 : 1;
+  return aroundCenter(el, [el.x + fx * el.width + sx * dx, el.y + fy * el.height + sy * dy]);
+}
+const rotatedRect = resizeRect(0.6);
+const rotatedLabeled = labeledAt("rectangle", [100, 100, 200, 100], "hello world", 0.5);
+const rotatedText = plainText("a", 100, 100, "hello world", { angle: 0.5 });
+const rotatedLine = linear("line", [[0, 0], [60, 40], [120, 10]], { id: "a", x: 100, y: 100, angle: 0.7 });
+const pair = (angle) => [
+  element("rectangle", { id: "a", x: 0, y: 0, width: 40, height: 20 }),
+  element("rectangle", { id: "b", x: 60, y: 40, width: 40, height: 30, angle }),
+];
+
+/**
+ * [name, elements, ids, handle, pointer, center, {shift, fromCenter, keepAspect}] for the
+ * transform group. `ids` are the selected elements (bound text is never selected). `center` is
+ * the common-bounds center a multi-element rotation turns around (ignored otherwise). `handle`
+ * is "rotation" or a resize direction. Output: `[{id, x, y, width, height, angle, boundElements, startBinding?, endBinding?, points?,
+ * fontSize?, text?}]` for every element, in input order.
+ */
+const NONE = { shift: false, fromCenter: false, keepAspect: false };
+export const transformCases = [
+  ["rotateRect", [rotRect], ["a"], "rotation", [150, 20], [70, 60], NONE],
+  ["rotateEllipse", [rotEllipse], ["a"], "rotation", [150, 20], [70, 60], NONE],
+  ["rotateDiamond", [rotDiamond], ["a"], "rotation", [150, 20], [70, 60], NONE],
+  ["rotateText", [rotText], ["a"], "rotation", [150, 20], [70, 60], NONE],
+  ["rotateFreedraw", [rotFreedraw], ["a"], "rotation", [150, 20], [60, 50], NONE],
+  ["rotateLine", [rotLine], ["a"], "rotation", [150, 20], [80, 50], NONE],
+  ["rotateAbove", [rotRect], ["a"], "rotation", [70, -40], [70, 60], NONE],
+  ["rotateLeft", [rotRect], ["a"], "rotation", [-30, 60], [70, 60], NONE],
+  ["rotateBelowLeft", [rotRect], ["a"], "rotation", [10, 140], [70, 60], NONE],
+  ["rotateShiftNearMultiple", [rotRect], ["a"], "rotation", [170, 70], [70, 60], { ...NONE, shift: true }],
+  ["rotateShiftBetweenMultiples", [rotRect], ["a"], "rotation", [170, 60 - 13.165], [70, 60], { ...NONE, shift: true }],
+  ["rotateLabeledContainer", labeledAt("rectangle", [0, 0, 100, 50], "hello"), ["c"], "rotation", [100, 5], [50, 25], NONE],
+  ["rotateLabeledEllipse", labeledAt("ellipse", [0, 0, 160, 80], "hello"), ["c"], "rotation", [20, 130], [80, 40], NONE],
+  ["rotateTwo", pair(0), ["a", "b"], "rotation", [140, 30], [50, 35], NONE],
+  ["rotateTwoOneRotated", pair(0.4), ["a", "b"], "rotation", [140, 30], [50, 35], NONE],
+  ["rotateTwoShift", pair(0), ["a", "b"], "rotation", [140, 20], [50, 35], { ...NONE, shift: true }],
+  [
+    "rotateThree",
+    [...pair(0.4), element("ellipse", { id: "c", x: 10, y: 90, width: 50, height: 50 })],
+    ["a", "b", "c"], "rotation", [20, 150], [50, 70], NONE,
+  ],
+  [
+    "rotateMultiWithLabeledContainer",
+    [...labeledAt("rectangle", [0, 0, 100, 50], "hello"), element("rectangle", { id: "b", x: 140, y: 20, width: 40, height: 40 })],
+    ["c", "b"], "rotation", [100, 5], [90, 30], NONE,
+  ],
+  ...["n", "s", "e", "w", "nw", "ne", "sw", "se"].map((handle) => [
+    `resizeRotated_${handle}`, [rotatedRect], ["a"], handle, dragged(rotatedRect, handle), [0, 0], NONE,
+  ]),
+  ["resizeRotated_se_2_5", [resizeRect(2.5)], ["a"], "se", dragged(resizeRect(2.5), "se"), [0, 0], NONE],
+  ["resizeRotated_se_keepAspect", [rotatedRect], ["a"], "se", dragged(rotatedRect, "se", [30, 5]), [0, 0], { ...NONE, keepAspect: true }],
+  ["resizeRotated_se_fromCenter", [rotatedRect], ["a"], "se", dragged(rotatedRect, "se"), [0, 0], { ...NONE, fromCenter: true }],
+  ["resizeRotated_se_flip", [rotatedRect], ["a"], "se", aroundCenter(rotatedRect, [rotatedRect.x - 30, rotatedRect.y - 20]), [0, 0], NONE],
+  ["resizeRotated_text_se", [rotatedText], ["a"], "se", dragged(rotatedText, "se", [40, 20]), [0, 0], NONE],
+  ["resizeRotated_labeled_e", rotatedLabeled, ["c"], "e", dragged(rotatedLabeled[0], "e", [60, 0]), [0, 0], NONE],
+  ["resizeRotated_line_se", [rotatedLine], ["a"], "se", dragged(rotatedLine, "se", [30, 20]), [0, 0], NONE],
+  ["resizeMultiRotated_se", pair(0.4), ["a", "b"], "se", [150, 110], [0, 0], NONE],
+];
+
+/** Shapes `s` (left) and `u` (right) with arrow `w` bound from `s` to `u`. */
+function boundArrowScene() {
+  const binding = (elementId) => ({ elementId, focus: 0, gap: 4 });
+  return [
+    element("rectangle", { id: "s", x: 0, y: 0, width: 60, height: 40, boundElements: [{ id: "w", type: "arrow" }] }),
+    element("rectangle", { id: "u", x: 200, y: 0, width: 60, height: 40, boundElements: [{ id: "w", type: "arrow" }] }),
+    linear("arrow", [[0, 0], [136, 0]], {
+      id: "w", x: 64, y: 20, startBinding: binding("s"), endBinding: binding("u"),
+    }),
+  ];
+}
+
+transformCases.push(
+  ["rotateBoundArrowAlone", boundArrowScene(), ["w"], "rotation", [130, 90], [132, 20], NONE],
+  ["rotateArrowWithItsStartTarget", boundArrowScene(), ["s", "w"], "rotation", [130, 90], [132, 20], NONE],
+);

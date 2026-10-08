@@ -209,6 +209,7 @@ pub fn cursor_icon(cursor: Cursor) -> egui::CursorIcon {
         Cursor::ResizeNesw => egui::CursorIcon::ResizeNeSw,
         Cursor::ResizeNs => egui::CursorIcon::ResizeVertical,
         Cursor::ResizeEw => egui::CursorIcon::ResizeHorizontal,
+        Cursor::Grab => egui::CursorIcon::Grab,
     }
 }
 

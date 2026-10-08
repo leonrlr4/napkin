@@ -1,6 +1,7 @@
 //! The selection tool's pointer gestures: click to select, drag to move, drag a corner to
-//! resize, drag a line or arrow's own point, and box-select. Ported from
-//! `packages/excalidraw/components/App.tsx`'s `handleSelectionOnPointerDown` (~9415),
+//! resize, drag the rotation handle to rotate, drag a line or arrow's own point, and
+//! box-select. Ported from `packages/excalidraw/components/App.tsx`'s
+//! `handleSelectionOnPointerDown` (~9415),
 //! `onPointerMoveFromPointerDownHandler` (~10685, drag and box-select branches near 10964 and
 //! 11483) and `onPointerUpFromPointerDownHandler` (click narrowing and Shift removal, ~12380 to
 //! 12615); `packages/element/src/collision.ts`'s `hitElementBoundingBox`,
@@ -10,6 +11,7 @@
 //! `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
 
 use std::collections::HashMap;
+use std::f64::consts::PI;
 use std::sync::Arc;
 
 use crate::collision;
@@ -33,6 +35,7 @@ pub(super) enum Gesture {
     Click(ClickState),
     Drag(DragState),
     Resize(ResizeState),
+    Rotate(RotateState),
     PointDrag(PointDragState),
     BoxSelect(BoxSelectState),
 }
@@ -66,6 +69,18 @@ pub(super) struct ResizeState {
     /// `getResizeOffsetXY`, computed once at pointer-down and subtracted from the pointer on
     /// every move so the grabbed point stays under the cursor.
     offset: [f64; 2],
+}
+
+pub(super) struct RotateState {
+    start: Arc<SceneFile>,
+    selection_before: Selection,
+    targets: Vec<usize>,
+    /// The pivot, fixed at pointer-down: a single element's center, or the center of the
+    /// common bounds of a multi-selection.
+    center: [f64; 2],
+    /// Whether a pointer move has been applied. Excalidraw rotates only from pointer-move, so
+    /// releasing without moving leaves the angle (and history) untouched.
+    moved: bool,
 }
 
 pub(super) struct PointDragState {
@@ -189,6 +204,18 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
         event.at,
         event.zoom,
     ) {
+        let targets = editor.selection.positions(&editor.file);
+        if handle == HandleKind::Rotation {
+            let center = rotation_center(editor, &targets);
+            editor.select_gesture = Gesture::Rotate(RotateState {
+                start: Arc::clone(&editor.file),
+                selection_before: editor.selection.clone(),
+                targets,
+                center,
+                moved: false,
+            });
+            return;
+        }
         let offset = transform::resize_offset(
             &mut editor.geometry,
             &editor.file,
@@ -196,7 +223,6 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
             handle,
             event.at,
         );
-        let targets = editor.selection.positions(&editor.file);
         editor.select_gesture = Gesture::Resize(ResizeState {
             start: Arc::clone(&editor.file),
             selection_before: editor.selection.clone(),
@@ -286,6 +312,11 @@ pub(super) fn pointer_move(
             apply_resize_move(editor, &state, event, measure);
             Gesture::Resize(state)
         }
+        Gesture::Rotate(mut state) => {
+            apply_rotate_move(editor, &state, event);
+            state.moved = true;
+            Gesture::Rotate(state)
+        }
         Gesture::PointDrag(state) => {
             apply_point_drag_move(editor, &state, event);
             Gesture::PointDrag(state)
@@ -337,6 +368,12 @@ pub(super) fn finish_gesture(
         Gesture::Resize(state) => {
             if let Some((event, measure)) = release {
                 apply_resize_move(editor, &state, event, measure);
+            }
+            editor.finish_edit(&state.start, &state.selection_before);
+        }
+        Gesture::Rotate(state) => {
+            if let Some((event, _)) = release.filter(|_| state.moved) {
+                apply_rotate_move(editor, &state, event);
             }
             editor.finish_edit(&state.start, &state.selection_before);
         }
@@ -403,6 +440,41 @@ fn apply_resize_move(
         pointer,
         options,
         measure,
+        &mut editor.env,
+    );
+}
+
+/// Whether a rotation of two or more elements is in progress (their box and handles hide).
+pub(super) fn is_rotating_group(gesture: &Gesture) -> bool {
+    matches!(gesture, Gesture::Rotate(state) if state.targets.len() >= 2)
+}
+
+/// The pivot of a rotation of `targets`: a single element's own center (absolute coords), the
+/// center of the common bounds otherwise. The rotation handle only exists for a selection of
+/// rotatable elements, so the fallback is never taken from the UI.
+fn rotation_center(editor: &mut Editor<impl Env>, targets: &[usize]) -> [f64; 2] {
+    if let [only] = targets
+        && let Some((_, center)) = editor
+            .geometry
+            .absolute_coords(&editor.file.elements[*only])
+    {
+        return center;
+    }
+    selection::selected_bounds(&mut editor.geometry, &editor.file, &editor.selection)
+        .map_or([0.0, 0.0], |[x1, y1, x2, y2]| {
+            [(x1 + x2) / 2.0, (y1 + y2) / 2.0]
+        })
+}
+
+fn apply_rotate_move(editor: &mut Editor<impl Env>, state: &RotateState, event: PointerEvent) {
+    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+    transform::rotate_elements(
+        file,
+        &state.start,
+        &state.targets,
+        event.at,
+        state.center,
+        event.modifiers.shift,
         &mut editor.env,
     );
 }
@@ -536,6 +608,50 @@ fn update_cursor(editor: &mut Editor<impl Env>, event: PointerEvent) {
     editor.cursor = compute_cursor(editor, event);
 }
 
+/// `getCursorForResizingElement`: the cursor for dragging `handle`. A single element swaps the
+/// diagonal pair when exactly one of its width and height is negative, and turns the resize
+/// axis by its angle in 45 degree steps (`rotateResizeCursor`).
+fn resize_cursor(editor: &Editor<impl Env>, handle: HandleKind) -> Cursor {
+    // Clockwise from north-south, the order `RESIZE_CURSORS` lists.
+    const AXES: [Cursor; 4] = [
+        Cursor::ResizeNs,
+        Cursor::ResizeNesw,
+        Cursor::ResizeEw,
+        Cursor::ResizeNwse,
+    ];
+    let positions = editor.selection.positions(&editor.file);
+    let placement = match positions.as_slice() {
+        [only] => editor.file.elements[*only].placement(),
+        _ => None,
+    };
+    let swap = placement.is_some_and(|p| p.height.signum() * p.width.signum() == -1.0);
+    let axis = match handle {
+        HandleKind::Rotation => return Cursor::Grab,
+        HandleKind::N | HandleKind::S => 0,
+        HandleKind::E | HandleKind::W => 2,
+        HandleKind::Nw | HandleKind::Se => {
+            if swap {
+                1
+            } else {
+                3
+            }
+        }
+        HandleKind::Ne | HandleKind::Sw => {
+            if swap {
+                3
+            } else {
+                1
+            }
+        }
+    };
+    let steps = placement.map_or(0.0, |p| rough::js::math_round(p.angle / (PI / 4.0)));
+    // JS indexes with `%`, which keeps the dividend's sign; a negative index finds no cursor.
+    match usize::try_from((axis as i64 + steps as i64) % 4) {
+        Ok(index) => AXES[index],
+        Err(_) => Cursor::Default,
+    }
+}
+
 fn compute_cursor(editor: &mut Editor<impl Env>, event: PointerEvent) -> Cursor {
     if editor.tool != Tool::Selection {
         return if editor.tool == Tool::Hand {
@@ -552,12 +668,7 @@ fn compute_cursor(editor: &mut Editor<impl Env>, event: PointerEvent) -> Cursor 
         event.at,
         event.zoom,
     ) {
-        return match handle {
-            HandleKind::Nw | HandleKind::Se => Cursor::ResizeNwse,
-            HandleKind::Ne | HandleKind::Sw => Cursor::ResizeNesw,
-            HandleKind::N | HandleKind::S => Cursor::ResizeNs,
-            HandleKind::E | HandleKind::W => Cursor::ResizeEw,
-        };
+        return resize_cursor(editor, handle);
     }
 
     if hit_point(editor, event.at, event.zoom).is_some() {

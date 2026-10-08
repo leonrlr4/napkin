@@ -238,3 +238,21 @@ fn setting_text_on_a_fixed_width_text_keeps_its_width_and_rewraps() {
     assert_eq!(v["height"], json!(50.0));
     assert_eq!(v["version"], json!(2.0));
 }
+
+#[test]
+fn setting_text_on_a_rotated_text_keeps_its_left_edge_in_the_rotated_frame() {
+    let mut editor = editor(vec![sample::with(
+        sample::text("t", [0.0, 0.0, 24.0, 25.0], "hi", None),
+        json!({"angle": std::f64::consts::FRAC_PI_2}),
+    )]);
+    editor
+        .apply_batch(
+            &json!({"ops": [{"op": "update", "id": "t", "set": {"text": "hello world"}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid update");
+    let v = editor.file().elements[0].to_value();
+    assert_eq!(v["width"], json!(132.0));
+    assert!((v["x"].as_f64().unwrap() + 54.0).abs() < 1e-9, "{v}");
+    assert!((v["y"].as_f64().unwrap() - 54.0).abs() < 1e-9, "{v}");
+}

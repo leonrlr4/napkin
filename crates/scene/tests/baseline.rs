@@ -8,7 +8,7 @@ use scene::batch::add_elements;
 use scene::color::{apply_dark_mode_filter, is_transparent};
 use scene::duplicate::{DuplicateMode, duplicate_elements};
 use scene::editor::{ArrowType, EdgeStyle, ItemStyle};
-use scene::element::{Element, Roundness, StrokeOptions};
+use scene::element::{Element, LinearEnd, Roundness, StrokeOptions};
 use scene::env::Env;
 use scene::fractional_index::{
     generate_key_between, generate_n_keys_between, sync_invalid_indices, sync_moved_indices,
@@ -645,6 +645,110 @@ fn bound_text() {
                     if let Element::Text(t) = e {
                         out["text"] = json!(t.text);
                     }
+                    out
+                })
+                .collect(),
+        )
+    });
+}
+
+#[test]
+fn transform() {
+    check_group(&dir(), "transform", |case| {
+        let mut start = scene::SceneFile::new();
+        start.elements = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .cloned()
+            .map(Element::from_value)
+            .collect();
+        let mut targets: Vec<usize> = case.args[1]
+            .as_array()
+            .expect("ids")
+            .iter()
+            .map(|id| {
+                start
+                    .elements
+                    .iter()
+                    .position(|e| e.id() == id.as_str())
+                    .expect("element id")
+            })
+            .collect();
+        targets.sort_unstable();
+        let handle = case.args[2].as_str().expect("handle");
+        let point = |v: &Value| [num(&v[0]), num(&v[1])];
+        let pointer = point(&case.args[3]);
+        let center = point(&case.args[4]);
+        let flag = |key: &str| case.args[5][key].as_bool().expect("flag");
+
+        let mut file = start.clone();
+        let mut env = FixedEnv;
+        if handle == "rotation" {
+            scene::transform::rotate_elements(
+                &mut file,
+                &start,
+                &targets,
+                pointer,
+                center,
+                flag("shift"),
+                &mut env,
+            );
+        } else {
+            let handle = match handle {
+                "n" => HandleKind::N,
+                "s" => HandleKind::S,
+                "e" => HandleKind::E,
+                "w" => HandleKind::W,
+                "nw" => HandleKind::Nw,
+                "ne" => HandleKind::Ne,
+                "sw" => HandleKind::Sw,
+                "se" => HandleKind::Se,
+                other => panic!("unknown handle {other}"),
+            };
+            scene::transform::resize_elements(
+                &mut scene::geometry::GeometryCache::default(),
+                &mut file,
+                &start,
+                &targets,
+                handle,
+                pointer,
+                scene::transform::ResizeOptions {
+                    keep_aspect_ratio: flag("keepAspect"),
+                    from_center: flag("fromCenter"),
+                },
+                &mut CharWidthMeasure,
+                &mut env,
+            );
+        }
+        Value::Array(
+            file.elements
+                .iter()
+                .map(|e| {
+                    let p = e.placement().expect("placement");
+                    let mut out = json!({
+                        "id": e.id(), "x": p.x, "y": p.y, "width": p.width,
+                        "height": p.height, "angle": p.angle
+                    });
+                    match e {
+                        Element::Line(l) | Element::Arrow(l) => out["points"] = json!(l.points),
+                        Element::Freedraw(f) => out["points"] = json!(f.points),
+                        Element::Text(t) => {
+                            out["fontSize"] = json!(t.font_size);
+                            out["text"] = json!(t.text);
+                        }
+                        _ => {}
+                    }
+                    if e.kind() == "arrow" {
+                        out["startBinding"] = json!(e.binding_target(LinearEnd::Start));
+                        out["endBinding"] = json!(e.binding_target(LinearEnd::End));
+                    }
+                    out["boundElements"] = json!(
+                        e.bound_elements()
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    );
                     out
                 })
                 .collect(),

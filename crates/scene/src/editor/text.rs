@@ -494,10 +494,9 @@ pub(super) fn double_click(
 /// standalone text with `autoResize: false`, then go through
 /// [`bound_text::redraw_text_bounding_box`]: wrapped to the container (or to the text's own
 /// width), growing the container and recentred in it. An `autoResize` standalone text is not
-/// wrapped and keeps its top-left where it was: `getAdjustedDimensions`' anchor-preserving math
-/// does the same for a left/top-aligned, unrotated text (the only alignment/angle napkin's own
-/// UI ever creates); it can disagree with the JS for a loaded file's differently aligned or
-/// rotated text. A label whose container is `Raw` is measured but not wrapped.
+/// wrapped; it grows away from the edge its alignment pins, in its own rotated frame
+/// (`getAdjustedDimensions`, [`text::adjusted_origin`]). A label whose container is `Raw` is
+/// measured but not wrapped.
 fn update_existing_text(
     file: &mut SceneFile,
     id: &str,
@@ -526,9 +525,14 @@ fn update_existing_text(
         editing.line_height,
         measure,
     );
+    let fixed_width = t.auto_resize == Some(false);
+    if !fixed_width && t.container_id.value().is_none() {
+        let [x, y] = text::adjusted_origin(t, [width, height], measure);
+        t.base.x = x;
+        t.base.y = y;
+    }
     t.text = normalized.clone();
     t.original_text = Some(normalized);
-    let fixed_width = t.auto_resize == Some(false);
     if !fixed_width {
         t.base.width = width;
     }

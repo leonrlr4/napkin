@@ -115,6 +115,7 @@ pub enum Cursor {
     ResizeNesw,
     ResizeNs,
     ResizeEw,
+    Grab,
 }
 
 /// What the app should draw on top of the scene for the current selection and gesture.
@@ -128,6 +129,8 @@ pub struct Overlay {
     pub selection_box: Option<Bounds>,
     /// Corner handle squares (`transform::selection_handles`).
     pub handles: Vec<Bounds>,
+    /// The rotation handle square (`transform::selection_handles`).
+    pub rotation_handle: Option<Bounds>,
     /// A single selected line or non-elbow arrow: its points in scene coordinates.
     pub points: Vec<[f64; 2]>,
     /// The rubber band while box selecting, normalized.
@@ -627,18 +630,26 @@ impl<E: Env> Editor<E> {
             }
         }
 
-        let selection_box = if positions.len() >= 2 {
+        let hide_transform_ui = select::is_rotating_group(&self.select_gesture);
+        let selection_box = if positions.len() >= 2 && !hide_transform_ui {
             selection::selected_bounds(&mut self.geometry, &self.file, &self.selection)
                 .map(|[x1, y1, x2, y2]| [x1 - pad, y1 - pad, x2 + pad, y2 + pad])
         } else {
             None
         };
 
-        let handles =
-            transform::selection_handles(&mut self.geometry, &self.file, &self.selection, zoom)
+        let selection_handles =
+            transform::selection_handles(&mut self.geometry, &self.file, &self.selection, zoom);
+        let handles = if hide_transform_ui {
+            Vec::new()
+        } else {
+            selection_handles
+                .resize
                 .into_iter()
                 .map(|(_, bounds)| bounds)
-                .collect();
+                .collect()
+        };
+        let rotation_handle = selection_handles.rotation.filter(|_| !hide_transform_ui);
 
         let points = match single {
             Some(position) if select::is_plain_linear(&self.file.elements[position]) => {
@@ -654,6 +665,7 @@ impl<E: Env> Editor<E> {
             outlines,
             selection_box,
             handles,
+            rotation_handle,
             points,
             box_selection,
         }

@@ -56,6 +56,77 @@ pub fn measure_text(
     [width, height]
 }
 
+/// The new top-left of an auto-resizing standalone text whose size changes from its stored
+/// `width`/`height` to `next_size`: `getAdjustedDimensions`' anchor-preserving branch. The edge
+/// or corner its `textAlign`/`verticalAlign` pins stays put in the text's own rotated frame
+/// (`adjustXYWithRotation`); a centered, middle-aligned text instead shifts by half the change
+/// in measured size. `t.text` is still the previous text here, measured at `t`'s current font.
+pub(crate) fn adjusted_origin(
+    t: &crate::element::TextElement,
+    next_size: [f64; 2],
+    measure: &mut dyn TextMeasure,
+) -> [f64; 2] {
+    let (x, y, angle) = (t.base.x, t.base.y, t.base.angle);
+    let line_height = t.line_height.unwrap_or_else(|| line_height(t.font_family));
+    let origin = if t.text_align == "center" && t.vertical_align == "middle" {
+        let prev = measure_text(&t.text, t.font_family, t.font_size, line_height, measure);
+        [
+            x - (next_size[0] - prev[0]) * 0.5,
+            y - (next_size[1] - prev[1]) * 0.5,
+        ]
+    } else {
+        // Absolute coords of a text are its box, so the deltas are half the size change.
+        let (dx2, dy2) = (
+            (t.base.width - next_size[0]) / 2.0,
+            (t.base.height - next_size[1]) / 2.0,
+        );
+        let (cos, sin) = (angle.cos(), angle.sin());
+        let (mut x, mut y) = (x, y);
+        let (n, s) = match t.vertical_align.as_str() {
+            "middle" => (true, true),
+            "bottom" => (true, false),
+            _ => (false, true),
+        };
+        let (e, w) = match t.text_align.as_str() {
+            "center" => (true, true),
+            "right" => (false, true),
+            _ => (true, false),
+        };
+        // `deltaX1`/`deltaY1` are always zero: the top-left of the box does not move.
+        if e && w {
+            x += dx2;
+        } else if e {
+            x += dx2 * (1.0 - cos);
+            y += dx2 * -sin;
+        } else if w {
+            x += dx2 * (1.0 + cos);
+            y += dx2 * sin;
+        }
+        if n && s {
+            y += dy2;
+        } else if n {
+            x += dy2 * -sin;
+            y += dy2 * (1.0 + cos);
+        } else if s {
+            x += dy2 * sin;
+            y += dy2 * (1.0 - cos);
+        }
+        [x, y]
+    };
+    [
+        if origin[0].is_finite() {
+            origin[0]
+        } else {
+            t.base.x
+        },
+        if origin[1].is_finite() {
+            origin[1]
+        } else {
+            t.base.y
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
