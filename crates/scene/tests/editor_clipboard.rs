@@ -61,9 +61,9 @@ fn paste_is_refused_while_drawing_a_multi_point_line() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Line);
     click(&mut e, at(0.0, 0.0));
-    e.pointer_move(at(100.0, 0.0));
+    e.pointer_move(at(100.0, 0.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 0.0));
-    e.pointer_move(at(100.0, 100.0));
+    e.pointer_move(at(100.0, 100.0), &mut CharWidthMeasure);
 
     assert!(!e.paste("hello", [500.0, 500.0], &mut CharWidthMeasure));
     assert!(!e.is_idle(), "the line gesture must still be in progress");
@@ -87,13 +87,13 @@ fn paste_is_refused_mid_selection_drag() {
         sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 100.0]),
         json!({"backgroundColor": "#ffc9c9"}),
     )]);
-    e.pointer_down(at(50.0, 50.0));
-    e.pointer_move(at(80.0, 50.0));
+    e.pointer_down(at(50.0, 50.0), &mut CharWidthMeasure);
+    e.pointer_move(at(80.0, 50.0), &mut CharWidthMeasure);
 
     assert!(!e.paste("hello", [500.0, 500.0], &mut CharWidthMeasure));
 
-    e.pointer_move(at(120.0, 50.0));
-    e.pointer_up(at(120.0, 50.0));
+    e.pointer_move(at(120.0, 50.0), &mut CharWidthMeasure);
+    e.pointer_up(at(120.0, 50.0), &mut CharWidthMeasure);
     let live: Vec<Value> = e
         .file()
         .elements
@@ -126,4 +126,26 @@ fn duplicate_offsets_by_half_a_grid_and_selects_the_copies() {
     );
     assert!(e.selection().contains(copy["id"].as_str().unwrap()));
     assert!(!e.selection().contains("r"));
+}
+
+#[test]
+fn a_pasted_label_is_rewrapped_with_the_local_measurer() {
+    let mut source = editor(vec![
+        sample::with(
+            sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 50.0]),
+            json!({"boundElements": [{"id": "t", "type": "text"}]}),
+        ),
+        sample::with(
+            sample::text("t", [5.0, 12.5, 132.0, 25.0], "hello world", Some("r")),
+            json!({"textAlign": "center", "verticalAlign": "middle"}),
+        ),
+    ]);
+    source.command(Command::SelectAll);
+    let text = source.copy_selection().unwrap();
+
+    let mut e = editor(vec![]);
+    assert!(e.paste(&text, [200.0, 200.0], &mut CharWidthMeasure));
+    let live: Vec<Value> = e.file().elements.iter().map(|x| x.to_value()).collect();
+    assert_eq!(live[1]["text"], json!("hello\nworld"));
+    assert_eq!(live[0]["height"], json!(60.0));
 }

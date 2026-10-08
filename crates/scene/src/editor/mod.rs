@@ -30,6 +30,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::batch::{self, BatchReport, OpError};
+use crate::bound_text;
 use crate::clipboard::{self, Pasted};
 use crate::duplicate::{self, DEFAULT_GRID_SIZE, DuplicateMode};
 use crate::edit;
@@ -142,6 +143,9 @@ pub struct Editor<E: Env> {
     create_gesture: create::Gesture,
     erase_gesture: erase::Gesture,
     text_editing: Option<TextEditing>,
+    /// The scene from before a new label's container grew to its minimum size at the start of
+    /// the edit; `None` when it did not grow.
+    text_edit_base: Option<Arc<SceneFile>>,
     style: ItemStyle,
     history: History,
     geometry: GeometryCache,
@@ -163,6 +167,7 @@ impl<E: Env> Editor<E> {
             create_gesture: create::Gesture::None,
             erase_gesture: erase::Gesture::None,
             text_editing: None,
+            text_edit_base: None,
             style: ItemStyle::default(),
             history: History::default(),
             geometry: GeometryCache::default(),
@@ -187,6 +192,7 @@ impl<E: Env> Editor<E> {
         self.create_gesture = create::Gesture::None;
         self.erase_gesture = erase::Gesture::None;
         self.text_editing = None;
+        self.text_edit_base = None;
         self.geometry.clear();
     }
 
@@ -287,21 +293,24 @@ impl<E: Env> Editor<E> {
         erase::pending(&self.erase_gesture)
     }
 
-    pub fn pointer_down(&mut self, event: PointerEvent) {
+    /// `measure` is only consulted when the text tool starts a label on a container.
+    pub fn pointer_down(&mut self, event: PointerEvent, measure: &mut dyn TextMeasure) {
         select::pointer_down(self, event);
         create::pointer_down(self, event);
         erase::pointer_down(self, event);
-        text::pointer_down(self, event);
+        text::pointer_down(self, event, measure);
     }
 
-    pub fn pointer_move(&mut self, event: PointerEvent) {
-        select::pointer_move(self, event);
+    /// `measure` is only consulted when the move resizes a container's label or a standalone
+    /// text.
+    pub fn pointer_move(&mut self, event: PointerEvent, measure: &mut dyn TextMeasure) {
+        select::pointer_move(self, event, measure);
         create::pointer_move(self, event);
         erase::pointer_move(self, event);
     }
 
-    pub fn pointer_up(&mut self, event: PointerEvent) {
-        select::pointer_up(self, event);
+    pub fn pointer_up(&mut self, event: PointerEvent, measure: &mut dyn TextMeasure) {
+        select::pointer_up(self, event, measure);
         create::pointer_up(self, event);
         erase::pointer_up(self, event);
     }
@@ -506,6 +515,34 @@ impl<E: Env> Editor<E> {
                 file.elements.extend(duplicated.elements);
                 let moved: HashSet<String> = duplicated.new_ids.iter().cloned().collect();
                 fractional_index::sync_moved_indices(&mut file.elements, &moved, &mut self.env);
+                // `addElementsFromPasteOrLibrary`: a pasted label is rewrapped with this
+                // machine's measurer, since the copied line breaks came from another one.
+                for id in &duplicated.new_ids {
+                    let Some(text) = file
+                        .elements
+                        .iter()
+                        .position(|e| e.id() == Some(id.as_str()))
+                    else {
+                        continue;
+                    };
+                    let Element::Text(t) = &file.elements[text] else {
+                        continue;
+                    };
+                    let Some(container_id) = t.container_id.value().cloned() else {
+                        continue;
+                    };
+                    let container = file
+                        .elements
+                        .iter()
+                        .position(|e| !e.is_deleted() && e.id() == Some(container_id.as_str()));
+                    bound_text::redraw_text_bounding_box(
+                        file,
+                        text,
+                        container,
+                        measure,
+                        &mut self.env,
+                    );
+                }
                 duplicated.new_ids
             }
             Pasted::Text(text) => {
@@ -559,8 +596,8 @@ impl<E: Env> Editor<E> {
 
     /// The selection tool's double click: starts editing the text or container label under the
     /// pointer, or a new one; see `text::double_click`. Returns whether editing started.
-    pub fn double_click(&mut self, event: PointerEvent) -> bool {
-        text::double_click(self, event)
+    pub fn double_click(&mut self, event: PointerEvent, measure: &mut dyn TextMeasure) -> bool {
+        text::double_click(self, event, measure)
     }
 
     /// For the latest pointer position.

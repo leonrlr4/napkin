@@ -23,6 +23,7 @@ use scene::shape::{
     ElementShape, PathOp, ShapeContext, freedraw_outline_points, generate_element_shape,
     generate_rough_options,
 };
+use scene::transform::HandleKind;
 use scene::zindex::{self, Direction};
 use serde_json::{Value, json};
 use testkit::rough_json::{drawable_value, options_value};
@@ -546,5 +547,107 @@ fn duplicate() {
         let moved: HashSet<String> = duplicated.new_ids.iter().cloned().collect();
         sync_moved_indices(&mut duplicated.elements, &moved, &mut env);
         normalize_skeleton_output(&duplicated.elements)
+    });
+}
+
+#[test]
+fn text_wrap() {
+    check_group(&dir(), "text_wrap", |case| match case.call.as_str() {
+        "parseTokens" => json!(scene::text_wrap::parse_tokens(
+            case.args[0].as_str().expect("line")
+        )),
+        "wrapText" => json!(scene::text_wrap::wrap_text(
+            case.args[0].as_str().expect("text"),
+            case.num(2),
+            case.num(1),
+            case.num(3),
+            &mut CharWidthMeasure,
+        )),
+        other => panic!("unknown call {other}"),
+    });
+}
+
+#[test]
+fn bound_text() {
+    check_group(&dir(), "bound_text", |case| {
+        let mut file = scene::SceneFile::new();
+        file.elements = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .cloned()
+            .map(Element::from_value)
+            .collect();
+        let op = &case.args[1];
+        let position = |id: &str| {
+            file.elements
+                .iter()
+                .position(|e| e.id() == Some(id))
+                .expect("element id")
+        };
+        let mut env = FixedEnv;
+        if let Some(text_id) = op.get("redraw").and_then(Value::as_str) {
+            let text = position(text_id);
+            let container = op.get("container").and_then(Value::as_str).map(position);
+            scene::bound_text::redraw_text_bounding_box(
+                &mut file,
+                text,
+                container,
+                &mut CharWidthMeasure,
+                &mut env,
+            );
+        } else {
+            let container = position("c");
+            let geometry = op["resize"].as_object().expect("resize geometry");
+            let base = file.elements[container]
+                .base_mut()
+                .expect("typed container");
+            for (key, v) in geometry {
+                match key.as_str() {
+                    "x" => base.x = num(v),
+                    "y" => base.y = num(v),
+                    "width" => base.width = num(v),
+                    "height" => base.height = num(v),
+                    other => panic!("unknown geometry key {other}"),
+                }
+            }
+            let handle = match op["handle"].as_str().expect("handle") {
+                "n" => HandleKind::N,
+                "s" => HandleKind::S,
+                "e" => HandleKind::E,
+                "w" => HandleKind::W,
+                "nw" => HandleKind::Nw,
+                "ne" => HandleKind::Ne,
+                "sw" => HandleKind::Sw,
+                "se" => HandleKind::Se,
+                other => panic!("unknown handle {other}"),
+            };
+            let flag = |key: &str| op[key].as_bool().expect("flag");
+            scene::bound_text::handle_bind_text_resize(
+                &mut file,
+                container,
+                Some(handle),
+                flag("keepAspect"),
+                flag("fromCenter"),
+                flag("flipY"),
+                &mut CharWidthMeasure,
+                &mut env,
+            );
+        }
+        Value::Array(
+            file.elements
+                .iter()
+                .map(|e| {
+                    let p = e.placement().expect("placement");
+                    let mut out = json!({
+                        "id": e.id(), "x": p.x, "y": p.y, "width": p.width, "height": p.height
+                    });
+                    if let Element::Text(t) = e {
+                        out["text"] = json!(t.text);
+                    }
+                    out
+                })
+                .collect(),
+        )
     });
 }

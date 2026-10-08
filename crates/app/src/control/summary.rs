@@ -9,6 +9,16 @@ use scene::element::LinearEnd;
 use scene::{Element, SceneFile};
 use serde_json::Value;
 
+/// A text element's `originalText` (what was typed, before automatic wrapping), or its `text`
+/// when it has none.
+fn original_or_text(value: &Value) -> Option<String> {
+    value
+        .get("originalText")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("text").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
 /// Two decimal places, trailing zeros and a trailing `.` trimmed, `-0` written as `0`.
 pub fn format_number(value: f64) -> String {
     let mut text = format!("{value:.2}");
@@ -91,21 +101,16 @@ fn element_line(file: &SceneFile, element: &Element) -> String {
         .bound_elements()
         .into_iter()
         .find(|&(_, kind)| kind == "text")
-        && let Some(label) = live_element_by_id(file, text_id).and_then(|text_element| {
-            text_element
-                .to_value()
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
+        && let Some(label) = live_element_by_id(file, text_id)
+            .and_then(|text_element| original_or_text(&text_element.to_value()))
     {
         push_field(&mut line, "label", json_string(&label));
     }
 
     if element.kind() == "text"
-        && let Some(text) = value.get("text").and_then(Value::as_str)
+        && let Some(text) = original_or_text(&value)
     {
-        push_field(&mut line, "text", json_string(text));
+        push_field(&mut line, "text", json_string(&text));
     }
 
     if let Some(stroke) = value.get("strokeColor").and_then(Value::as_str)
@@ -229,6 +234,24 @@ mod tests {
                 r##"a arrow 165 35 100 0 stroke=#e03131 start=r points=[[0,0],[100,0]]"##,
                 r##"free text 0 100 80 25 text="note\nline""##,
             ]
+        );
+    }
+
+    #[test]
+    fn a_wrapped_label_shows_its_original_text() {
+        let file = sample::file(vec![
+            sample::with(
+                sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 60.0]),
+                json!({"boundElements": [{"id": "t", "type": "text"}]}),
+            ),
+            sample::with(
+                sample::text("t", [20.0, 5.0, 60.0, 50.0], "hello\nworld", Some("r")),
+                json!({"originalText": "hello world"}),
+            ),
+        ]);
+        assert_eq!(
+            element_lines(&file, &[0, 1]),
+            vec![r##"r rectangle 0 0 100 60 label="hello world""##]
         );
     }
 

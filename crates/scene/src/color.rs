@@ -33,7 +33,7 @@ use rough::js::{math_round, to_int32};
 /// `trimLeft`/`trimRight` and `parseFloat`'s leading-whitespace skip.
 const JS_WS_CLASS: &str = r"\t\n\x0B\x0C\r \u{A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}";
 
-fn is_js_whitespace(c: char) -> bool {
+pub(crate) fn is_js_whitespace(c: char) -> bool {
     matches!(
         c,
         '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'

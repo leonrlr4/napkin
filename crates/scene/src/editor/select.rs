@@ -19,6 +19,7 @@ use crate::env::Env;
 use crate::file::SceneFile;
 use crate::geometry::{Bounds, GeometryCache, rotate_point};
 use crate::selection::{self, Selection};
+use crate::text::TextMeasure;
 use crate::transform::{self, HandleKind};
 
 use super::{Cursor, Editor, PointerEvent, Tool, clone_scene};
@@ -250,7 +251,11 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
     });
 }
 
-pub(super) fn pointer_move(editor: &mut Editor<impl Env>, event: PointerEvent) {
+pub(super) fn pointer_move(
+    editor: &mut Editor<impl Env>,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     if editor.tool != Tool::Selection {
         return;
     }
@@ -278,7 +283,7 @@ pub(super) fn pointer_move(editor: &mut Editor<impl Env>, event: PointerEvent) {
             Gesture::Drag(state)
         }
         Gesture::Resize(state) => {
-            apply_resize_move(editor, &state, event);
+            apply_resize_move(editor, &state, event, measure);
             Gesture::Resize(state)
         }
         Gesture::PointDrag(state) => {
@@ -292,11 +297,15 @@ pub(super) fn pointer_move(editor: &mut Editor<impl Env>, event: PointerEvent) {
     };
 }
 
-pub(super) fn pointer_up(editor: &mut Editor<impl Env>, event: PointerEvent) {
+pub(super) fn pointer_up(
+    editor: &mut Editor<impl Env>,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     if editor.tool != Tool::Selection {
         return;
     }
-    finish_gesture(editor, Some(event));
+    finish_gesture(editor, Some((event, measure)));
     update_cursor(editor, event);
 }
 
@@ -307,29 +316,32 @@ pub(super) fn pointer_up(editor: &mut Editor<impl Env>, event: PointerEvent) {
 /// which passes the release event, and `Editor::set_tool`, which passes `None`: a tool switch
 /// mid-gesture has no release position of its own, so whatever the last `pointer_move` already
 /// applied to the scene stands as the gesture's final state.
-pub(super) fn finish_gesture(editor: &mut Editor<impl Env>, event: Option<PointerEvent>) {
+pub(super) fn finish_gesture(
+    editor: &mut Editor<impl Env>,
+    release: Option<(PointerEvent, &mut dyn TextMeasure)>,
+) {
     let gesture = std::mem::replace(&mut editor.select_gesture, Gesture::None);
     match gesture {
         Gesture::None => {}
         Gesture::Click(click) => {
-            if let Some(event) = event {
+            if let Some((event, _)) = release {
                 finish_click(editor, click, event);
             }
         }
         Gesture::Drag(state) => {
-            if let Some(event) = event {
+            if let Some((event, _)) = release {
                 apply_drag_move(editor, &state, event);
             }
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::Resize(state) => {
-            if let Some(event) = event {
-                apply_resize_move(editor, &state, event);
+            if let Some((event, measure)) = release {
+                apply_resize_move(editor, &state, event, measure);
             }
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::PointDrag(state) => {
-            if let Some(event) = event {
+            if let Some((event, _)) = release {
                 apply_point_drag_move(editor, &state, event);
             }
             editor.finish_edit(&state.start, &state.selection_before);
@@ -370,7 +382,12 @@ fn apply_drag_move(editor: &mut Editor<impl Env>, state: &DragState, event: Poin
     edit::apply_drag(file, &state.start, &state.targets, offset, &mut editor.env);
 }
 
-fn apply_resize_move(editor: &mut Editor<impl Env>, state: &ResizeState, event: PointerEvent) {
+fn apply_resize_move(
+    editor: &mut Editor<impl Env>,
+    state: &ResizeState,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     let pointer = [event.at[0] - state.offset[0], event.at[1] - state.offset[1]];
     let options = transform::ResizeOptions {
         keep_aspect_ratio: event.modifiers.shift,
@@ -385,6 +402,7 @@ fn apply_resize_move(editor: &mut Editor<impl Env>, state: &ResizeState, event: 
         state.handle,
         pointer,
         options,
+        measure,
         &mut editor.env,
     );
 }

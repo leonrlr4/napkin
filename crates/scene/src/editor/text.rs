@@ -10,9 +10,8 @@
 //! by `onSubmit`; an existing one that ends up empty is soft-deleted the same way
 //! [`edit::delete_selection`] deletes a selection. Creating a new container label goes through
 //! `batch::add::bind_label` (the same primitive the AI batch interface uses), not a second copy
-//! of `startTextEditing`'s own container-binding branch: napkin has no sticky notes and does not
-//! grow a container to fit its label, so that branch's remaining logic is just what `bind_label`
-//! already does.
+//! of `startTextEditing`'s own container-binding branch: napkin has no sticky notes, so that
+//! branch's remaining logic is just what `bind_label` already does.
 //!
 //! Left out of this port, matching the rest of `scene`'s scope: frames, sticky notes, elbow
 //! arrow endpoint labels (an arrow is never a text container here), the autoshape tool, and
@@ -34,6 +33,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::batch::add::{LabelSpec, bind_label};
+use crate::bound_text;
 use crate::collision;
 use crate::color::is_transparent;
 use crate::edit;
@@ -45,7 +45,6 @@ use crate::geometry::GeometryCache;
 use crate::new_element::{ElementProps, TextProps, bump_version, new_text_element};
 use crate::selection::{self, Selection};
 use crate::text::{self, TextMeasure};
-use crate::transform;
 
 use super::{Editor, PointerEvent, Tool, clone_scene};
 
@@ -78,6 +77,10 @@ pub struct TextEditing {
     /// center-snap threshold (`startTextEditing`'s `groupIds: container?.groupIds ?? []`);
     /// empty for every other kind of edit.
     pub group_ids: Vec<String>,
+    /// Width the editor wraps at, in scene units: a container label's max width
+    /// (`getBoundTextMaxWidth`), a fixed-width text's own width, `None` for text that grows
+    /// with its content.
+    pub wrap_width: Option<f64>,
 }
 
 /// Topmost non-deleted, non-locked element hit at `point` (`getElementAtPosition` with
@@ -143,6 +146,26 @@ fn bound_label_of(elements: &[Element], element: &Element) -> Option<usize> {
     elements
         .iter()
         .position(|e| !e.is_deleted() && e.id() == Some(label_id))
+}
+
+/// A container's label wrap width. A tiny container's max width is negative; no wrap width is
+/// then in effect, which agrees with `wrap_text` treating a negative width as no wrapping.
+fn container_wrap_width(container: &Element) -> Option<f64> {
+    bound_text::bound_text_max_size(container)
+        .map(|[w, _]| w)
+        .filter(|w| *w > 0.0)
+}
+
+/// The width an existing text's editor wraps at: its container's max width for a label, its own
+/// width for a standalone `autoResize: false` text, none otherwise.
+fn existing_wrap_width(elements: &[Element], text: &crate::element::TextElement) -> Option<f64> {
+    if let Some(container_id) = text.container_id.value() {
+        let container = elements
+            .iter()
+            .find(|e| !e.is_deleted() && e.id() == Some(container_id.as_str()))?;
+        return container_wrap_width(container);
+    }
+    (text.auto_resize == Some(false)).then_some(text.base.width)
 }
 
 /// What a pointer-down or double-click at a point should edit. `NewFreeText`'s `near_container`
@@ -254,11 +277,29 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                     "text_tool_target/double_click_target only resolve text positions here"
                 )
             };
+            let wrap_width = existing_wrap_width(&editor.file.elements, t);
+            // The overlay lays its lines out inside a `wrap_width`-wide box anchored at its
+            // left edge, aligned per `text_align`. A bound label is drawn at its own measured
+            // width, so the box starts that far left of the label for the lines to sit where
+            // the label is drawn (`textWysiwyg` keeps the editor on the label).
+            let origin_x = match (wrap_width, t.container_id.value()) {
+                (Some(wrap), Some(_)) => {
+                    let slack = (wrap - t.base.width).max(0.0);
+                    let share = match t.text_align.as_str() {
+                        "center" => 0.5,
+                        "right" => 1.0,
+                        _ => 0.0,
+                    };
+                    t.base.x - slack * share
+                }
+                _ => t.base.x,
+            };
             TextEditing {
                 element_id: Some(t.base.id.clone()),
                 container_id: t.container_id.value().cloned(),
-                text: t.text.clone(),
-                origin: [t.base.x, t.base.y],
+                // `originalText`, not the wrapped `text` (`textWysiwyg`'s initial value).
+                text: t.original_text.clone().unwrap_or_else(|| t.text.clone()),
+                origin: [origin_x, t.base.y],
                 width: t.base.width,
                 font_family: t.font_family,
                 font_size: t.font_size,
@@ -270,6 +311,7 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 opacity: t.base.opacity,
                 angle: t.base.angle,
                 group_ids: Vec::new(),
+                wrap_width,
             }
         }
         Target::NewLabel(container_index) => {
@@ -300,6 +342,7 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 opacity: style.opacity,
                 angle: placement.angle,
                 group_ids: Vec::new(),
+                wrap_width: container_wrap_width(container),
             }
         }
         Target::NewFreeText { near_container } => {
@@ -336,20 +379,64 @@ fn editing_for(editor: &Editor<impl Env>, target: Target, point: [f64; 2]) -> Te
                 opacity: style.opacity,
                 angle,
                 group_ids,
+                wrap_width: None,
             }
         }
     }
+}
+
+/// `startTextEditing`'s container branch: a container too small for even one character of the
+/// new label grows to `getApproxMinLineWidth`/`getApproxMinLineHeight` before the editor opens.
+/// The grown scene is `editor.file` straight away; the scene from before the growth is kept in
+/// `text_edit_base`, so [`commit_text`] records growth and label as one history step and an
+/// abandoned edit puts the container back exactly.
+fn grow_container_for_new_label(
+    editor: &mut Editor<impl Env>,
+    container: usize,
+    measure: &mut dyn TextMeasure,
+) {
+    let line_height = text::line_height(editor.style.font_family);
+    let [min_width, min_height] = bound_text::approx_min_container_size(
+        editor.style.font_family,
+        editor.style.font_size,
+        line_height,
+        measure,
+    );
+    let placement = editor.file.elements[container]
+        .placement()
+        .expect("a rectangle/diamond/ellipse container always has a placement");
+    let width = placement.width.max(min_width);
+    let height = placement.height.max(min_height);
+    if width == placement.width && height == placement.height {
+        return;
+    }
+    editor.text_edit_base = Some(Arc::clone(&editor.file));
+    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+    let element = &mut file.elements[container];
+    let base = element
+        .base_mut()
+        .expect("a rectangle/diamond/ellipse container is typed");
+    base.width = width;
+    base.height = height;
+    bump_version(element, &mut editor.env);
 }
 
 /// `Tool::Text`'s pointer-down: starts editing at `event`'s position, or does nothing while
 /// already editing (`if (this.state.editingTextElement) return;`) or under another tool.
 /// Deselects everything first (`handleTextWysiwyg`'s `this.deselectElements()`): the eventual
 /// selection is decided by [`commit_text`] instead.
-pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
+pub(super) fn pointer_down(
+    editor: &mut Editor<impl Env>,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     if editor.tool != Tool::Text || editor.text_editing.is_some() {
         return;
     }
     let target = text_tool_target(editor, event.at, event.zoom);
+    if let Target::NewLabel(container) = target {
+        grow_container_for_new_label(editor, container, measure);
+    }
     let editing = editing_for(editor, target, event.at);
     editor.selection = Selection::new();
     editor.text_editing = Some(editing);
@@ -360,11 +447,18 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
 /// (returning `false`) under any other tool or mid-gesture (`activeTool.type !==
 /// preferredSelectionTool.type`, `state.multiElement`, `state.editingTextElement`, all folded
 /// into [`Editor::is_idle`] once text editing counts toward it).
-pub(super) fn double_click(editor: &mut Editor<impl Env>, event: PointerEvent) -> bool {
+pub(super) fn double_click(
+    editor: &mut Editor<impl Env>,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) -> bool {
     if editor.tool != Tool::Selection || !editor.is_idle() {
         return false;
     }
     let target = double_click_target(editor, event.at, event.zoom);
+    if let Target::NewLabel(container) = target {
+        grow_container_for_new_label(editor, container, measure);
+    }
     let editing = editing_for(editor, target, event.at);
     editor.selection = Selection::new();
     editor.text_editing = Some(editing);
@@ -374,14 +468,14 @@ pub(super) fn double_click(editor: &mut Editor<impl Env>, event: PointerEvent) -
 /// Rewrites an existing text's content in place (`textWysiwyg`'s `onSubmit`, kept-text branch):
 /// applies `editing`'s current font family/size, stroke color and opacity (`set_property` only
 /// ever wrote those to `editing` itself while the edit was open, via `apply_to_text_editing`),
-/// re-measures at that font, repositions a container's label with
-/// [`transform::bound_text_position`], and leaves a standalone text's top-left exactly where it
-/// was. Unlike `properties.rs`'s `redraw_text` (the property panel's font-size/family change
-/// outside an edit), this does not recentre a standalone text at all: `getAdjustedDimensions`'
-/// anchor-preserving math keeps a left/top-aligned, unrotated text's top-left fixed on a content
-/// edit too (the only alignment/angle napkin's own UI ever creates), so the simpler
-/// fixed-top-left rule matches the JS for everything napkin can produce; it can disagree with
-/// the JS for a loaded file's differently aligned or rotated text.
+/// stores the text as `originalText`, and measures it at that font. A container's label, and a
+/// standalone text with `autoResize: false`, then go through
+/// [`bound_text::redraw_text_bounding_box`]: wrapped to the container (or to the text's own
+/// width), growing the container and recentred in it. An `autoResize` standalone text is not
+/// wrapped and keeps its top-left where it was: `getAdjustedDimensions`' anchor-preserving math
+/// does the same for a left/top-aligned, unrotated text (the only alignment/angle napkin's own
+/// UI ever creates); it can disagree with the JS for a loaded file's differently aligned or
+/// rotated text. A label whose container is `Raw` is measured but not wrapped.
 fn update_existing_text(
     file: &mut SceneFile,
     id: &str,
@@ -412,37 +506,34 @@ fn update_existing_text(
     );
     t.text = normalized.clone();
     t.original_text = Some(normalized);
-    t.base.width = width;
+    let fixed_width = t.auto_resize == Some(false);
+    if !fixed_width {
+        t.base.width = width;
+    }
     t.base.height = height;
     let container_id = t.container_id.value().cloned();
 
-    if let Some(container_id) = container_id
-        && let Some(container) = file
-            .elements
-            .iter()
-            .find(|e| !e.is_deleted() && e.id() == Some(container_id.as_str()))
-            .cloned()
-    {
-        let Element::Text(t) = &file.elements[position] else {
-            unreachable!("checked above")
-        };
-        if let Some([x, y]) = transform::bound_text_position(&container, t) {
-            let Element::Text(t) = &mut file.elements[position] else {
-                unreachable!("checked above")
-            };
-            t.base.x = x;
-            t.base.y = y;
+    match container_id {
+        Some(container_id) => {
+            if let Some(container) = live_position(&file.elements, &container_id) {
+                bound_text::redraw_text_bounding_box(file, position, Some(container), measure, env);
+            }
         }
+        None if fixed_width => {
+            bound_text::redraw_text_bounding_box(file, position, None, measure, env);
+        }
+        None => {}
     }
 
-    if file.elements[position] != before {
+    // `redraw_text_bounding_box` bumps what it changed; this covers the edit it was handed.
+    if file.elements[position] != before && file.elements[position].version() == before.version() {
         bump_version(&mut file.elements[position], env);
     }
 }
 
 /// A new label on `container_id`, via the same `bindTextToContainer`/`redrawTextBoundingBox`
-/// primitive the AI batch interface uses (`batch::add::bind_label`): centered, not wrapped,
-/// left overflowing when it does not fit, colored and made opaque per
+/// primitive the AI batch interface uses (`batch::add::bind_label`): centered, wrapped to
+/// the container and growing it when it does not fit, colored and made opaque per
 /// `editing`'s stroke color and opacity (`currentItemStrokeColor`/`currentItemOpacity` at
 /// `startTextEditing` time) rather than `bind_label`'s AI-batch default of the container's own
 /// color. Bumps the container's own version for gaining the `boundElements` entry: unlike
@@ -470,17 +561,10 @@ fn create_new_label(
         stroke_color: Some(editing.stroke_color.clone()),
         opacity: Some(editing.opacity),
     };
-    let mut warnings = Vec::new();
-    let label_position = bind_label(
-        file,
-        position,
-        &label,
-        container_id,
-        measure,
-        env,
-        &mut warnings,
-    );
-    if file.elements[position] != container_before {
+    let label_position = bind_label(file, position, &label, measure, env);
+    if file.elements[position] != container_before
+        && file.elements[position].version() == container_before.version()
+    {
         bump_version(&mut file.elements[position], env);
     }
     let label_id = file.elements[label_position]
@@ -564,7 +648,12 @@ pub(super) fn commit_text(
     editor.tool = Tool::Selection;
     let deleted = text.trim().is_empty();
 
-    let before = Arc::clone(&editor.file);
+    // A new label's container may have grown when the editor opened; the step starts from the
+    // scene before that.
+    let growth_base = editor.text_edit_base.take();
+    let before = growth_base
+        .clone()
+        .unwrap_or_else(|| Arc::clone(&editor.file));
     let selection_before = editor.selection.clone();
 
     let surviving_id: Option<String> = if let Some(id) = &editing.element_id {
@@ -595,6 +684,9 @@ pub(super) fn commit_text(
             }
         }
     } else if deleted {
+        if let Some(base) = growth_base {
+            editor.file = base;
+        }
         None
     } else {
         let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
@@ -699,6 +791,7 @@ mod tests {
             opacity: 100.0,
             angle: 0.0,
             group_ids: Vec::new(),
+            wrap_width: None,
         }
     }
 

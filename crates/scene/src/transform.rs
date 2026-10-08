@@ -1,8 +1,8 @@
 //! Resize handles and pointer-driven resizing (`packages/element/src/transformHandles.ts`,
 //! `packages/element/src/resizeTest.ts`, the resize half of
 //! `packages/element/src/resizeElements.ts`, `packages/common/src/points.ts`'s
-//! `rescalePoints`, and `packages/element/src/textElement.ts`'s `computeBoundTextPosition`
-//! and its helpers, all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`).
+//! `rescalePoints`, all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`; a resized
+//! container's label is placed with [`crate::bound_text`]).
 //!
 //! napkin only ever draws and hit-tests the four corner squares: it never renders the
 //! `n`/`s`/`e`/`w` edge squares Excalidraw shows above a size threshold, and rather than
@@ -10,11 +10,15 @@
 //! corner handles at all for that case. Resizing from an edge still works everywhere else
 //! through the line-proximity test in [`handle_at`], which mirrors `resizeTest`'s fallback
 //! independently of what squares are drawn. Sticky notes, elbow-arrow fixed-point mirroring,
-//! image `scale`, and bound-text rewrapping or its text-measured minimum size are all out of
-//! scope here (napkin has no sticky note or image element, elbow arrows never gain handles at
-//! all, and rewrapping needs the text measurement M5 adds); a resized container's bound text
-//! is only repositioned, keeping its own width, height and font size.
+//! image `scale` and arrow labels are out of scope (napkin has no sticky note or image
+//! element, elbow arrows never gain handles at all, and an arrow's label is not rewrapped).
+//! A resized rectangle, diamond or ellipse rewraps its label, and a standalone text resized
+//! from its left or right side gets a fixed width and wraps to it.
 
+use crate::bound_text::{
+    approx_min_container_size, bound_text_max_size, handle_bind_text_resize, live_bound_text,
+    min_text_element_width, text_line_height,
+};
 use crate::collision::{DEFAULT_TRANSFORM_HANDLE_SPACING, SIDE_RESIZING_THRESHOLD};
 use crate::element::{Element, TextElement};
 use crate::env::Env;
@@ -24,9 +28,9 @@ use crate::geometry::{
 };
 use crate::new_element::bump_version;
 use crate::selection::{Selection, selected_bounds};
+use crate::text::{TextMeasure, measure_text, normalize_text};
+use crate::text_wrap::wrap_text;
 
-/// `BOUND_TEXT_PADDING` (`packages/common/src/constants.ts`).
-const BOUND_TEXT_PADDING: f64 = 5.0;
 /// `MIN_FONT_SIZE`.
 const MIN_FONT_SIZE: f64 = 1.0;
 /// `transformHandleSizes.mouse`: napkin has no pen/touch pointer type.
@@ -199,8 +203,7 @@ fn distance_to_segment(point: [f64; 2], seg: [[f64; 2]; 2]) -> f64 {
 }
 
 /// `resizeTest` / `getTransformHandleTypeFromCoords`: corner squares first, then the edges of
-/// the padded bounds (never `E`/`W` for a single text element, never edges for a single line
-/// or arrow with two points).
+/// the padded bounds (never edges for a single line or arrow with two points).
 pub fn handle_at(
     geometry: &mut GeometryCache,
     file: &SceneFile,
@@ -225,8 +228,6 @@ pub fn handle_at(
     } else {
         selected_bounds(geometry, file, selection)?
     };
-    let exclude_ew =
-        positions.len() == 1 && matches!(file.elements[positions[0]], Element::Text(_));
     let spacing = SIDE_RESIZING_THRESHOLD / zoom;
     let [x1, y1, x2, y2] = edge_bounds;
     let (px1, py1, px2, py2) = (x1 - spacing, y1 - spacing, x2 + spacing, y2 + spacing);
@@ -237,9 +238,6 @@ pub fn handle_at(
         (HandleKind::W, [[px1, py2], [px1, py1]]),
     ];
     for (kind, segment) in sides {
-        if exclude_ew && matches!(kind, HandleKind::E | HandleKind::W) {
-            continue;
-        }
         if distance_to_segment(point, segment) < spacing {
             return Some(kind);
         }
@@ -564,6 +562,7 @@ pub fn resize_element(
     handle: HandleKind,
     pointer: [f64; 2],
     options: ResizeOptions,
+    measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) -> bool {
     let orig = &start.elements[position];
@@ -587,12 +586,20 @@ pub fn resize_element(
         pointer,
         options,
     );
-    if next_width == 0.0 || next_height == 0.0 || !all_finite(&[next_width, next_height]) {
-        return false;
-    }
-
     if let Element::Text(orig_text) = orig {
         if matches!(handle, HandleKind::E | HandleKind::W) {
+            return resize_text_side(
+                file,
+                position,
+                orig_text,
+                handle,
+                next_width,
+                options.from_center,
+                measure,
+                env,
+            );
+        }
+        if next_width == 0.0 || next_height == 0.0 || !all_finite(&[next_width, next_height]) {
             return false;
         }
         let metrics_width = orig_text.base.width * (next_height / orig_text.base.height);
@@ -631,6 +638,65 @@ pub fn resize_element(
             bump_version(&mut file.elements[position], env);
         }
         return changed;
+    }
+
+    if !all_finite(&[next_width, next_height]) {
+        return false;
+    }
+    // Constraints and font scaling use magnitudes; the signs return for the geometry below,
+    // where crossing the opposite edge flips the element.
+    let flip_factor_x = if next_width < 0.0 { -1.0 } else { 1.0 };
+    let flip_factor_y = if next_height < 0.0 { -1.0 } else { 1.0 };
+    let (mut next_width, mut next_height) = (next_width.abs(), next_height.abs());
+
+    // A rectangle, diamond or ellipse with a live label cannot shrink below one character of
+    // it, and keeps the label's font size, or scales it with the container (Shift).
+    let label = crate::bound_text::is_container(orig)
+        .then(|| live_bound_text(file, position))
+        .flatten();
+    let mut label_font_size = None;
+    if let Some(label_position) = label
+        && let Element::Text(label_text) = &file.elements[label_position]
+    {
+        if !options.keep_aspect_ratio {
+            let [min_width, min_height] = approx_min_container_size(
+                label_text.font_family,
+                label_text.font_size,
+                text_line_height(label_text),
+                measure,
+            );
+            next_width = next_width.max(min_width);
+            next_height = next_height.max(min_height);
+        }
+        label_font_size = Some(match start.elements.get(label_position) {
+            Some(Element::Text(at_start)) => at_start.font_size,
+            _ => label_text.font_size,
+        });
+        if options.keep_aspect_ratio {
+            // `measureFontSizeFromWidth` for a bound text: the ratio of the label's max width
+            // in the resized container to its max width in the container as it stands now.
+            let mut resized = file.elements[position].clone();
+            if let Some(base) = resized.base_mut() {
+                base.width = next_width;
+                base.height = next_height;
+            }
+            let (Some([next_max, _]), Some([current_max, _])) = (
+                bound_text_max_size(&resized),
+                bound_text_max_size(&file.elements[position]),
+            ) else {
+                return false;
+            };
+            let font_size = label_text.font_size * (next_max / current_max);
+            if font_size < MIN_FONT_SIZE || !font_size.is_finite() {
+                return false;
+            }
+            label_font_size = Some(font_size);
+        }
+    }
+    let next_width = next_width * flip_factor_x;
+    let next_height = next_height * flip_factor_y;
+    if next_width == 0.0 || next_height == 0.0 {
+        return false;
     }
 
     let is_line_or_arrow = matches!(orig, Element::Line(_) | Element::Arrow(_));
@@ -733,14 +799,111 @@ pub fn resize_element(
         bump_version(&mut file.elements[position], env);
     }
 
-    if matches!(
-        orig,
-        Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
-    ) && reposition_bound_text(file, position, env)
-    {
-        changed = true;
+    if let Some(label_position) = label {
+        if let Some(font_size) = label_font_size {
+            changed |= set_label_font_size(file, label_position, font_size, None, env);
+        }
+        changed |= handle_bind_text_resize(
+            file,
+            position,
+            Some(handle),
+            options.keep_aspect_ratio,
+            options.from_center,
+            flip_factor_y < 0.0,
+            measure,
+            env,
+        );
     }
 
+    changed
+}
+
+/// Sets the label at `label_position`'s font size (and angle, when given), bumping its
+/// version only if either changed. Returns whether it did.
+fn set_label_font_size(
+    file: &mut SceneFile,
+    label_position: usize,
+    font_size: f64,
+    angle: Option<f64>,
+    env: &mut impl Env,
+) -> bool {
+    let Element::Text(label) = &mut file.elements[label_position] else {
+        return false;
+    };
+    let before = (label.font_size, label.base.angle);
+    label.font_size = font_size;
+    if let Some(angle) = angle {
+        label.base.angle = angle;
+    }
+    if before == (label.font_size, label.base.angle) {
+        return false;
+    }
+    bump_version(&mut file.elements[label_position], env);
+    true
+}
+
+/// `resizeSingleTextElement` for the `E` and `W` handles: the width (at least
+/// `getMinTextElementWidth`) becomes fixed, `originalText` wraps to it, and the height follows
+/// the wrapped text. Recomputed from `start`'s element each call like every other resize.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors resizeSingleTextElement's inputs"
+)]
+fn resize_text_side(
+    file: &mut SceneFile,
+    position: usize,
+    orig: &TextElement,
+    handle: HandleKind,
+    next_width: f64,
+    from_center: bool,
+    measure: &mut dyn TextMeasure,
+    env: &mut impl Env,
+) -> bool {
+    if !all_finite(&[next_width]) {
+        return false;
+    }
+    let line_height = text_line_height(orig);
+    let min_width = min_text_element_width(orig.font_family, orig.font_size, line_height, measure);
+    let width = min_width.max(next_width);
+    let original = orig
+        .original_text
+        .clone()
+        .unwrap_or_else(|| orig.text.clone());
+    let text = wrap_text(&original, orig.font_family, orig.font_size, width, measure);
+    let [_, height] = measure_text(
+        &normalize_text(&text),
+        orig.font_family,
+        orig.font_size,
+        line_height,
+        measure,
+    );
+    let origin = get_resized_origin(
+        [orig.base.x, orig.base.y],
+        [orig.base.width, orig.base.height],
+        [width, height],
+        orig.base.angle,
+        handle,
+        false,
+        from_center,
+    );
+    if !all_finite(&[height, origin[0], origin[1]]) {
+        return false;
+    }
+
+    let mut next = orig.clone();
+    next.text = text;
+    next.base.width = width;
+    next.base.height = height;
+    next.base.x = origin[0];
+    next.base.y = origin[1];
+    next.auto_resize = Some(false);
+
+    let next = Element::Text(next);
+    let changed = next != Element::Text(orig.clone());
+    file.elements[position] = next;
+    if changed {
+        bump_version(&mut file.elements[position], env);
+    }
     changed
 }
 
@@ -798,13 +961,16 @@ pub fn resize_elements(
     handle: HandleKind,
     pointer: [f64; 2],
     options: ResizeOptions,
+    measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) -> bool {
     if targets.is_empty() {
         return false;
     }
     if let [only] = targets {
-        return resize_element(geometry, file, start, *only, handle, pointer, options, env);
+        return resize_element(
+            geometry, file, start, *only, handle, pointer, options, measure, env,
+        );
     }
 
     let Some([min_x, min_y, max_x, max_y]) =
@@ -891,6 +1057,8 @@ pub fn resize_elements(
     // `resizeMultipleElements` building its full `elementsAndUpdates` list before its
     // separate mutation pass.
     let mut next_elements: Vec<(usize, Element)> = Vec::with_capacity(targets.len());
+    // Each labeled container's label: its position and the font size it takes.
+    let mut label_fonts: Vec<(usize, usize, f64)> = Vec::new();
     for &position in targets {
         let orig = &start.elements[position];
         // Bound text is resized along with its container, not as its own target; `Raw`'s
@@ -998,6 +1166,20 @@ pub fn resize_elements(
             }
             Element::Raw(_) => unreachable!("Raw targets are skipped above"),
         }
+        if crate::bound_text::is_container(orig)
+            && let Some(label_position) = live_bound_text(start, position)
+            && let Element::Text(at_start) = &start.elements[label_position]
+        {
+            let font_size = if keep_aspect_ratio {
+                at_start.font_size * scale
+            } else {
+                at_start.font_size
+            };
+            if font_size < MIN_FONT_SIZE || !font_size.is_finite() {
+                return false;
+            }
+            label_fonts.push((position, label_position, font_size));
+        }
         next_elements.push((position, next));
     }
 
@@ -1012,135 +1194,22 @@ pub fn resize_elements(
         }
     }
 
-    for &position in targets {
-        if matches!(
-            file.elements[position],
-            Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
-        ) && reposition_bound_text(file, position, env)
-        {
-            changed = true;
-        }
+    for (position, label_position, font_size) in label_fonts {
+        let angle = file.elements[position].placement().map(|p| p.angle);
+        changed |= set_label_font_size(file, label_position, font_size, angle, env);
+        changed |= handle_bind_text_resize(
+            file,
+            position,
+            Some(handle),
+            true,
+            options.from_center,
+            flip_y,
+            measure,
+            env,
+        );
     }
 
     changed
-}
-
-/// `getBoundTextMaxWidth`/`getBoundTextMaxHeight` for a rectangle, diamond or ellipse
-/// container; `None` for every other type (an arrow container's label has no such limit here,
-/// see [`bound_text_position`]'s doc comment).
-pub fn bound_text_max_size(container: &Element) -> Option<[f64; 2]> {
-    if !matches!(
-        container,
-        Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
-    ) {
-        return None;
-    }
-    let placement = container.placement()?;
-    let max_width = match container {
-        Element::Diamond(_) => {
-            rough::js::math_round(placement.width / 2.0) - BOUND_TEXT_PADDING * 2.0
-        }
-        Element::Ellipse(_) => {
-            rough::js::math_round(placement.width / 2.0 * std::f64::consts::SQRT_2)
-                - BOUND_TEXT_PADDING * 2.0
-        }
-        _ => placement.width - BOUND_TEXT_PADDING * 2.0,
-    };
-    let max_height = match container {
-        Element::Diamond(_) => {
-            rough::js::math_round(placement.height / 2.0) - BOUND_TEXT_PADDING * 2.0
-        }
-        Element::Ellipse(_) => {
-            rough::js::math_round(placement.height / 2.0 * std::f64::consts::SQRT_2)
-                - BOUND_TEXT_PADDING * 2.0
-        }
-        _ => placement.height - BOUND_TEXT_PADDING * 2.0,
-    };
-    Some([max_width, max_height])
-}
-
-/// `computeBoundTextPosition` for a rectangle, diamond or ellipse container; `None` otherwise
-/// (an arrow container's label follows `LinearElementEditor.getBoundTextElementPosition`
-/// instead, out of scope here).
-pub fn bound_text_position(container: &Element, text: &TextElement) -> Option<[f64; 2]> {
-    let placement = container.placement()?;
-    let [max_width, max_height] = bound_text_max_size(container)?;
-
-    // `getContainerCoords`.
-    let (offset_x, offset_y) = match container {
-        Element::Diamond(_) => (placement.width / 4.0, placement.height / 4.0),
-        Element::Ellipse(_) => {
-            let k = 1.0 - std::f64::consts::FRAC_1_SQRT_2;
-            (placement.width / 2.0 * k, placement.height / 2.0 * k)
-        }
-        _ => (0.0, 0.0),
-    };
-    let container_x = placement.x + BOUND_TEXT_PADDING + offset_x;
-    let container_y = placement.y + BOUND_TEXT_PADDING + offset_y;
-
-    let y = match text.vertical_align.as_str() {
-        "top" => container_y,
-        "bottom" => container_y + (max_height - text.base.height),
-        _ => container_y + (max_height / 2.0 - text.base.height / 2.0),
-    };
-    let x = match text.text_align.as_str() {
-        "left" => container_x,
-        "right" => container_x + (max_width - text.base.width),
-        _ => container_x + (max_width / 2.0 - text.base.width / 2.0),
-    };
-
-    if placement.angle != 0.0 {
-        let content_center = [
-            container_x + max_width / 2.0,
-            container_y + max_height / 2.0,
-        ];
-        let text_center = [x + text.base.width / 2.0, y + text.base.height / 2.0];
-        let [rx, ry] = rotate_point(text_center, content_center, placement.angle);
-        return Some([rx - text.base.width / 2.0, ry - text.base.height / 2.0]);
-    }
-    Some([x, y])
-}
-
-/// Repositions `container_position`'s bound text (if it has one, and it is not deleted) with
-/// [`bound_text_position`]. Returns whether the text moved.
-fn reposition_bound_text(
-    file: &mut SceneFile,
-    container_position: usize,
-    env: &mut impl Env,
-) -> bool {
-    let container = file.elements[container_position].clone();
-    let Some((text_id, _)) = container
-        .bound_elements()
-        .into_iter()
-        .find(|&(_, kind)| kind == "text")
-    else {
-        return false;
-    };
-    let text_id = text_id.to_string();
-    let Some(text_position) = file
-        .elements
-        .iter()
-        .position(|e| !e.is_deleted() && e.id() == Some(text_id.as_str()))
-    else {
-        return false;
-    };
-    let Element::Text(text) = &file.elements[text_position] else {
-        return false;
-    };
-    let Some([new_x, new_y]) = bound_text_position(&container, text) else {
-        return false;
-    };
-
-    let Element::Text(t) = &mut file.elements[text_position] else {
-        unreachable!("checked above")
-    };
-    if t.base.x == new_x && t.base.y == new_y {
-        return false;
-    }
-    t.base.x = new_x;
-    t.base.y = new_y;
-    bump_version(&mut file.elements[text_position], env);
-    true
 }
 
 #[cfg(test)]
@@ -1148,7 +1217,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::sample;
+    use crate::bound_text::bound_text_position;
+    use crate::sample::{self, CharWidthMeasure};
 
     struct TestEnv;
 
@@ -1186,6 +1256,7 @@ mod tests {
                 handle,
                 pointer,
                 options,
+                &mut CharWidthMeasure,
                 &mut TestEnv,
             );
         } else {
@@ -1197,6 +1268,7 @@ mod tests {
                 handle,
                 pointer,
                 options,
+                &mut CharWidthMeasure,
                 &mut TestEnv,
             );
         }
@@ -1330,7 +1402,7 @@ mod tests {
         assert_eq!(handle_at(&mut g, &file, &r, [50.0, 1.0], 1.0), None);
 
         let t = sel(&["t"]);
-        assert_eq!(handle_at(&mut g, &file, &t, [404.0, 12.0], 1.0), None);
+        assert_eq!(handle_at(&mut g, &file, &t, [404.0, 12.0], 1.0), Some(E));
         assert_eq!(handle_at(&mut g, &file, &t, [350.0, 29.0], 1.0), Some(S));
 
         // Multiple elements: common bounds [0, 0, 250, 100] with the default margin of 4.
@@ -1399,6 +1471,7 @@ mod tests {
             Se,
             [140.0, 90.0],
             PLAIN,
+            &mut CharWidthMeasure,
             &mut TestEnv,
         );
         assert_rect(rect_of(&file, 0), [0.0, 0.0, 140.0, 90.0]);
@@ -1414,6 +1487,7 @@ mod tests {
             Se,
             [100.0, 50.0],
             PLAIN,
+            &mut CharWidthMeasure,
             &mut TestEnv,
         );
         assert!(!changed);
@@ -1530,7 +1604,37 @@ mod tests {
     }
 
     #[test]
-    fn bound_text_is_repositioned_without_rewrapping() {
+    fn multi_resize_scales_a_labeled_containers_label_and_keeps_it_centered() {
+        let container = sample::with(
+            rect("r", [0.0, 0.0, 100.0, 50.0]),
+            json!({"boundElements": [{"id": "t", "type": "text"}]}),
+        );
+        let label = sample::with(
+            sample::text("t", [38.0, 12.5, 24.0, 25.0], "hi", Some("r")),
+            json!({"textAlign": "center", "verticalAlign": "middle"}),
+        );
+        let shift = ResizeOptions {
+            keep_aspect_ratio: true,
+            from_center: false,
+        };
+        // Common bounds are 150 x 50; the pointer doubles both.
+        let file = resize(
+            vec![container, label, rect("b", [100.0, 0.0, 50.0, 50.0])],
+            &[0, 2],
+            HandleKind::Se,
+            [300.0, 100.0],
+            shift,
+        );
+        assert_rect(rect_of(&file, 0), [0.0, 0.0, 200.0, 100.0]);
+        let v = file.elements[1].to_value();
+        assert_eq!(v["fontSize"], json!(40.0));
+        let [x, y, w, h] = ["x", "y", "width", "height"].map(|k| v[k].as_f64().unwrap());
+        assert!((x + w / 2.0 - 100.0).abs() < 1e-9, "{v}");
+        assert!((y + h / 2.0 - 50.0).abs() < 1e-9, "{v}");
+    }
+
+    #[test]
+    fn bound_text_is_remeasured_and_repositioned() {
         let centered = |container: &str| {
             sample::with(
                 sample::text("t", [30.0, 40.0, 40.0, 20.0], "hi", Some(container)),
@@ -1548,7 +1652,7 @@ mod tests {
             [200.0, 100.0],
             PLAIN,
         );
-        assert_rect(rect_of(&file, 1), [80.0, 40.0, 40.0, 20.0]);
+        assert_rect(rect_of(&file, 1), [88.0, 37.5, 24.0, 25.0]);
 
         let Element::Text(text) = Element::from_value(centered("c")) else {
             panic!("text")
@@ -1581,8 +1685,8 @@ mod tests {
             )
         };
         // An ellipse container's `computeBoundTextPosition` involves `sqrt(2)`, so its bound
-        // text's repositioned x/y are never round numbers; `reposition_bound_text` must not
-        // round them either (only `getBoundTextMaxWidth`/`Height`, folded into
+        // text's repositioned x/y are never round numbers; the remeasured label must not
+        // be rounded either (only `getBoundTextMaxWidth`/`Height`, folded into
         // `bound_text_position` itself, round).
         let container = sample::with(
             sample::generic("ellipse", "e", [0.0, 0.0, 100.0, 100.0]),
@@ -1596,8 +1700,8 @@ mod tests {
             PLAIN,
         );
         let rect = rect_of(&file, 1);
-        assert!((rect[0] - 79.789_321_881_345_24).abs() < 1e-9, "{rect:?}");
-        assert!((rect[1] - 40.144_660_940_672_62).abs() < 1e-9, "{rect:?}");
-        assert_eq!((rect[2], rect[3]), (40.0, 20.0));
+        assert!((rect[0] - 87.789_321_881_345_24).abs() < 1e-9, "{rect:?}");
+        assert!((rect[1] - 37.644_660_940_672_62).abs() < 1e-9, "{rect:?}");
+        assert_eq!((rect[2], rect[3]), (24.0, 25.0));
     }
 }

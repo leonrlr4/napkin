@@ -96,11 +96,11 @@ fn clicks_build_a_multi_point_line_that_enter_finishes() {
     e.set_tool(Tool::Line);
     click(&mut e, at(0.0, 0.0));
     assert!(!e.is_idle());
-    e.pointer_move(at(100.0, 0.0));
+    e.pointer_move(at(100.0, 0.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 0.0));
-    e.pointer_move(at(100.0, 100.0));
+    e.pointer_move(at(100.0, 100.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 100.0));
-    e.pointer_move(at(50.0, 150.0));
+    e.pointer_move(at(50.0, 150.0), &mut CharWidthMeasure);
     assert!(e.command(Command::Finalize));
     assert!(e.is_idle());
     let v = only(&e);
@@ -122,13 +122,13 @@ fn finish_pending_gesture_commits_a_multi_point_line_without_finalize() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Line);
     click(&mut e, at(0.0, 0.0));
-    e.pointer_move(at(100.0, 0.0));
+    e.pointer_move(at(100.0, 0.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 0.0));
-    e.pointer_move(at(100.0, 100.0));
+    e.pointer_move(at(100.0, 100.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 100.0));
     // The cursor-following point: written into `file` by `pointer_move`, but not yet
     // committed (no click confirmed it) and not yet reflected in `revision`.
-    e.pointer_move(at(50.0, 150.0));
+    e.pointer_move(at(50.0, 150.0), &mut CharWidthMeasure);
     assert!(!e.is_idle());
     let revision_before = e.revision();
 
@@ -154,11 +154,11 @@ fn clicking_back_on_the_start_closes_a_line_into_a_polygon() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Line);
     click(&mut e, at(0.0, 0.0));
-    e.pointer_move(at(100.0, 0.0));
+    e.pointer_move(at(100.0, 0.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 0.0));
-    e.pointer_move(at(100.0, 100.0));
+    e.pointer_move(at(100.0, 100.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 100.0));
-    e.pointer_move(at(2.0, 2.0));
+    e.pointer_move(at(2.0, 2.0), &mut CharWidthMeasure);
     click(&mut e, at(2.0, 2.0));
     assert!(e.is_idle());
     let v = only(&e);
@@ -173,11 +173,11 @@ fn clicking_back_on_the_start_closes_a_line_into_a_polygon() {
 fn freedraw_records_relative_points_and_keeps_the_tool() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Freedraw);
-    e.pointer_down(at(10.0, 10.0));
-    e.pointer_move(at(15.0, 12.0));
-    e.pointer_move(at(15.0, 12.0));
-    e.pointer_move(at(5.0, 20.0));
-    e.pointer_up(at(8.0, 25.0));
+    e.pointer_down(at(10.0, 10.0), &mut CharWidthMeasure);
+    e.pointer_move(at(15.0, 12.0), &mut CharWidthMeasure);
+    e.pointer_move(at(15.0, 12.0), &mut CharWidthMeasure);
+    e.pointer_move(at(5.0, 20.0), &mut CharWidthMeasure);
+    e.pointer_up(at(8.0, 25.0), &mut CharWidthMeasure);
     let v = only(&e);
     assert_eq!(
         v["points"],
@@ -203,18 +203,18 @@ fn freedraw_records_relative_points_and_keeps_the_tool() {
 fn escape_discards_a_dragged_shape_but_finishes_a_multi_point_arrow() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Rectangle);
-    e.pointer_down(at(0.0, 0.0));
-    e.pointer_move(at(50.0, 50.0));
+    e.pointer_down(at(0.0, 0.0), &mut CharWidthMeasure);
+    e.pointer_move(at(50.0, 50.0), &mut CharWidthMeasure);
     assert!(e.command(Command::Escape));
-    e.pointer_up(at(50.0, 50.0));
+    e.pointer_up(at(50.0, 50.0), &mut CharWidthMeasure);
     assert!(e.file().elements.is_empty());
     assert!(!e.command(Command::Undo));
 
     e.set_tool(Tool::Arrow);
     click(&mut e, at(0.0, 0.0));
-    e.pointer_move(at(100.0, 0.0));
+    e.pointer_move(at(100.0, 0.0), &mut CharWidthMeasure);
     click(&mut e, at(100.0, 0.0));
-    e.pointer_move(at(100.0, 80.0));
+    e.pointer_move(at(100.0, 80.0), &mut CharWidthMeasure);
     assert!(e.command(Command::Escape));
     assert_eq!(only(&e)["points"], json!([[0.0, 0.0], [100.0, 0.0]]));
 }
@@ -224,9 +224,9 @@ fn switching_tools_finishes_a_multi_point_line() {
     let mut e = editor(vec![]);
     e.set_tool(Tool::Line);
     click(&mut e, at(0.0, 0.0));
-    e.pointer_move(at(60.0, 0.0));
+    e.pointer_move(at(60.0, 0.0), &mut CharWidthMeasure);
     click(&mut e, at(60.0, 0.0));
-    e.pointer_move(at(60.0, 60.0));
+    e.pointer_move(at(60.0, 60.0), &mut CharWidthMeasure);
     e.set_tool(Tool::Rectangle);
     assert!(e.is_idle());
     assert_eq!(e.tool(), Tool::Rectangle);

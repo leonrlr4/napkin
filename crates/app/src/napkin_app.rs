@@ -177,6 +177,25 @@ impl TextMeasure for NoMeasure {
     }
 }
 
+/// A `TextMeasure` that resolves the real `FontMeasure` (see `resolve_measure`) only once
+/// something actually measures text, so pointer events that never resize a label never wait
+/// on, or synchronously build, the font system.
+struct DeferredMeasure<'a> {
+    measure: &'a mut Option<FontMeasure>,
+    measure_rx: &'a mut Option<mpsc::Receiver<FontMeasure>>,
+    ctx: Option<&'a egui::Context>,
+}
+
+impl TextMeasure for DeferredMeasure<'_> {
+    fn line_width(&mut self, line: &str, font_family: f64, font_size: f64) -> f64 {
+        resolve_measure(self.measure, self.measure_rx, self.ctx).line_width(
+            line,
+            font_family,
+            font_size,
+        )
+    }
+}
+
 impl Rasterize for NoGpu {
     fn rasterize(
         &mut self,
@@ -807,11 +826,18 @@ impl eframe::App for NapkinApp {
                                             );
                                             editor.set_tool(Tool::Selection);
                                             let base_clones = editor.scene_clones();
-                                            editor.pointer_down(PointerEvent {
-                                                at: target,
-                                                modifiers: Modifiers::default(),
-                                                zoom: camera.zoom,
-                                            });
+                                            editor.pointer_down(
+                                                PointerEvent {
+                                                    at: target,
+                                                    modifiers: Modifiers::default(),
+                                                    zoom: camera.zoom,
+                                                },
+                                                &mut DeferredMeasure {
+                                                    measure: &mut self.measure,
+                                                    measure_rx: &mut self.measure_rx,
+                                                    ctx: Some(ui.ctx()),
+                                                },
+                                            );
                                             // The drag phase gets its own statistics window,
                                             // same as the camera script's above.
                                             self.stats = FrameStats::new();
@@ -842,20 +868,34 @@ impl eframe::App for NapkinApp {
                             let editor = self.editor.as_mut().expect(EDITOR_INVARIANT);
                             match bench::drag_pointer_at(elapsed, target) {
                                 Some(pos) => {
-                                    editor.pointer_move(PointerEvent {
-                                        at: pos,
-                                        modifiers: Modifiers::default(),
-                                        zoom: camera.zoom,
-                                    });
+                                    editor.pointer_move(
+                                        PointerEvent {
+                                            at: pos,
+                                            modifiers: Modifiers::default(),
+                                            zoom: camera.zoom,
+                                        },
+                                        &mut DeferredMeasure {
+                                            measure: &mut self.measure,
+                                            measure_rx: &mut self.measure_rx,
+                                            ctx: Some(ui.ctx()),
+                                        },
+                                    );
                                     ui.ctx().request_repaint();
                                 }
                                 None => {
                                     // A full revolution ends back where it started.
-                                    editor.pointer_up(PointerEvent {
-                                        at: target,
-                                        modifiers: Modifiers::default(),
-                                        zoom: camera.zoom,
-                                    });
+                                    editor.pointer_up(
+                                        PointerEvent {
+                                            at: target,
+                                            modifiers: Modifiers::default(),
+                                            zoom: camera.zoom,
+                                        },
+                                        &mut DeferredMeasure {
+                                            measure: &mut self.measure,
+                                            measure_rx: &mut self.measure_rx,
+                                            ctx: Some(ui.ctx()),
+                                        },
+                                    );
                                     println!(
                                         "bench drag: frames {}, interval p99 {:.2} ms, cpu p99 \
                                          {:.2} ms, scene clones {}",
@@ -971,10 +1011,31 @@ impl eframe::App for NapkinApp {
                                             &mut self.measure_rx,
                                             Some(ui.ctx()),
                                         );
-                                        editor.pointer_down(event);
+                                        editor.pointer_down(
+                                            event,
+                                            &mut DeferredMeasure {
+                                                measure: &mut self.measure,
+                                                measure_rx: &mut self.measure_rx,
+                                                ctx: Some(ui.ctx()),
+                                            },
+                                        );
                                     }
-                                    EditorInput::Move(event) => editor.pointer_move(event),
-                                    EditorInput::Up(event) => editor.pointer_up(event),
+                                    EditorInput::Move(event) => editor.pointer_move(
+                                        event,
+                                        &mut DeferredMeasure {
+                                            measure: &mut self.measure,
+                                            measure_rx: &mut self.measure_rx,
+                                            ctx: Some(ui.ctx()),
+                                        },
+                                    ),
+                                    EditorInput::Up(event) => editor.pointer_up(
+                                        event,
+                                        &mut DeferredMeasure {
+                                            measure: &mut self.measure,
+                                            measure_rx: &mut self.measure_rx,
+                                            ctx: Some(ui.ctx()),
+                                        },
+                                    ),
                                     EditorInput::Tool(tool) => editor.set_tool(tool),
                                     EditorInput::Command(command) => {
                                         editor.command(command);
@@ -999,7 +1060,14 @@ impl eframe::App for NapkinApp {
                                         editor.paste(&text, at, measure);
                                     }
                                     EditorInput::DoubleClick(event) => {
-                                        editor.double_click(event);
+                                        editor.double_click(
+                                            event,
+                                            &mut DeferredMeasure {
+                                                measure: &mut self.measure,
+                                                measure_rx: &mut self.measure_rx,
+                                                ctx: Some(ui.ctx()),
+                                            },
+                                        );
                                     }
                                 }
                             }

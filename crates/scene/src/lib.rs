@@ -3,6 +3,7 @@
 
 pub mod batch;
 pub mod binding;
+pub mod bound_text;
 pub mod clipboard;
 pub mod collision;
 pub mod color;
@@ -23,6 +24,7 @@ pub mod sample;
 pub mod selection;
 pub mod shape;
 pub mod text;
+pub mod text_wrap;
 pub mod transform;
 pub mod zindex;
 

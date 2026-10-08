@@ -1,6 +1,6 @@
 mod support;
 
-use scene::editor::{EdgeStyle, Property, Section, StrokeWidth, Tool};
+use scene::editor::{Command, EdgeStyle, Property, Section, StrokeWidth, Tool};
 use scene::sample::{self, CharWidthMeasure};
 use serde_json::json;
 use support::*;
@@ -240,4 +240,27 @@ fn fill_style_section_needs_a_non_transparent_background() {
     )]);
     e.command(scene::editor::Command::SelectAll);
     assert!(!e.panel().sections.contains(&Section::FillStyle));
+}
+
+#[test]
+fn a_bigger_font_rewraps_the_label_and_grows_the_container() {
+    let mut e = editor(vec![
+        sample::with(
+            sample::generic("rectangle", "r", [0.0, 0.0, 200.0, 50.0]),
+            json!({"boundElements": [{"id": "t", "type": "text"}]}),
+        ),
+        sample::with(
+            sample::text("t", [34.0, 12.5, 132.0, 25.0], "hello world", Some("r")),
+            json!({"textAlign": "center", "verticalAlign": "middle"}),
+        ),
+    ]);
+    e.command(Command::SelectAll);
+    let version = element(&e, "r").version();
+    // fontSize 36: 21.6 per character, so "hello world" (237.6) no longer fits the 190 max
+    // width and wraps to two lines, 2 * 36 * 1.25 = 90 tall.
+    assert!(e.set_property(Property::FontSize(36.0), &mut CharWidthMeasure));
+    let label = element(&e, "t").to_value();
+    assert_eq!(label["text"], json!("hello\nworld"));
+    assert_eq!(rect_of(&e, "r")[3], 90.0 + 10.0);
+    assert!(element(&e, "r").version() > version);
 }
