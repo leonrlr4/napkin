@@ -12,7 +12,8 @@ use crate::camera::Camera;
 use crate::render::buffers::{self, Segment, SegmentAllocator};
 use crate::render::cache::SceneCache;
 use crate::render::color::render_color;
-use crate::render::plan::{self, DrawItem, ElementDraw, TextDraw, View, plan_frame};
+use crate::render::image_store::{DecodedImage, ImageState, ImageStore};
+use crate::render::plan::{self, DrawItem, ElementDraw, ImageDraw, TextDraw, View, plan_frame};
 use crate::render::tessellate::{Mesh, Vertex, local_center};
 use crate::render::text;
 
@@ -48,8 +49,12 @@ const ROTATED_TEXT_PADDING_PX: u32 = 1;
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
-const TEX_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+const TEX_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32];
+
+/// Image textures kept on the GPU; once a frame leaves more than this many, the ones that
+/// frame did not draw are dropped.
+const MAX_IMAGE_TEXTURES: usize = 64;
 
 const SHADER: &str = r#"
 struct Uniforms {
@@ -99,19 +104,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return in.color;
 }
 
-// The rotated-text quad: same camera transform as vs_main, carrying a UV instead of a color.
+// The textured quad (rotated text, images): same camera transform as vs_main, carrying a UV and
+// an opacity instead of a color.
 struct TexVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
 };
 
 @vertex
-fn vs_textured(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> TexVertexOutput {
+fn vs_textured(
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) alpha: f32,
+) -> TexVertexOutput {
     let clip = ((position + uniforms.scroll) * uniforms.zoom_px / uniforms.viewport_px)
         * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
     var out: TexVertexOutput;
     out.position = vec4<f32>(clip, 0.0, 1.0);
     out.uv = uv;
+    out.alpha = alpha;
     return out;
 }
 
@@ -121,9 +133,10 @@ fn vs_textured(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> 
 // The texture already holds premultiplied alpha (glyphon drew straight-alpha glyphs over a
 // transparent background with ALPHA_BLENDING, and that combination premultiplies the result),
 // so this is sampled as-is; the `textured` pipeline blends it with PREMULTIPLIED_ALPHA_BLENDING.
+// Scaling a premultiplied color by `alpha` applies the element's opacity.
 @fragment
 fn fs_textured(in: TexVertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(rotated_text_texture, rotated_text_sampler, in.uv);
+    return textureSample(rotated_text_texture, rotated_text_sampler, in.uv) * in.alpha;
 }
 "#;
 
@@ -137,12 +150,14 @@ struct Uniforms {
     _pad1: [f32; 2],
 }
 
-/// One corner of a rotated-text quad: `position` in scene units, `uv` into that text's texture.
+/// One corner of a textured quad: `position` in scene units, `uv` into its texture, `alpha` the
+/// opacity (1 for rotated text, whose color already carries it).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct TexVertex {
     position: [f32; 2],
     uv: [f32; 2],
+    alpha: f32,
 }
 
 const TEX_VERTEX_SIZE: u64 = std::mem::size_of::<TexVertex>() as u64;
@@ -199,9 +214,9 @@ enum PreparedItem {
     Text {
         renderer_index: usize,
     },
-    /// A rotated text element's offscreen texture, drawn as a quad in the (per-frame) rotated
-    /// quad buffer.
-    RotatedText {
+    /// A rotated text element's offscreen texture or an image, drawn as a quad in the
+    /// (per-frame) textured quad buffer.
+    TexturedQuad {
         bind_group: Arc<wgpu::BindGroup>,
         quad: Segment,
     },
@@ -241,6 +256,16 @@ struct RotatedTextEntry {
     /// `rotated_quad_vertices` sizes the on-canvas quad against this, not the requested scale,
     /// so an extreme zoom only softens the text instead of shrinking it.
     raster_scale: f32,
+}
+
+/// An image file's GPU copy, shared by every element that shows the file.
+struct ImageTexture {
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    bind_group: Arc<wgpu::BindGroup>,
+    /// The pixels uploaded, to notice when the store hands out a different decode.
+    source: Arc<DecodedImage>,
+    last_used: u64,
 }
 
 struct PipelineSpec<'a> {
@@ -385,7 +410,7 @@ fn make_textured_pipeline(
 }
 
 /// Every `ElementDraw` a frame's plan references, in the order `paint` will need them (`Text`
-/// and `RotatedText` carry no mesh and are skipped here; `build_prepared` handles them through
+/// and `RotatedText` carry no mesh and are skipped here, as is `Image`; `build_prepared` handles them through
 /// `glyphon` instead of the shared mesh buffers).
 fn element_draws(items: &[DrawItem]) -> Vec<&ElementDraw> {
     let mut draws = Vec::new();
@@ -393,7 +418,10 @@ fn element_draws(items: &[DrawItem]) -> Vec<&ElementDraw> {
         match item {
             DrawItem::Meshes(list) => draws.extend(list.iter()),
             DrawItem::Isolated { draw, .. } => draws.push(draw),
-            DrawItem::StencilReset | DrawItem::Text(_) | DrawItem::RotatedText(_) => {}
+            DrawItem::StencilReset
+            | DrawItem::Text(_)
+            | DrawItem::RotatedText(_)
+            | DrawItem::Image(_) => {}
         }
     }
     draws
@@ -458,6 +486,11 @@ pub struct CanvasRenderer {
     rotated_texture_bind_group_layout: wgpu::BindGroupLayout,
     rotated_texture_sampler: wgpu::Sampler,
     rotated_text_cache: HashMap<RotatedTextKey, RotatedTextEntry>,
+
+    images: ImageStore,
+    image_textures: HashMap<String, ImageTexture>,
+    /// Counts `prepare` calls; stamps the textures a frame draws.
+    image_frame: u64,
 
     prepared: Vec<PreparedItem>,
     stats: RenderStats,
@@ -725,6 +758,9 @@ impl CanvasRenderer {
             rotated_texture_bind_group_layout,
             rotated_texture_sampler,
             rotated_text_cache: HashMap::new(),
+            images: ImageStore::new(),
+            image_textures: HashMap::new(),
+            image_frame: 0,
             prepared: Vec::new(),
             stats: RenderStats::default(),
             logged_glyphon_errors: Mutex::new(HashSet::new()),
@@ -748,6 +784,15 @@ impl CanvasRenderer {
         }
     }
 
+    /// The decoded-image cache this renderer draws from.
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        &mut self.images
+    }
+
     /// Clears caches; call when another file is shown.
     pub fn reset(&mut self) {
         self.cache.clear();
@@ -755,6 +800,7 @@ impl CanvasRenderer {
             .reset(self.vertex_capacity, self.index_capacity);
         self.text_lines.clear();
         self.rotated_text_cache.clear();
+        self.image_textures.clear();
         self.prepared.clear();
         self.stats = RenderStats::default();
     }
@@ -789,6 +835,7 @@ impl CanvasRenderer {
             pixel_scale: scale,
             faded: &frame.faded,
             hidden: &frame.hidden,
+            images: &self.images,
         };
         let items = plan_frame(&frame.file, &mut self.cache, &view);
         let background = frame.file.view_background_color();
@@ -915,7 +962,7 @@ impl CanvasRenderer {
                     pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                     pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 }
-                PreparedItem::RotatedText { bind_group, quad } => {
+                PreparedItem::TexturedQuad { bind_group, quad } => {
                     pass.set_pipeline(&self.textured);
                     pass.set_bind_group(0, &self.bind_group, &[]);
                     pass.set_bind_group(1, bind_group.as_ref(), &[]);
@@ -1203,6 +1250,82 @@ impl CanvasRenderer {
         }
     }
 
+    /// The bind group of `draw`'s file texture, uploading the pixels first when the file has no
+    /// texture yet (or the store now holds a different decode of it). `None` when the file is
+    /// not decoded, which `plan_frame` already ruled out a moment ago except for an eviction
+    /// race.
+    fn ensure_image_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        file: &scene::SceneFile,
+        draw: &ImageDraw,
+    ) -> Option<(Arc<wgpu::BindGroup>, [u32; 2])> {
+        let ImageState::Ready(source) = self.images.request(&draw.file_id, file) else {
+            return None;
+        };
+        if let Some(texture) = self.image_textures.get_mut(&draw.file_id)
+            && Arc::ptr_eq(&texture.source, &source)
+        {
+            texture.last_used = self.image_frame;
+            return Some((texture.bind_group.clone(), [source.width, source.height]));
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("napkin canvas image"),
+            size: wgpu::Extent3d {
+                width: source.width,
+                height: source.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &source.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(source.width * 4),
+                rows_per_image: Some(source.height),
+            },
+            wgpu::Extent3d {
+                width: source.width,
+                height: source.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("napkin canvas image"),
+            layout: &self.rotated_texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.rotated_texture_sampler),
+                },
+            ],
+        }));
+        let size = [source.width, source.height];
+        self.image_textures.insert(
+            draw.file_id.clone(),
+            ImageTexture {
+                texture,
+                bind_group: bind_group.clone(),
+                source,
+                last_used: self.image_frame,
+            },
+        );
+        Some((bind_group, size))
+    }
+
     /// Renders `draw`'s element into its cached offscreen texture, unless a cache entry for its
     /// current [`RotatedTextKey`] already exists (nothing to do on a hit). On a glyphon error
     /// (the glyph atlas is full), logs once and returns without inserting a cache entry,
@@ -1453,6 +1576,33 @@ impl CanvasRenderer {
         }
         self.rotated_text_cache
             .retain(|key, _| used_rotated_text_keys.contains(key));
+
+        // Images share the textured quad buffer, after the rotated-text quads; `image_slots`
+        // has one entry per `Image` item, like `rotated_quad_slots`.
+        self.image_frame += 1;
+        let mut image_slots: Vec<Option<u32>> = Vec::new();
+        for item in items {
+            if let DrawItem::Image(draw) = item {
+                let slot = self.ensure_image_texture(device, queue, file, draw).map(
+                    |(bind_group, texture_size)| {
+                        let vertices = image_quad_vertices(
+                            &file.elements[draw.element],
+                            texture_size,
+                            draw.alpha,
+                        );
+                        let slot = rotated_quads.len() as u32;
+                        rotated_quads.push((vertices, bind_group));
+                        slot
+                    },
+                );
+                image_slots.push(slot);
+            }
+        }
+        if self.image_textures.len() > MAX_IMAGE_TEXTURES {
+            let frame = self.image_frame;
+            self.image_textures
+                .retain(|_, texture| texture.last_used == frame);
+        }
         self.ensure_rotated_quad_capacity(device, rotated_quads.len() as u32);
         for (index, (vertices, _)) in rotated_quads.iter().enumerate() {
             let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
@@ -1485,6 +1635,7 @@ impl CanvasRenderer {
         let mut next_hole = 0u32;
         let mut next_text_renderer = 0usize;
         let mut next_rotated_quad = 0u32;
+        let mut next_image = 0usize;
         for item in items {
             match item {
                 DrawItem::Meshes(draws) => {
@@ -1575,6 +1726,23 @@ impl CanvasRenderer {
                         }
                     }
                 }
+                DrawItem::Image(_) => {
+                    let slot = image_slots[next_image];
+                    next_image += 1;
+                    let Some(slot) = slot else {
+                        continue;
+                    };
+                    let (_, bind_group) = &rotated_quads[slot as usize];
+                    drawn_elements += 1;
+                    prepared.push(PreparedItem::TexturedQuad {
+                        bind_group: bind_group.clone(),
+                        quad: Segment {
+                            vertex_start: slot * 4,
+                            index_start: slot * 6,
+                            index_count: 6,
+                        },
+                    });
+                }
                 DrawItem::RotatedText(_) => {
                     let slot = rotated_quad_slots[next_rotated_quad as usize];
                     next_rotated_quad += 1;
@@ -1589,7 +1757,7 @@ impl CanvasRenderer {
                         index_count: 6,
                     };
                     drawn_elements += 1;
-                    prepared.push(PreparedItem::RotatedText {
+                    prepared.push(PreparedItem::TexturedQuad {
                         bind_group: bind_group.clone(),
                         quad,
                     });
@@ -1770,6 +1938,71 @@ fn rotated_quad_vertices(
         TexVertex {
             position: [x as f32, y as f32],
             uv: uvs[i],
+            alpha: 1.0,
+        }
+    })
+}
+
+/// The four corners (top-left, top-right, bottom-right, bottom-left) of an image element's
+/// quad, rotated about the element's center. The UVs select the `crop` rectangle of the file
+/// (all of it when `crop` is null), swapped per axis when `scale` is negative: Excalidraw
+/// applies `scale` after the rotation, around the center, which mirrors the picture inside the
+/// rotated box.
+fn image_quad_vertices(
+    element: &scene::Element,
+    texture_size: [u32; 2],
+    alpha: f32,
+) -> [TexVertex; 4] {
+    let placement = element
+        .placement()
+        .expect("an Image element always has a placement");
+    let scene::Element::Image(image) = element else {
+        unreachable!("DrawItem::Image only wraps an Image element");
+    };
+    let (mut u0, mut v0, mut u1, mut v1) = (0.0f32, 0.0f32, 1.0f32, 1.0f32);
+    if let Some(crop) = image.crop.value()
+        && crop.natural_width > 0.0
+        && crop.natural_height > 0.0
+    {
+        u0 = (crop.x / crop.natural_width) as f32;
+        u1 = ((crop.x + crop.width) / crop.natural_width) as f32;
+        v0 = (crop.y / crop.natural_height) as f32;
+        v1 = ((crop.y + crop.height) / crop.natural_height) as f32;
+        // Linear filtering would blend in texels outside the crop at its edges; staying half a
+        // texel inside keeps the crop's own pixels only (like `drawImage`'s source rectangle).
+        let inset = |lo: &mut f32, hi: &mut f32, texels: u32| {
+            let span = *hi - *lo;
+            let half = (0.5 / texels as f32).min(span.abs() / 2.0).copysign(span);
+            *lo += half;
+            *hi -= half;
+        };
+        inset(&mut u0, &mut u1, texture_size[0]);
+        inset(&mut v0, &mut v1, texture_size[1]);
+    }
+    if image.scale[0] < 0.0 {
+        std::mem::swap(&mut u0, &mut u1);
+    }
+    if image.scale[1] < 0.0 {
+        std::mem::swap(&mut v0, &mut v1);
+    }
+    let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+    let center = [placement.width / 2.0, placement.height / 2.0];
+    let local_corners = [
+        [0.0, 0.0],
+        [placement.width, 0.0],
+        [placement.width, placement.height],
+        [0.0, placement.height],
+    ];
+    let (sin, cos) = placement.angle.sin_cos();
+    std::array::from_fn(|i| {
+        let dx = local_corners[i][0] - center[0];
+        let dy = local_corners[i][1] - center[1];
+        let x = placement.x + center[0] + dx * cos - dy * sin;
+        let y = placement.y + center[1] + dx * sin + dy * cos;
+        TexVertex {
+            position: [x as f32, y as f32],
+            uv: uvs[i],
+            alpha,
         }
     })
 }

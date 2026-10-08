@@ -39,12 +39,17 @@ impl egui_wgpu::CallbackTrait for CanvasCallback {
 
 /// Inserts a [`CanvasRenderer`] into eframe's callback resources so [`CanvasCallback`] can find
 /// it each frame; called once from `NapkinApp::new` when `cc.wgpu_render_state` is `Some`.
-pub fn install(render_state: &egui_wgpu::RenderState) {
-    let renderer = CanvasRenderer::new(
+/// `ctx` is repainted whenever a background image decode finishes.
+pub fn install(render_state: &egui_wgpu::RenderState, ctx: &egui::Context) {
+    let mut renderer = CanvasRenderer::new(
         &render_state.device,
         &render_state.queue,
         render_state.target_format,
     );
+    let ctx = ctx.clone();
+    renderer
+        .images_mut()
+        .set_wake(std::sync::Arc::new(move || ctx.request_repaint()));
     render_state
         .renderer
         .write()

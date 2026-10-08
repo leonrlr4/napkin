@@ -389,7 +389,7 @@ impl NapkinApp {
         bench: bool,
     ) -> NapkinApp {
         if let Some(render_state) = &cc.wgpu_render_state {
-            callback::install(render_state);
+            callback::install(render_state, &cc.egui_ctx);
         }
         configure_input(&cc.egui_ctx);
         // `fonts::egui_family` names families `fonts::install` binds; without registering them

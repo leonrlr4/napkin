@@ -1,7 +1,8 @@
 //! Building one frame's draw list from the scene: file-order traversal, coarse then exact
 //! culling against the visible rect, grouping neighbouring opaque elements into batches,
 //! isolating translucent or label-holed elements behind the stencil buffer, and drawing
-//! placeholders (spec §1.2) as an opaque box plus a type label.
+//! placeholders (spec §1.2) as an opaque box plus a type label, and image elements as textured
+//! quads once their file has decoded.
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,6 +11,7 @@ use scene::shape::ElementShape;
 
 use crate::camera::SceneRect;
 use crate::render::cache::{MeshKey, SceneCache, ShapeKey};
+use crate::render::image_store::{ImageState, ImageStore};
 use crate::render::tessellate::local_center;
 
 /// Coarse-cull margin added to an element's rotated bounds on top of `8 * strokeWidth`, in
@@ -86,6 +88,17 @@ pub enum DrawItem {
     /// Consecutive unrotated texts; `label` marks a placeholder's type label.
     Text(Vec<TextDraw>),
     RotatedText(TextDraw),
+    /// An image element whose file has decoded: one textured quad.
+    Image(ImageDraw),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageDraw {
+    pub element: usize,
+    pub file_id: String,
+    /// The element's own opacity times its frame's opacity (0-1), times
+    /// [`ERASE_PENDING_ALPHA`] while pending erasure.
+    pub alpha: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,6 +128,10 @@ pub struct View<'a> {
     /// Ids not drawn at all (the text currently being edited); a faded or hidden container
     /// still draws normally, only its own label is affected.
     pub hidden: &'a HashSet<String>,
+    /// Decoded image files: an image element draws once its file is ready, draws nothing while
+    /// the decode is running, and falls back to the placeholder when the file is missing or
+    /// broken.
+    pub images: &'a ImageStore,
 }
 
 /// A batch of consecutive same-kind draws waiting to be flushed into a single `DrawItem`, so
@@ -335,6 +352,24 @@ pub fn plan_frame(
             continue;
         }
 
+        if let Element::Image(image) = element
+            && let Some(file_id) = image.file_id.value()
+        {
+            match view.images.request(file_id, file) {
+                ImageState::Ready(_) => {
+                    pending.flush(&mut items);
+                    items.push(DrawItem::Image(ImageDraw {
+                        element: index,
+                        file_id: file_id.clone(),
+                        alpha: element_alpha(element, &frame_opacity, view.faded),
+                    }));
+                    continue;
+                }
+                ImageState::Loading => continue,
+                ImageState::Failed => {}
+            }
+        }
+
         let is_untyped_box = matches!(element, Element::Raw(_) | Element::Image(_));
         let id = element.id().unwrap_or_default();
         let version_bits = element.version().to_bits();
@@ -455,6 +490,7 @@ mod tests {
     use scene::sample;
 
     static EMPTY_IDS: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(HashSet::new);
+    static NO_IMAGES: std::sync::LazyLock<ImageStore> = std::sync::LazyLock::new(ImageStore::new);
 
     fn view() -> View<'static> {
         View {
@@ -467,6 +503,7 @@ mod tests {
             pixel_scale: 1.0,
             faded: &EMPTY_IDS,
             hidden: &EMPTY_IDS,
+            images: &NO_IMAGES,
         }
     }
 
@@ -495,6 +532,7 @@ mod tests {
                 DrawItem::StencilReset => "reset".to_owned(),
                 DrawItem::Text(texts) => format!("text{}", texts.len()),
                 DrawItem::RotatedText(_) => "rotated".to_owned(),
+                DrawItem::Image(_) => "image".to_owned(),
             })
             .collect()
     }
@@ -735,5 +773,104 @@ mod tests {
         // The hole still punches through the arrow (the label is being edited through an
         // overlay drawn on top), but the hidden text element itself produces no `Text` item.
         assert_eq!(kinds(&items), ["isolated1+hole"]);
+    }
+
+    fn image_element(id: &str, file_id: &str) -> serde_json::Value {
+        sample::with(
+            sample::generic("image", id, [0.0, 0.0, 10.0, 10.0]),
+            json!({ "fileId": file_id, "status": "saved", "scale": [1, 1], "crop": null }),
+        )
+    }
+
+    fn one_pixel_png_data_url() -> String {
+        use base64::Engine;
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[255, 0, 0, 255]).unwrap();
+            writer.finish().unwrap();
+        }
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }
+
+    fn image_scene(with_data: bool) -> scene::SceneFile {
+        let mut file = sample::file(vec![
+            sample::generic("rectangle", "before", [20.0, 0.0, 10.0, 10.0]),
+            image_element("img", "f"),
+            sample::generic("rectangle", "after", [40.0, 0.0, 10.0, 10.0]),
+        ]);
+        if with_data {
+            file.add_missing_file(scene::file::FileData {
+                id: "f".to_owned(),
+                mime_type: "image/png".to_owned(),
+                data_url: one_pixel_png_data_url(),
+                created: 1.0,
+                last_retrieved: 0.0,
+            });
+        }
+        file
+    }
+
+    #[test]
+    fn a_decoded_image_is_drawn_between_its_neighbours() {
+        let file = image_scene(true);
+        let store = ImageStore::new();
+        store.preload(&file);
+        let view = View {
+            images: &store,
+            ..view()
+        };
+        let items = plan_frame(&file, &mut SceneCache::new(), &view);
+        assert_eq!(kinds(&items), ["meshes1", "image", "meshes1"]);
+        let DrawItem::Image(draw) = &items[1] else {
+            panic!("image")
+        };
+        assert_eq!(
+            (draw.element, draw.file_id.as_str(), draw.alpha),
+            (1, "f", 1.0)
+        );
+    }
+
+    #[test]
+    fn an_image_draws_nothing_while_it_decodes() {
+        let file = image_scene(true);
+        let store = ImageStore::new();
+        let view = View {
+            images: &store,
+            ..view()
+        };
+        let items = plan_frame(&file, &mut SceneCache::new(), &view);
+        // The two rectangles neighbour each other once the image is skipped.
+        assert_eq!(kinds(&items), ["meshes2"]);
+    }
+
+    #[test]
+    fn a_missing_or_broken_file_draws_the_placeholder() {
+        let missing = image_scene(false);
+        let items = plan_frame(&missing, &mut SceneCache::new(), &view());
+        assert_eq!(kinds(&items), ["meshes2", "text1", "meshes1"]);
+
+        let mut broken = image_scene(false);
+        broken.add_missing_file(scene::file::FileData {
+            id: "f".to_owned(),
+            mime_type: "image/png".to_owned(),
+            data_url: "data:image/png;base64,AAAA".to_owned(),
+            created: 1.0,
+            last_retrieved: 0.0,
+        });
+        let store = ImageStore::new();
+        store.preload(&broken);
+        let view = View {
+            images: &store,
+            ..view()
+        };
+        let items = plan_frame(&broken, &mut SceneCache::new(), &view);
+        assert_eq!(kinds(&items), ["meshes2", "text1", "meshes1"]);
     }
 }
