@@ -8,7 +8,10 @@ use base64::engine::general_purpose::STANDARD;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
-use image::{ExtendedColorType, ImageEncoder, ImageFormat, ImageReader};
+use image::metadata::Orientation;
+use image::{
+    DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader,
+};
 use scene::file::FileData;
 use scene::image::PreparedImage;
 use sha1::{Digest, Sha1};
@@ -56,24 +59,41 @@ fn prepare_with_limit(
     };
     let decode_err = |e: image::ImageError| PrepareError::Decode(e.to_string());
 
-    let (width, height) = ImageReader::with_format(Cursor::new(bytes), format)
-        .into_dimensions()
+    let mut decoder = ImageReader::with_format(Cursor::new(bytes), format)
+        .into_decoder()
         .map_err(decode_err)?;
+    // Stored pixels are always upright, so nothing downstream reads EXIF.
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let (mut width, mut height) = decoder.dimensions();
+    if matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    ) {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let too_large = width.max(height) > MAX_SIDE;
 
-    let (mime, out_bytes, size) = if width.max(height) <= MAX_SIDE {
+    let (mime, out_bytes, size) = if !too_large && orientation == Orientation::NoTransforms {
         (mime_of(format), None, (width, height))
     } else {
-        let scale = f64::from(MAX_SIDE) / f64::from(width.max(height));
-        let scaled = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
-        let (w, h) = if width >= height {
-            (MAX_SIDE, scaled(height))
+        let mut img = DynamicImage::from_decoder(decoder).map_err(decode_err)?;
+        img.apply_orientation(orientation);
+        let (w, h) = if too_large {
+            let scale = f64::from(MAX_SIDE) / f64::from(width.max(height));
+            let scaled = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
+            let dims = if width >= height {
+                (MAX_SIDE, scaled(height))
+            } else {
+                (scaled(width), MAX_SIDE)
+            };
+            img = img.resize_exact(dims.0, dims.1, FilterType::Lanczos3);
+            dims
         } else {
-            (scaled(width), MAX_SIDE)
+            (width, height)
         };
-        let img = ImageReader::with_format(Cursor::new(bytes), format)
-            .decode()
-            .map_err(decode_err)?
-            .resize_exact(w, h, FilterType::Lanczos3);
         let mut out = Vec::new();
         let mime = if format == ImageFormat::Jpeg {
             let rgb = img.to_rgb8();
@@ -234,5 +254,72 @@ mod tests {
             Err(PrepareError::TooBig)
         );
         assert!(prepare_with_limit(&bytes, 0.0, bytes.len()).is_ok());
+    }
+
+    /// A JPEG whose APP1 Exif segment says Orientation = 6 (rotate 90 CW to display).
+    fn jpeg_with_orientation_6(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([200, 40, 40]));
+        let mut jpeg = Vec::new();
+        JpegEncoder::new(&mut jpeg)
+            .write_image(img.as_raw(), width, height, ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut tiff = b"MM\0\x2a\0\0\0\x08".to_vec();
+        tiff.extend([0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]);
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend(tiff);
+        let mut out = vec![0xff, 0xd8, 0xff, 0xe1];
+        out.extend(((payload.len() + 2) as u16).to_be_bytes());
+        out.extend(payload);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
+    fn decoded_size(data_url: &str) -> (u32, u32) {
+        let b64 = data_url.split_once(',').unwrap().1;
+        let bytes = STANDARD.decode(b64).unwrap();
+        let img = image::load_from_memory(&bytes).unwrap();
+        (img.width(), img.height())
+    }
+
+    #[test]
+    fn exif_orientation_is_baked_into_the_stored_pixels() {
+        let bytes = jpeg_with_orientation_6(120, 80);
+        let prepared = prepare(&bytes, 0.0).unwrap();
+        assert_eq!(prepared.natural_size, [80.0, 120.0]);
+        assert_eq!(prepared.file.mime_type, "image/jpeg");
+        assert_eq!(prepared.file.id, file_id(&bytes));
+        assert_eq!(decoded_size(&prepared.file.data_url), (80, 120));
+    }
+
+    #[test]
+    fn a_large_rotated_jpeg_is_upright_and_downsized() {
+        let prepared = prepare(&jpeg_with_orientation_6(3000, 1500), 0.0).unwrap();
+        assert_eq!(prepared.natural_size, [720.0, 1440.0]);
+        assert_eq!(decoded_size(&prepared.file.data_url), (720, 1440));
+    }
+
+    #[test]
+    fn a_large_gif_becomes_a_png() {
+        let img = image::RgbaImage::from_pixel(2000, 1000, image::Rgba([1, 2, 3, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut bytes)
+            .encode(img.as_raw(), 2000, 1000, ExtendedColorType::Rgba8)
+            .unwrap();
+        let prepared = prepare(&bytes, 0.0).unwrap();
+        assert_eq!(prepared.natural_size, [1440.0, 720.0]);
+        assert_eq!(prepared.file.mime_type, "image/png");
+        assert!(prepared.file.data_url.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn a_large_webp_becomes_a_png() {
+        let img = image::RgbaImage::from_pixel(1000, 2000, image::Rgba([1, 2, 3, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+            .write_image(img.as_raw(), 1000, 2000, ExtendedColorType::Rgba8)
+            .unwrap();
+        let prepared = prepare(&bytes, 0.0).unwrap();
+        assert_eq!(prepared.natural_size, [720.0, 1440.0]);
+        assert_eq!(prepared.file.mime_type, "image/png");
     }
 }
