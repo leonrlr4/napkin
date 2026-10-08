@@ -434,6 +434,36 @@ fn dragging_the_rotation_handle_rotates_in_one_undo_step() {
 }
 
 #[test]
+fn clicking_the_rotation_handle_without_moving_changes_nothing() {
+    let mut e = editor(vec![solid("r", [0.0, 0.0, 100.0, 50.0])]);
+    click(&mut e, at(50.0, 25.0));
+    // 3 px off the handle's vertical center line, still on the handle.
+    click(&mut e, at(53.0, -20.0));
+    assert_eq!(element(&e, "r").placement().unwrap().angle, 0.0);
+    assert!(!e.command(Command::Undo));
+}
+
+#[test]
+fn rotating_a_group_hides_its_box_and_handles_until_release() {
+    let mut e = editor(vec![
+        solid("a", [0.0, 0.0, 40.0, 20.0]),
+        solid("b", [60.0, 0.0, 40.0, 20.0]),
+    ]);
+    e.command(Command::SelectAll);
+    let before = e.overlay(1.0);
+    assert!(before.selection_box.is_some() && before.rotation_handle.is_some());
+    assert!(!before.handles.is_empty());
+    e.pointer_down(at(50.0, -22.0), &mut CharWidthMeasure);
+    e.pointer_move(at(100.0, 10.0), &mut CharWidthMeasure);
+    let during = e.overlay(1.0);
+    assert!(during.selection_box.is_none() && during.rotation_handle.is_none());
+    assert!(during.handles.is_empty());
+    e.pointer_up(at(100.0, 10.0), &mut CharWidthMeasure);
+    let after = e.overlay(1.0);
+    assert!(after.selection_box.is_some() && after.rotation_handle.is_some());
+}
+
+#[test]
 fn shift_while_rotating_snaps_to_fifteen_degrees() {
     let mut e = editor(vec![solid("r", [0.0, 0.0, 100.0, 50.0])]);
     click(&mut e, at(50.0, 25.0));

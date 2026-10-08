@@ -630,7 +630,8 @@ impl<E: Env> Editor<E> {
             }
         }
 
-        let selection_box = if positions.len() >= 2 {
+        let hide_transform_ui = select::is_rotating_group(&self.select_gesture);
+        let selection_box = if positions.len() >= 2 && !hide_transform_ui {
             selection::selected_bounds(&mut self.geometry, &self.file, &self.selection)
                 .map(|[x1, y1, x2, y2]| [x1 - pad, y1 - pad, x2 + pad, y2 + pad])
         } else {
@@ -639,12 +640,16 @@ impl<E: Env> Editor<E> {
 
         let selection_handles =
             transform::selection_handles(&mut self.geometry, &self.file, &self.selection, zoom);
-        let handles = selection_handles
-            .resize
-            .into_iter()
-            .map(|(_, bounds)| bounds)
-            .collect();
-        let rotation_handle = selection_handles.rotation;
+        let handles = if hide_transform_ui {
+            Vec::new()
+        } else {
+            selection_handles
+                .resize
+                .into_iter()
+                .map(|(_, bounds)| bounds)
+                .collect()
+        };
+        let rotation_handle = selection_handles.rotation.filter(|_| !hide_transform_ui);
 
         let points = match single {
             Some(position) if select::is_plain_linear(&self.file.elements[position]) => {

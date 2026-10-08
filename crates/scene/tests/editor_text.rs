@@ -355,3 +355,20 @@ fn double_click_on_text_inside_a_bigger_transparent_rectangle_edits_the_text() {
     assert_eq!(editing.element_id.as_deref(), Some("t"));
     assert_eq!(editing.text, "hello\nworld");
 }
+
+#[test]
+fn editing_a_rotated_text_keeps_its_left_edge_in_the_rotated_frame() {
+    let mut e = editor(vec![sample::with(
+        sample::text("t", [0.0, 0.0, 24.0, 25.0], "hi", None),
+        json!({"angle": std::f64::consts::FRAC_PI_2}),
+    )]);
+    assert!(e.double_click(at(12.0, 12.0), &mut CharWidthMeasure));
+    assert!(e.commit_text("hello world", &mut CharWidthMeasure));
+    // The top-left corner stays at (24.5, 0.5) once turned a quarter around the box center.
+    let [x, y, w, h] = rect_of(&e, "t");
+    assert_eq!([w, h], [132.0, 25.0]);
+    assert!(
+        (x + 54.0).abs() < 1e-9 && (y - 54.0).abs() < 1e-9,
+        "{x} {y}"
+    );
+}

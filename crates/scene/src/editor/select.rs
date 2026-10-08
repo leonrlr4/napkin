@@ -78,6 +78,9 @@ pub(super) struct RotateState {
     /// The pivot, fixed at pointer-down: a single element's center, or the center of the
     /// common bounds of a multi-selection.
     center: [f64; 2],
+    /// Whether a pointer move has been applied. Excalidraw rotates only from pointer-move, so
+    /// releasing without moving leaves the angle (and history) untouched.
+    moved: bool,
 }
 
 pub(super) struct PointDragState {
@@ -209,6 +212,7 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
                 selection_before: editor.selection.clone(),
                 targets,
                 center,
+                moved: false,
             });
             return;
         }
@@ -308,8 +312,9 @@ pub(super) fn pointer_move(
             apply_resize_move(editor, &state, event, measure);
             Gesture::Resize(state)
         }
-        Gesture::Rotate(state) => {
+        Gesture::Rotate(mut state) => {
             apply_rotate_move(editor, &state, event);
+            state.moved = true;
             Gesture::Rotate(state)
         }
         Gesture::PointDrag(state) => {
@@ -367,7 +372,7 @@ pub(super) fn finish_gesture(
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::Rotate(state) => {
-            if let Some((event, _)) = release {
+            if let Some((event, _)) = release.filter(|_| state.moved) {
                 apply_rotate_move(editor, &state, event);
             }
             editor.finish_edit(&state.start, &state.selection_before);
@@ -442,6 +447,13 @@ fn apply_resize_move(
 /// The pivot of a rotation of `targets`: a single element's own center (absolute coords), the
 /// center of the common bounds otherwise. The rotation handle only exists for a selection of
 /// rotatable elements, so the fallback is never taken from the UI.
+/// Whether a rotation of two or more elements is in progress. Excalidraw hides the selection
+/// box and the transform handles of a multi-selection while it is rotating
+/// (`appState.isRotating` in `renderSelectionElement`'s caller).
+pub(super) fn is_rotating_group(gesture: &Gesture) -> bool {
+    matches!(gesture, Gesture::Rotate(state) if state.targets.len() >= 2)
+}
+
 fn rotation_center(editor: &mut Editor<impl Env>, targets: &[usize]) -> [f64; 2] {
     if let [only] = targets
         && let Some((_, center)) = editor

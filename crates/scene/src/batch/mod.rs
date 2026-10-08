@@ -693,6 +693,23 @@ fn apply_text_update(
             Element::Text(t) if t.auto_resize == Some(false) => Some(t.base.width),
             _ => None,
         };
+        if fixed_width.is_none()
+            && let Element::Text(t) = &mut next.elements[index]
+        {
+            let line_height = t
+                .line_height
+                .unwrap_or_else(|| crate::text::line_height(t.font_family));
+            let size = measure_text(
+                &normalize_text(text_value),
+                t.font_family,
+                t.font_size,
+                line_height,
+                measure,
+            );
+            let [x, y] = crate::text::adjusted_origin(t, size, measure);
+            t.base.x = x;
+            t.base.y = y;
+        }
         update_label_text_fields(&mut next.elements[index], text_value, measure);
         if let Some(width) = fixed_width {
             if let Element::Text(t) = &mut next.elements[index] {

@@ -4,8 +4,8 @@
 //! `rescalePoints`, all at the pinned commit; a resized
 //! container's label is placed with [`crate::bound_text`]).
 //!
-//! napkin only ever draws and hit-tests the four corner squares: it never renders the
-//! `n`/`s`/`e`/`w` edge squares Excalidraw shows above a size threshold, and rather than
+//! napkin draws and hit-tests the four corner squares and the rotation handle: it never renders
+//! the `n`/`s`/`e`/`w` edge squares Excalidraw shows above a size threshold, and rather than
 //! porting the slash/backslash corner omission for a two-point line or arrow, it shows no
 //! corner handles at all for that case. Resizing from an edge still works everywhere else
 //! through the line-proximity test in [`handle_at`], which mirrors `resizeTest`'s fallback
@@ -523,10 +523,8 @@ fn resize_anchor(handle: HandleKind, keep_aspect_ratio: bool, from_center: bool)
     }
 }
 
-/// `getResizedOrigin`. The trigonometric terms are kept exactly as JS writes them even though
-/// every caller in this task only ever passes `angle: 0.0` (see [`resize_element`]'s doc
-/// comment): at that angle `cos(angle) == 1.0` and `sin(angle) == 0.0` collapse each branch to
-/// the same value a angle-free version would compute.
+/// `getResizedOrigin`: the new top-left after resizing from `handle`, keeping the opposite
+/// anchor fixed in the element's own rotated frame.
 fn get_resized_origin(
     prev_origin: [f64; 2],
     prev_size: [f64; 2],
