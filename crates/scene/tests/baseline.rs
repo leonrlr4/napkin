@@ -8,7 +8,7 @@ use scene::batch::add_elements;
 use scene::color::{apply_dark_mode_filter, is_transparent};
 use scene::duplicate::{DuplicateMode, duplicate_elements};
 use scene::editor::{ArrowType, EdgeStyle, ItemStyle};
-use scene::element::{Element, Roundness, StrokeOptions};
+use scene::element::{Element, LinearEnd, Roundness, StrokeOptions};
 use scene::env::Env;
 use scene::fractional_index::{
     generate_key_between, generate_n_keys_between, sync_invalid_indices, sync_moved_indices,
@@ -739,6 +739,16 @@ fn transform() {
                         }
                         _ => {}
                     }
+                    if e.kind() == "arrow" {
+                        out["startBinding"] = json!(e.binding_target(LinearEnd::Start));
+                        out["endBinding"] = json!(e.binding_target(LinearEnd::End));
+                    }
+                    out["boundElements"] = json!(
+                        e.bound_elements()
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    );
                     out
                 })
                 .collect(),

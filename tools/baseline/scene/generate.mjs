@@ -294,7 +294,7 @@ writeGroup(
   })),
 );
 
-/** `[{id, x, y, width, height, angle, points?, fontSize?, text?}]` for every element. */
+/** `[{id, x, y, width, height, angle, boundElements, points?, fontSize?, text?, startBinding?, endBinding?}]` for every element. */
 function transformOutput(elements) {
   return elements.map((el) => ({
     id: el.id,
@@ -305,6 +305,10 @@ function transformOutput(elements) {
     angle: el.angle,
     ...(el.points ? { points: el.points.map((p) => [p[0], p[1]]) } : {}),
     ...(el.type === "text" ? { fontSize: el.fontSize, text: el.text } : {}),
+    ...(el.type === "arrow"
+      ? { startBinding: el.startBinding?.elementId ?? null, endBinding: el.endBinding?.elementId ?? null }
+      : {}),
+    boundElements: (el.boundElements ?? []).map((b) => b.id),
   }));
 }
 

@@ -1031,11 +1031,11 @@ pub fn rotate_elements(
         return changed;
     }
 
-    let mut centre_angle = 5.0 * std::f64::consts::PI / 2.0
+    let mut center_angle = 5.0 * std::f64::consts::PI / 2.0
         + rough::js::atan2(pointer[1] - center[1], pointer[0] - center[0]);
     if discrete {
-        centre_angle += SHIFT_LOCKING_ANGLE / 2.0;
-        centre_angle -= centre_angle % SHIFT_LOCKING_ANGLE;
+        center_angle += SHIFT_LOCKING_ANGLE / 2.0;
+        center_angle -= center_angle % SHIFT_LOCKING_ANGLE;
     }
     let rotated_ids: HashSet<&str> = targets
         .iter()
@@ -1055,12 +1055,10 @@ pub fn rotate_elements(
         };
         let cx = (bounds[0] + bounds[2]) / 2.0;
         let cy = (bounds[1] + bounds[3]) / 2.0;
-        let [rotated_cx, rotated_cy] = rotate_point(
-            [cx, cy],
-            center,
-            centre_angle + placement.angle - placement.angle,
-        );
-        let angle = normalize_radians(centre_angle + placement.angle);
+        // JS rotates by `centerAngle + origAngle - element.angle`; recomputing from `start`
+        // makes the last two terms cancel.
+        let [rotated_cx, rotated_cy] = rotate_point([cx, cy], center, center_angle);
+        let angle = normalize_radians(center_angle + placement.angle);
 
         let before = file.elements[position].clone();
         file.elements[position].set_position(

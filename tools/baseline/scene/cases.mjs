@@ -584,7 +584,7 @@ const pair = (angle) => [
  * [name, elements, ids, handle, pointer, center, {shift, fromCenter, keepAspect}] for the
  * transform group. `ids` are the selected elements (bound text is never selected). `center` is
  * the common-bounds center a multi-element rotation turns around (ignored otherwise). `handle`
- * is "rotation" or a resize direction. Output: `[{id, x, y, width, height, angle, points?,
+ * is "rotation" or a resize direction. Output: `[{id, x, y, width, height, angle, boundElements, startBinding?, endBinding?, points?,
  * fontSize?, text?}]` for every element, in input order.
  */
 const NONE = { shift: false, fromCenter: false, keepAspect: false };
@@ -627,3 +627,20 @@ export const transformCases = [
   ["resizeRotated_line_se", [rotatedLine], ["a"], "se", dragged(rotatedLine, "se", [30, 20]), [0, 0], NONE],
   ["resizeMultiRotated_se", pair(0.4), ["a", "b"], "se", [150, 110], [0, 0], NONE],
 ];
+
+/** Shapes `s` (left) and `u` (right) with arrow `w` bound from `s` to `u`. */
+function boundArrowScene() {
+  const binding = (elementId) => ({ elementId, focus: 0, gap: 4 });
+  return [
+    element("rectangle", { id: "s", x: 0, y: 0, width: 60, height: 40, boundElements: [{ id: "w", type: "arrow" }] }),
+    element("rectangle", { id: "u", x: 200, y: 0, width: 60, height: 40, boundElements: [{ id: "w", type: "arrow" }] }),
+    linear("arrow", [[0, 0], [136, 0]], {
+      id: "w", x: 64, y: 20, startBinding: binding("s"), endBinding: binding("u"),
+    }),
+  ];
+}
+
+transformCases.push(
+  ["rotateBoundArrowAlone", boundArrowScene(), ["w"], "rotation", [130, 90], [132, 20], NONE],
+  ["rotateArrowWithItsStartTarget", boundArrowScene(), ["s", "w"], "rotation", [130, 90], [132, 20], NONE],
+);
