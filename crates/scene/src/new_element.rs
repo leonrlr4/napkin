@@ -6,8 +6,8 @@
 use serde_json::{Map, Value, json};
 
 use crate::element::{
-    Element, ElementBase, FreedrawElement, GenericElement, LinearElement, Roundness, StrokeOptions,
-    TextElement,
+    Element, ElementBase, FreedrawElement, GenericElement, ImageElement, LinearElement, Roundness,
+    StrokeOptions, TextElement,
 };
 use crate::env::{Env, random_id, random_integer};
 use crate::json::Slot;
@@ -267,6 +267,29 @@ pub fn new_text_element(
     })
 }
 
+/// `newImageElement`'s type-specific options; the shared ones are in `ElementProps`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ImageProps {
+    pub file_id: Option<String>,
+    pub status: Option<String>,
+    pub scale: Option<[f64; 2]>,
+}
+
+/// `newImageElement`. `strokeColor` is always `"transparent"` whatever `props` says; `status`
+/// defaults to `"pending"`, `fileId` to `null`, `scale` to `[1, 1]` and `crop` to `null`.
+pub fn new_image_element(props: ElementProps, image: ImageProps, env: &mut impl Env) -> Element {
+    let (mut base, extra) = new_base("image", props, env);
+    base.stroke_color = "transparent".into();
+    Element::Image(ImageElement {
+        base,
+        file_id: image.file_id.map_or(Slot::Null, Slot::Value),
+        status: image.status.unwrap_or_else(|| "pending".to_owned()),
+        scale: image.scale.unwrap_or([1.0, 1.0]),
+        crop: Slot::Null,
+        extra,
+    })
+}
+
 /// `bumpVersion`: every modification increments `version`, redraws `versionNonce` and
 /// stamps `updated` (spec §5.3).
 pub fn bump_version(element: &mut Element, env: &mut impl Env) {
@@ -337,6 +360,15 @@ mod tests {
         assert_eq!(base.version, version_before + 1.0);
         assert_eq!(base.version_nonce, expected_nonce);
         assert_eq!(element.to_value()["updated"], json!(expected_now));
+    }
+
+    #[test]
+    fn new_image_element_round_trips_through_json() {
+        let mut env = TestEnv { now: 100.0 };
+        let element = new_image_element(ElementProps::default(), ImageProps::default(), &mut env);
+        let reloaded = Element::from_value(element.to_value());
+        assert_eq!(reloaded, element);
+        assert!(matches!(reloaded, Element::Image(_)));
     }
 
     #[test]

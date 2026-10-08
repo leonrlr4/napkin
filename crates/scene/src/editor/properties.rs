@@ -185,8 +185,8 @@ fn is_text(kind: &str) -> bool {
     kind == "text"
 }
 
-/// Any of napkin's seven typed kinds; `false` for a `Raw` element's kind string (an image, a
-/// frame, ...).
+/// The seven kinds with property panel entries; `false` for an image and for a `Raw`
+/// element's kind string (a frame, ...).
 fn is_typed_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -644,7 +644,12 @@ fn rewrap_label(
     }
 }
 
+/// Runs `f` on a styleable element's `ElementBase`. An image (like `Raw`) has no property
+/// panel entry, so a property change leaves it untouched.
 fn mutate_base(element: &mut Element, f: impl FnOnce(&mut ElementBase)) -> bool {
+    if matches!(element, Element::Image(_)) {
+        return false;
+    }
     match element.base_mut() {
         Some(base) => {
             f(base);

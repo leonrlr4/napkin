@@ -426,8 +426,14 @@ fn apply_resize_move(
     measure: &mut dyn TextMeasure,
 ) {
     let pointer = [event.at[0] - state.offset[0], event.at[1] - state.offset[1]];
+    // `proportionalByDefault`: a selection with an image keeps its aspect ratio unless Shift
+    // is held.
+    let has_image = state
+        .targets
+        .iter()
+        .any(|&i| matches!(state.start.elements[i], Element::Image(_)));
     let options = transform::ResizeOptions {
-        keep_aspect_ratio: event.modifiers.shift,
+        keep_aspect_ratio: event.modifiers.shift != has_image,
         from_center: event.modifiers.alt,
     };
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);

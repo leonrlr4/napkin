@@ -149,6 +149,6 @@ pub fn generate_rough_options(
             Some(options)
         }
         Element::Arrow(_) => Some(options),
-        Element::Text(_) | Element::Raw(_) => None,
+        Element::Text(_) | Element::Image(_) | Element::Raw(_) => None,
     }
 }

@@ -11,7 +11,7 @@
 //! drawables become paths the way roughjs's `RoughSVG.draw` writes them. It is a preview,
 //! not a port: frames do not clip, arrow labels stay at their stored position, text uses
 //! the bundled fonts with Excalifont's metrics for unknown families, and element types
-//! `scene` loads as `Raw` (image, frame, sticky note, ...) are drawn as a dashed box with
+//! `scene` loads as `Raw` or `Image` (image, frame, sticky note, ...) are drawn as a dashed box with
 //! the type name, as spec §1.2 plans for M3.
 
 use std::collections::HashSet;
@@ -118,6 +118,7 @@ impl Placement {
             Element::Line(l) | Element::Arrow(l) => Placement::from_points(&l.base, &l.points),
             Element::Freedraw(f) => Placement::from_points(&f.base, &f.points),
             Element::Text(t) => Placement::from_base(&t.base),
+            Element::Image(i) => Placement::from_base(&i.base),
             Element::Raw(v) => {
                 let n = |key: &str| v.get(key).and_then(Value::as_f64);
                 Placement {
@@ -242,6 +243,7 @@ fn render(file: &SceneFile, dark: bool) -> String {
                 text(&mut body, t, &font, dark);
                 body.push_str("</g>\n");
             }
+            Element::Image(_) => placeholder_box(&mut body, &transform, placement, "image"),
             Element::Raw(v) => {
                 let kind = v.get("type").and_then(Value::as_str).unwrap_or("unknown");
                 placeholder_box(&mut body, &transform, placement, kind);

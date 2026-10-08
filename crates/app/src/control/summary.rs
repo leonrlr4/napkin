@@ -113,13 +113,19 @@ fn element_line(file: &SceneFile, element: &Element) -> String {
         push_field(&mut line, "text", json_string(&text));
     }
 
-    if let Some(stroke) = value.get("strokeColor").and_then(Value::as_str)
+    // An image's stroke and background are always `transparent`; its file id says nothing
+    // a reader can use.
+    let is_image = matches!(element, Element::Image(_));
+
+    if !is_image
+        && let Some(stroke) = value.get("strokeColor").and_then(Value::as_str)
         && stroke != "#1e1e1e"
     {
         push_field(&mut line, "stroke", stroke);
     }
 
-    if let Some(bg) = value.get("backgroundColor").and_then(Value::as_str)
+    if !is_image
+        && let Some(bg) = value.get("backgroundColor").and_then(Value::as_str)
         && bg != "transparent"
     {
         push_field(&mut line, "bg", bg);
@@ -234,6 +240,20 @@ mod tests {
                 r##"a arrow 165 35 100 0 stroke=#e03131 start=r points=[[0,0],[100,0]]"##,
                 r##"free text 0 100 80 25 text="note\nline""##,
             ]
+        );
+    }
+
+    #[test]
+    fn an_image_line_has_only_type_placement_and_angle() {
+        let file = sample::file(vec![sample::with(
+            sample::generic("rectangle", "pic", [10.0, 20.0, 300.0, 200.0]),
+            json!({"type": "image", "strokeColor": "transparent", "status": "saved",
+                   "fileId": "secret", "scale": [1, 1], "crop": null, "angle": 0.5}),
+        )]);
+        assert!(matches!(file.elements[0], Element::Image(_)));
+        assert_eq!(
+            element_lines(&file, &[0]),
+            vec!["pic image 10 20 300 200 angle=0.5"]
         );
     }
 

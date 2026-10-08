@@ -321,6 +321,11 @@ export const newElementCalls = [
   ["text/container", "newTextElement", {
     type: "text", id: "t5", seed: 17, x: 0, y: 0, text: "label", containerId: "r1", lineHeight: 1.5, fontFamily: 7,
   }],
+  ["image/defaults", "newImageElement", { type: "image", id: "i1", seed: 19, x: 10, y: 20, width: 300, height: 200 }],
+  ["image/attached", "newImageElement", {
+    type: "image", id: "i2", seed: 20, x: 0, y: 0, width: 64, height: 48, strokeColor: "#e03131", opacity: 80,
+    fileId: "abc123", status: "saved", scale: [-1, 1],
+  }],
   ["text/unknownFamily", "newTextElement", { type: "text", id: "t6", seed: 18, x: 0, y: 0, text: "?", fontFamily: 42 }],
 ];
 
@@ -571,6 +576,11 @@ function dragged(el, handle, [dx, dy] = [12, 9]) {
   const sy = handle.includes("n") ? -1 : 1;
   return aroundCenter(el, [el.x + fx * el.width + sx * dx, el.y + fy * el.height + sy * dy]);
 }
+const pic = (overrides = {}) =>
+  element("image", {
+    id: "a", x: 100, y: 100, width: 200, height: 100, strokeColor: "transparent",
+    status: "saved", fileId: "f1", scale: [1, 1], crop: null, ...overrides,
+  });
 const rotatedRect = resizeRect(0.6);
 const rotatedLabeled = labeledAt("rectangle", [100, 100, 200, 100], "hello world", 0.5);
 const rotatedText = plainText("a", 100, 100, "hello world", { angle: 0.5 });
@@ -626,6 +636,13 @@ export const transformCases = [
   ["resizeRotated_labeled_e", rotatedLabeled, ["c"], "e", dragged(rotatedLabeled[0], "e", [60, 0]), [0, 0], NONE],
   ["resizeRotated_line_se", [rotatedLine], ["a"], "se", dragged(rotatedLine, "se", [30, 20]), [0, 0], NONE],
   ["resizeMultiRotated_se", pair(0.4), ["a", "b"], "se", [150, 110], [0, 0], NONE],
+  ["resizeImage_se", [pic()], ["a"], "se", [340, 230], [0, 0], NONE],
+  ["resizeImage_se_keepAspect", [pic()], ["a"], "se", [340, 230], [0, 0], { ...NONE, keepAspect: true }],
+  ["resizeImage_se_flipBoth", [pic()], ["a"], "se", [60, 40], [0, 0], NONE],
+  ["resizeImage_e_flipX", [pic()], ["a"], "e", [40, 150], [0, 0], NONE],
+  ["resizeImage_flipped_e_flipBack", [pic({ scale: [-1, 1] })], ["a"], "e", [40, 150], [0, 0], NONE],
+  ["resizeImage_flipped_e_stays", [pic({ scale: [-1, 1] })], ["a"], "e", [250, 150], [0, 0], NONE],
+  ["resizeImage_rotated_se", [pic({ angle: 0.6 })], ["a"], "se", aroundCenter(pic({ id: "x", angle: 0.6 }), [330, 220], 0.6), [0, 0], NONE],
 ];
 
 /** Shapes `s` (left) and `u` (right) with arrow `w` bound from `s` to `u`. */

@@ -42,6 +42,16 @@ pub struct NapkinView {
     pub zoom: f64,
 }
 
+/// One entry of the document's `files` map (`BinaryFileData`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileData {
+    pub id: String,
+    pub mime_type: String,
+    pub data_url: String,
+    pub created: f64,
+    pub last_retrieved: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneFile {
     /// Every top-level key in file order. `elements` and `appState` hold `null` while the
@@ -125,6 +135,56 @@ impl SceneFile {
         serde_json::to_string_pretty(&value).expect("JSON values serialize")
     }
 
+    /// `files[id]`'s `dataURL` and `mimeType`; `None` when the entry or either string is
+    /// missing. `created` and `lastRetrieved` read as 0 when absent.
+    pub fn file_data(&self, id: &str) -> Option<FileData> {
+        let entry = self.root.get("files")?.get(id)?;
+        Some(FileData {
+            id: id.to_owned(),
+            mime_type: entry.get("mimeType")?.as_str()?.to_owned(),
+            data_url: entry.get("dataURL")?.as_str()?.to_owned(),
+            created: entry.get("created").and_then(Value::as_f64).unwrap_or(0.0),
+            last_retrieved: entry
+                .get("lastRetrieved")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+        })
+    }
+
+    /// `addMissingFiles`: stores `data` under `files[data.id]` unless an entry with a
+    /// `dataURL` is already there. Returns whether it stored one.
+    pub fn add_missing_file(&mut self, data: FileData) -> bool {
+        let has_data = self
+            .root
+            .get("files")
+            .and_then(|files| files.get(&data.id))
+            .is_some_and(|entry| entry.get("dataURL").is_some_and(Value::is_string));
+        if has_data {
+            return false;
+        }
+        let files = self
+            .root
+            .entry("files")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !files.is_object() {
+            *files = Value::Object(Map::new());
+        }
+        files
+            .as_object_mut()
+            .expect("normalized to an object above")
+            .insert(
+                data.id.clone(),
+                json!({
+                    "mimeType": data.mime_type,
+                    "id": data.id,
+                    "dataURL": data.data_url,
+                    "created": data.created,
+                    "lastRetrieved": data.last_retrieved,
+                }),
+            );
+        true
+    }
+
     pub fn view_background_color(&self) -> &str {
         self.app_state
             .get("viewBackgroundColor")
@@ -171,6 +231,34 @@ mod tests {
         let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
         assert!(semantic_eq(&written, &serde_json::from_str(text).unwrap()));
         assert_eq!(file.view_background_color(), "#fffce8");
+    }
+
+    #[test]
+    fn files_are_read_and_added_without_overwriting() {
+        let mut file = SceneFile::new();
+        let data = FileData {
+            id: "f1".into(),
+            mime_type: "image/png".into(),
+            data_url: "data:image/png;base64,AAAA".into(),
+            created: 1.0,
+            last_retrieved: 1.0,
+        };
+        assert!(file.add_missing_file(data.clone()));
+        assert!(!file.add_missing_file(FileData {
+            data_url: "data:image/png;base64,BBBB".into(),
+            ..data
+        }));
+        assert_eq!(
+            file.file_data("f1").unwrap().data_url,
+            "data:image/png;base64,AAAA"
+        );
+        let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
+        assert_eq!(written["files"]["f1"]["mimeType"], json!("image/png"));
+        assert_eq!(written["files"]["f1"]["id"], json!("f1"));
+        assert!(semantic_eq(
+            &written["files"]["f1"]["lastRetrieved"],
+            &json!(1.0)
+        ));
     }
 
     #[test]

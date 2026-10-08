@@ -93,7 +93,7 @@ fn geometry_exceeds_bound(element: &Element) -> bool {
         Element::Rectangle(g) | Element::Diamond(g) | Element::Ellipse(g) => &g.base,
         Element::Line(l) | Element::Arrow(l) => &l.base,
         Element::Freedraw(f) => &f.base,
-        Element::Text(_) | Element::Raw(_) => return false,
+        Element::Text(_) | Element::Image(_) | Element::Raw(_) => return false,
     };
     if base_exceeds_geometry_bound(base) {
         return true;
@@ -155,12 +155,12 @@ pub fn generate_element_shape(element: &Element, ctx: &ShapeContext) -> ElementS
         )),
         Element::Freedraw(f) => freedraw::shape(&generator, element, f, ctx.dark_mode),
         // `stickynote`/`frame`/`magicframe`/`text`/`image` all return `null` in the JS;
-        // napkin has no typed stickynote/frame/magicframe/image element, so those load as
+        // napkin has no typed stickynote/frame/magicframe element, so those load as
         // `Element::Raw` and land here too. `iframe`/`embeddable` also load as `Raw` here,
         // but JS draws a rough rectangle for them, not `null`: napkin instead draws the
         // dashed placeholder box spec §1.2 uses for every `Raw` element, so on screen they
         // look different from excalidraw.com by design (spec §1.2's table).
-        Element::Text(_) | Element::Raw(_) => ElementShape::None,
+        Element::Text(_) | Element::Image(_) | Element::Raw(_) => ElementShape::None,
     }
 }
 

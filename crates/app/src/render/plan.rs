@@ -335,11 +335,11 @@ pub fn plan_frame(
             continue;
         }
 
-        let is_raw = matches!(element, Element::Raw(_));
+        let is_untyped_box = matches!(element, Element::Raw(_) | Element::Image(_));
         let id = element.id().unwrap_or_default();
         let version_bits = element.version().to_bits();
         let version_nonce_bits = element.version_nonce().to_bits();
-        let is_placeholder = if is_raw {
+        let is_placeholder = if is_untyped_box {
             true
         } else {
             let key = ShapeKey {

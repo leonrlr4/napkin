@@ -447,6 +447,7 @@ fn apply_update(
         Element::Text(_) => apply_text_update(next, pos, index, set, measure, env),
         Element::Line(_) | Element::Arrow(_) => apply_linear_update(next, pos, index, set, env),
         Element::Freedraw(_) => apply_freedraw_update(next, pos, index, set, env),
+        Element::Image(_) => apply_image_update(next, pos, index, set, env),
         Element::Raw(_) => apply_raw_update(next, pos, index, set, env),
     }
 }
@@ -856,6 +857,65 @@ fn apply_freedraw_update(
     Ok(())
 }
 
+/// `x`, `y`, `width` (>0) and `height` (>0) for an image; anything else errors. `width` and
+/// `height` are set as given, without keeping the aspect ratio.
+fn apply_image_update(
+    next: &mut SceneFile,
+    pos: usize,
+    index: usize,
+    set: &Map<String, Value>,
+    env: &mut impl Env,
+) -> Result<(), OpError> {
+    let id = next.elements[index].id().unwrap_or_default().to_owned();
+    let mut new_x = None;
+    let mut new_y = None;
+    let mut new_width = None;
+    let mut new_height = None;
+    for (key, v) in set {
+        match key.as_str() {
+            "x" => new_x = Some(validate::finite(v).map_err(|m| op_err(pos, Some("set.x"), m))?),
+            "y" => new_y = Some(validate::finite(v).map_err(|m| op_err(pos, Some("set.y"), m))?),
+            "width" => {
+                new_width =
+                    Some(validate::positive(v).map_err(|m| op_err(pos, Some("set.width"), m))?);
+            }
+            "height" => {
+                new_height =
+                    Some(validate::positive(v).map_err(|m| op_err(pos, Some("set.height"), m))?);
+            }
+            other => {
+                return Err(op_err(
+                    pos,
+                    Some(&format!("set.{other}")),
+                    format!("{id} is an image napkin can only move and resize"),
+                ));
+            }
+        }
+    }
+    let before = next.elements[index].clone();
+    if let Some(base) = next.elements[index].base_mut() {
+        if let Some(x) = new_x {
+            base.x = x;
+        }
+        if let Some(y) = new_y {
+            base.y = y;
+        }
+        if let Some(w) = new_width {
+            base.width = w;
+        }
+        if let Some(h) = new_height {
+            base.height = h;
+        }
+    }
+    if next.elements[index].placement() != before.placement() {
+        refresh_bound_arrow_fixed_points(next, index, env);
+    }
+    if next.elements[index] != before {
+        bump_if_not_bumped(&mut next.elements[index], before.version(), env);
+    }
+    Ok(())
+}
+
 /// `x`, `y` for a `Raw` element (spec §5.2); anything else errors.
 fn apply_raw_update(
     next: &mut SceneFile,
@@ -1060,6 +1120,42 @@ mod tests {
             apply(&file, json!({"ops": []})).is_err(),
             "an empty batch is an error"
         );
+    }
+
+    #[test]
+    fn a_typed_image_takes_position_and_size_but_no_style() {
+        let image = sample::with(
+            sample::generic("rectangle", "pic", [0.0, 0.0, 200.0, 100.0]),
+            json!({"type": "image", "strokeColor": "transparent", "status": "saved",
+                   "fileId": "f1", "scale": [1, 1], "crop": null}),
+        );
+        let file = sample::file(vec![image]);
+        assert!(matches!(get(&file, "pic"), Element::Image(_)));
+
+        let (next, report) = apply(
+            &file,
+            json!({"ops": [
+                {"op": "update", "id": "pic", "set": {"x": 10, "y": 20, "width": 50, "height": 25}},
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(report.updated, vec!["pic"]);
+        let p = get(&next, "pic").placement().unwrap();
+        assert_eq!((p.x, p.y, p.width, p.height), (10.0, 20.0, 50.0, 25.0));
+        assert_eq!(
+            get(&next, "pic").version(),
+            get(&file, "pic").version() + 1.0
+        );
+
+        let errors = apply(
+            &file,
+            json!({"ops": [
+                {"op": "update", "id": "pic", "set": {"strokeColor": "#e03131"}},
+                {"op": "update", "id": "pic", "set": {"width": 0}},
+            ]}),
+        )
+        .unwrap_err();
+        assert_eq!(errors.len(), 2);
     }
 
     #[test]
