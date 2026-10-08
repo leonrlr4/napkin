@@ -411,3 +411,93 @@ fn rotated_element_shows_turned_resize_and_grab_cursors() {
     e.pointer_move(center(rotation), &mut CharWidthMeasure);
     assert_eq!(e.cursor(), Cursor::Grab);
 }
+
+#[test]
+fn dragging_the_rotation_handle_rotates_in_one_undo_step() {
+    let mut e = editor(vec![solid("r", [0.0, 0.0, 100.0, 50.0])]);
+    click(&mut e, at(50.0, 25.0));
+    assert!(e.overlay(1.0).rotation_handle.is_some());
+    e.pointer_move(at(50.0, -20.0), &mut CharWidthMeasure);
+    assert_eq!(e.cursor(), Cursor::Grab);
+    drag(&mut e, at(50.0, -20.0), [100.0, 25.0]);
+    let p = element(&e, "r").placement().unwrap();
+    assert!(
+        (p.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+        "{}",
+        p.angle
+    );
+    assert_eq!(rect_of(&e, "r"), [0.0, 0.0, 100.0, 50.0]);
+    assert_eq!(selected(&e), ["r"]);
+    assert!(e.command(Command::Undo));
+    assert_eq!(element(&e, "r").placement().unwrap().angle, 0.0);
+    assert!(!e.command(Command::Undo));
+}
+
+#[test]
+fn shift_while_rotating_snaps_to_fifteen_degrees() {
+    let mut e = editor(vec![solid("r", [0.0, 0.0, 100.0, 50.0])]);
+    click(&mut e, at(50.0, 25.0));
+    e.pointer_down(at(50.0, -20.0), &mut CharWidthMeasure);
+    e.pointer_move(shift(100.0, 30.0), &mut CharWidthMeasure);
+    e.pointer_up(shift(100.0, 30.0), &mut CharWidthMeasure);
+    let angle = element(&e, "r").placement().unwrap().angle;
+    assert!(
+        (angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+        "{angle}"
+    );
+}
+
+#[test]
+fn a_rotated_rectangle_resizes_along_its_own_axis() {
+    let mut e = editor(vec![sample::with(
+        solid("r", [0.0, 0.0, 100.0, 50.0]),
+        json!({"angle": std::f64::consts::FRAC_PI_2}),
+    )]);
+    click(&mut e, at(50.0, 25.0));
+    // Its local east side faces down now (padded border at y = 79). Grabbing it at (50, 77)
+    // and pulling 20 further down widens it to 120 while the west side (at y = -25) stays put,
+    // so the center moves from (50, 25) to (50, 35).
+    drag(&mut e, at(50.0, 77.0), [50.0, 97.0]);
+    let [x, y, w, h] = rect_of(&e, "r");
+    assert!(
+        (w - 120.0).abs() < 1e-9 && (h - 50.0).abs() < 1e-9,
+        "{w} {h}"
+    );
+    assert!(
+        (x + 10.0).abs() < 1e-9 && (y - 10.0).abs() < 1e-9,
+        "{x} {y}"
+    );
+}
+
+#[test]
+fn rotating_a_multi_selection_turns_it_around_the_common_center() {
+    let mut e = editor(vec![
+        solid("a", [0.0, 0.0, 40.0, 20.0]),
+        solid("b", [60.0, 0.0, 40.0, 20.0]),
+    ]);
+    e.command(Command::SelectAll);
+    // Common bounds [0, 0, 100, 20], margin 4: the rotation handle is centered at (50, -22).
+    drag(&mut e, at(50.0, -22.0), [100.0, 10.0]);
+    let [ax, ay, ..] = rect_of(&e, "a");
+    let [bx, by, ..] = rect_of(&e, "b");
+    assert!(
+        (ax - 30.0).abs() < 1e-9 && (ay + 30.0).abs() < 1e-9,
+        "{ax} {ay}"
+    );
+    assert!(
+        (bx - 30.0).abs() < 1e-9 && (by - 30.0).abs() < 1e-9,
+        "{bx} {by}"
+    );
+}
+
+#[test]
+fn a_two_point_arrow_has_no_rotation_handle() {
+    let mut e = editor(vec![sample::linear(
+        "arrow",
+        "a",
+        [0.0, 0.0],
+        &[[0.0, 0.0], [100.0, 40.0]],
+    )]);
+    click(&mut e, at(50.0, 20.0));
+    assert_eq!(e.overlay(1.0).rotation_handle, None);
+}

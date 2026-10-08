@@ -86,6 +86,17 @@ pub fn shapes(
         )));
     }
 
+    // Drawn after the resize squares; the circle is inscribed in the rotation square, as Excalidraw strokes it.
+    if let Some(bounds) = overlay.rotation_handle {
+        let rect = to_rect(camera, origin, bounds);
+        shapes.push(egui::Shape::Circle(egui::epaint::CircleShape {
+            center: rect.center(),
+            radius: rect.width().max(rect.height()) / 2.0,
+            fill: colors.handle_fill,
+            stroke,
+        }));
+    }
+
     for &point in &overlay.points {
         let center = to_screen(camera, origin, point);
         shapes.push(egui::Shape::Circle(egui::epaint::CircleShape {
@@ -167,5 +178,25 @@ mod tests {
             })
             .collect();
         assert_eq!(centers, vec![egui::pos2(32.0, 30.0)]);
+    }
+
+    #[test]
+    fn the_rotation_handle_is_a_circle_around_its_square() {
+        let overlay = Overlay {
+            rotation_handle: Some([0.0, 0.0, 8.0, 8.0]),
+            ..Overlay::default()
+        };
+        let camera = Camera {
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            zoom: 2.0,
+        };
+        let shapes = shapes(&overlay, &camera, egui::pos2(10.0, 20.0), colors());
+        let [egui::Shape::Circle(circle)] = shapes.as_slice() else {
+            panic!("{shapes:?}");
+        };
+        assert_eq!(circle.center, egui::pos2(18.0, 28.0));
+        assert_eq!(circle.radius, 8.0);
+        assert_eq!(circle.stroke, egui::Stroke::new(1.0, colors().accent));
     }
 }
