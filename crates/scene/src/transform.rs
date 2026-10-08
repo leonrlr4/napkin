@@ -841,16 +841,15 @@ pub fn resize_element(
         js_sign_or(next_height, orig_scale[1]) * orig_scale[1],
     ];
     if next_width == 0.0 || next_height == 0.0 {
-        let mut next = orig.clone();
-        if let Element::Image(i) = &mut next {
-            i.scale = next_scale;
-        }
-        let changed = next != *orig;
-        file.elements[position] = next;
-        if changed {
+        // Geometry stays as the previous pointer move left it; only `scale` changes.
+        if let Element::Image(current) = &mut file.elements[position]
+            && current.scale != next_scale
+        {
+            current.scale = next_scale;
             bump_version(&mut file.elements[position], env);
+            return true;
         }
-        return changed;
+        return false;
     }
 
     let is_line_or_arrow = matches!(orig, Element::Line(_) | Element::Arrow(_));
@@ -1608,6 +1607,34 @@ mod tests {
             );
         }
         file
+    }
+
+    #[test]
+    fn a_zero_size_pointer_keeps_the_previous_frames_result() {
+        let start = sample::file(vec![sample::generic(
+            "rectangle",
+            "a",
+            [0.0, 0.0, 100.0, 50.0],
+        )]);
+        let mut file = start.clone();
+        let mut geometry = GeometryCache::default();
+        let mut go = |file: &mut SceneFile, pointer| {
+            resize_element(
+                &mut geometry,
+                file,
+                &start,
+                0,
+                HandleKind::Se,
+                pointer,
+                PLAIN,
+                &mut CharWidthMeasure,
+                &mut TestEnv,
+            )
+        };
+        assert!(go(&mut file, [150.0, 80.0]));
+        assert_eq!(rect_of(&file, 0), [0.0, 0.0, 150.0, 80.0]);
+        assert!(!go(&mut file, [0.0, 80.0]));
+        assert_eq!(rect_of(&file, 0), [0.0, 0.0, 150.0, 80.0]);
     }
 
     fn rect_of(file: &SceneFile, position: usize) -> [f64; 4] {
