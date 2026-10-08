@@ -133,10 +133,12 @@ pub struct TextElement {
 pub struct ImageElement {
     #[serde(flatten)]
     pub base: ElementBase,
+    #[serde(default, skip_serializing_if = "Slot::is_missing")]
     pub file_id: Slot<String>,
     /// `"pending"`, `"saved"` or `"error"`.
     pub status: String,
     pub scale: [f64; 2],
+    #[serde(default, skip_serializing_if = "Slot::is_missing")]
     pub crop: Slot<ImageCrop>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -619,6 +621,24 @@ mod tests {
         let element = Element::from_value(value.clone());
         assert!(matches!(element, Element::Image(_)), "{element:?}");
         assert!(semantic_eq(&element.to_value(), &value));
+    }
+
+    #[test]
+    fn an_image_without_crop_or_file_id_stays_a_typed_image() {
+        let value = json!({
+            "id": "i", "type": "image", "x": 10, "y": 20, "width": 300, "height": 200,
+            "angle": 0, "strokeColor": "transparent", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0", "roundness": null,
+            "seed": 1, "version": 3, "versionNonce": 7, "isDeleted": false, "boundElements": null,
+            "updated": 1, "link": null, "locked": false,
+            "status": "saved", "scale": [1, 1]
+        });
+        let element = Element::from_value(value.clone());
+        assert!(matches!(element, Element::Image(_)), "{element:?}");
+        let written = element.to_value();
+        assert!(semantic_eq(&written, &value));
+        assert!(written.get("crop").is_none() && written.get("fileId").is_none());
     }
 
     #[test]

@@ -267,8 +267,8 @@ fn push_op_set(
     }
 }
 
-/// The dashed placeholder box drawn for [`ElementShape::Placeholder`], [`Element::Raw`] and [`Element::Image`]
-/// (spec §1.2): a `[6, 4]`-dashed `#868e96` rectangle over `(0, 0)`-`(width, height)`.
+/// The dashed placeholder box drawn for [`ElementShape::Placeholder`], [`Element::Raw`] and
+/// [`Element::Image`] (spec §1.2): a `[6, 4]`-dashed `#868e96` rectangle over `(0, 0)`-`(width, height)`.
 fn push_placeholder(builder: &mut Builder, frame: &Frame) {
     let color = render_color("#868e96", frame.style.dark);
     let mut box_builder = Path::builder();

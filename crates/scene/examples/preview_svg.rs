@@ -11,8 +11,8 @@
 //! drawables become paths the way roughjs's `RoughSVG.draw` writes them. It is a preview,
 //! not a port: frames do not clip, arrow labels stay at their stored position, text uses
 //! the bundled fonts with Excalifont's metrics for unknown families, and element types
-//! `scene` loads as `Raw` or `Image` (image, frame, sticky note, ...) are drawn as a dashed box with
-//! the type name, as spec §1.2 plans for M3.
+//! `scene` loads as `Raw` or `Image` (image, frame, sticky note, ...) are drawn as a dashed box
+//! with the type name, as spec §1.2 plans for M3.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;

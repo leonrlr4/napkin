@@ -32,8 +32,8 @@ container, folded into the container's line rather than shown on its own), `text
 `#1e1e1e`), `bg=<color>` (omitted when `transparent`), `start=<id>` / `end=<id>` (an
 arrow's bindings), `points=<JSON>` (lines and arrows only), `groups=<id,id>`,
 `angle=<radians>` (omitted when 0) and `locked`. An `image` line has only the type,
-`x y w h` and `angle=` (no `stroke=`, `bg=` or file id). `label=` and `text=` show the text as typed,
-without the line breaks napkin added to wrap it. Numbers are rounded to 2 decimals.
+`x y w h` and `angle=` (no `stroke=`, `bg=` or file id). `label=` and `text=` show the text as
+typed, without the line breaks napkin added to wrap it. Numbers are rounded to 2 decimals.
 `stroke=`/`bg=` only ever show the color; fill style, stroke style, stroke width and other
 styling only show up in `--full` or `render`. Example, after drawing a small flow:
 

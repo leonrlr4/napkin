@@ -664,6 +664,15 @@ fn font_size_for_width(text: &TextElement, target_width: f64) -> Option<f64> {
     (next_font_size >= MIN_FONT_SIZE).then_some(next_font_size)
 }
 
+/// `Math.sign(value) || fallback`: the sign of `value`, or `fallback` when it is 0 or -0.
+fn js_sign_or(value: f64, fallback: f64) -> f64 {
+    if value == 0.0 {
+        fallback
+    } else {
+        value.signum()
+    }
+}
+
 /// `resizeSingleElement` / `resizeSingleTextElement` for the element at `position`, from its
 /// state in `start`, plus the position of its bound text. Returns whether anything changed.
 ///
@@ -821,8 +830,27 @@ pub fn resize_element(
     }
     let next_width = next_width * flip_factor_x;
     let next_height = next_height * flip_factor_y;
+    let orig_scale = match orig {
+        Element::Image(i) => i.scale,
+        _ => [1.0, 1.0],
+    };
+    // `resizeSingleElement` mutates `scale` before its `nextWidth !== 0` guard, so a
+    // degenerate drag can still flip an image's `scale` without resizing it.
+    let next_scale = [
+        js_sign_or(next_width, orig_scale[0]) * orig_scale[0],
+        js_sign_or(next_height, orig_scale[1]) * orig_scale[1],
+    ];
     if next_width == 0.0 || next_height == 0.0 {
-        return false;
+        let mut next = orig.clone();
+        if let Element::Image(i) = &mut next {
+            i.scale = next_scale;
+        }
+        let changed = next != *orig;
+        file.elements[position] = next;
+        if changed {
+            bump_version(&mut file.elements[position], env);
+        }
+        return changed;
     }
 
     let is_line_or_arrow = matches!(orig, Element::Line(_) | Element::Arrow(_));
@@ -886,10 +914,6 @@ pub fn resize_element(
         return false;
     }
 
-    let orig_scale = match orig {
-        Element::Image(i) => i.scale,
-        _ => [1.0, 1.0],
-    };
     let mut next = orig.clone();
     match &mut next {
         Element::Rectangle(g) | Element::Diamond(g) | Element::Ellipse(g) => {
@@ -922,10 +946,7 @@ pub fn resize_element(
             i.base.width = next_width.abs();
             i.base.height = next_height.abs();
             // Dragging past the opposite edge flips the image; `scale` keeps the sign.
-            i.scale = [
-                next_width.signum() * orig_scale[0],
-                next_height.signum() * orig_scale[1],
-            ];
+            i.scale = next_scale;
         }
         Element::Text(_) | Element::Raw(_) => unreachable!("handled above"),
     }
