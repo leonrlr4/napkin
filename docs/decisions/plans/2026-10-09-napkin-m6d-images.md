@@ -33,12 +33,13 @@
 
 ## 寫計畫時做的決定
 
-1. **`Ctrl+V` 由 `wl_keyboard` 偵測。** egui-winit 0.36 把 `Ctrl+V` 直接換成 `Event::Paste(text)`，剪貼簿沒有文字時什麼事件都不送（`on_keyboard_input` 在送出 `Key` 事件前就 `return`）。`pinch.rs` 已經在 eframe 的 Wayland 連線上綁了一個 `wl_keyboard`（用來追蹤 Super 鍵），擴充它在 Ctrl 按住時看到 V（evdev keycode 47）按下就送出一個「貼上要求」。
-2. **畫布的貼上一律走 `wl-clipboard-rs`。** 收到貼上要求、而且沒有 egui 元件拿著鍵盤（文字編輯框自己用 egui 的貼上）時，背景執行緒列出剪貼簿的 MIME 類型：有 `image/png`、`image/jpeg`、`image/webp`、`image/gif` 就照這個順序讀第一個當圖片（`insertClipboardContent` 圖片優先於元件 JSON 與文字）；有 `image/svg+xml` 而沒有其他圖片就顯示不支援 SVG；否則讀 `text/plain;charset=utf-8`（或 `text/plain`、`UTF8_STRING`）走既有的 `Editor::paste`。這時畫布忽略 egui 的 `Event::Paste`，同一次按鍵才不會貼兩次。`wl-clipboard-rs` 無法使用（compositor 沒有 data-control）時退回現在的 egui `Event::Paste` 文字貼上，log 一行。
-3. **插入不經過佔位元件。** Excalidraw 先放一個 `status: "pending"` 的佔位元件再非同步初始化；napkin 先在背景把位元組處理完（解碼尺寸、縮小、雜湊、data URL），完成後才一次插入 `status: "saved"` 的元件，位置與尺寸照 `newImagePlaceholder` 加 `getImageNaturalDimensions` 算出的最終結果。效果相同，少一個中間狀態。
-4. **`fileId` 是原始位元組的 SHA-1**（縮小之前，`generateIdFromFile`）。`files` 已有同一個 `fileId` 且有 `dataURL` 時不重新處理位元組。
-5. **縮小**照 `resizeImageFile`：長邊超過 1440 px 時等比例縮成長邊 1440（`image` crate 的 `Lanczos3`），用原格式重新編碼（jpeg 品質 92；gif、webp 編碼器不可用時改存 PNG，`mimeType` 跟著改）。縮小後超過 4 MiB 就拒絕並通知。
-6. **AI 介面。** 摘要裡的圖片元件輸出 `image` 類型、`x y w h`、`angle`，不輸出 `fileId`。batch 不能新增圖片；`update` 對圖片接受 `x`、`y`、`width`、`height`（維持現在 Raw 只能搬移的寬鬆版本），`delete` 照舊。
+1. **貼上鍵由 `wl_keyboard` 偵測，`Super+V` 是主要入口。** omarchy 的 `SUPER+V`／`SUPER+C`／`SUPER+X`（`/usr/share/omarchy/default/hypr/bindings/clipboard.lua`）用 Hyprland 的 `send_key_state` 對焦點視窗送出 `Ctrl+V`／`Ctrl+C`／`Ctrl+X`，所以 napkin 收到的就是 Ctrl 組合鍵；偵測與複製、剪下都不能被 napkin 自己的「Super 按住時不送快捷鍵」規則（`super_held`）擋掉。 egui-winit 0.36 把 `Ctrl+V` 直接換成 `Event::Paste(text)`，剪貼簿沒有文字時什麼事件都不送（`on_keyboard_input` 在送出 `Key` 事件前就 `return`）。`pinch.rs` 已經在 eframe 的 Wayland 連線上綁了一個 `wl_keyboard`（用來追蹤 Super 鍵），擴充它在 Ctrl 按住時看到 V（evdev keycode 47）按下就送出一個「貼上要求」。
+2. **畫布的複製與剪下改接 egui 的 `Event::Copy`／`Event::Cut`。** egui-winit 把 `Ctrl+C`／`Ctrl+X` 換成 `Event::Copy`／`Event::Cut` 後就 `return`，不送 `Key` 事件；`edit_input` 目前只認 `Key::C`，所以畫布上的複製實際上從來沒被觸發過（M4b 的測試直接送 `Key` 事件，沒抓到）。改成沒有 egui 元件拿鍵盤時 `Event::Copy` 產生 `EditorInput::Copy`，`Event::Cut` 產生新的 `EditorInput::Cut`（`actionCut`：複製後刪除選取，刪除是一步 undo）。
+3. **畫布的貼上一律走 `wl-clipboard-rs`。** 收到貼上要求、而且沒有 egui 元件拿著鍵盤（文字編輯框自己用 egui 的貼上）時，背景執行緒列出剪貼簿的 MIME 類型：有 `image/png`、`image/jpeg`、`image/webp`、`image/gif` 就照這個順序讀第一個當圖片（`insertClipboardContent` 圖片優先於元件 JSON 與文字）；有 `image/svg+xml` 而沒有其他圖片就顯示不支援 SVG；否則讀 `text/plain;charset=utf-8`（或 `text/plain`、`UTF8_STRING`）走既有的 `Editor::paste`。這時畫布忽略 egui 的 `Event::Paste`，同一次按鍵才不會貼兩次。`wl-clipboard-rs` 無法使用（compositor 沒有 data-control）時退回現在的 egui `Event::Paste` 文字貼上，log 一行。
+4. **插入不經過佔位元件。** Excalidraw 先放一個 `status: "pending"` 的佔位元件再非同步初始化；napkin 先在背景把位元組處理完（解碼尺寸、縮小、雜湊、data URL），完成後才一次插入 `status: "saved"` 的元件，位置與尺寸照 `newImagePlaceholder` 加 `getImageNaturalDimensions` 算出的最終結果。效果相同，少一個中間狀態。
+5. **`fileId` 是原始位元組的 SHA-1**（縮小之前，`generateIdFromFile`）。`files` 已有同一個 `fileId` 且有 `dataURL` 時不重新處理位元組。
+6. **縮小**照 `resizeImageFile`：長邊超過 1440 px 時等比例縮成長邊 1440（`image` crate 的 `Lanczos3`），用原格式重新編碼（jpeg 品質 92；gif、webp 編碼器不可用時改存 PNG，`mimeType` 跟著改）。縮小後超過 4 MiB 就拒絕並通知。
+7. **AI 介面。** 摘要裡的圖片元件輸出 `image` 類型、`x y w h`、`angle`，不輸出 `fileId`。batch 不能新增圖片；`update` 對圖片接受 `x`、`y`、`width`、`height`（維持現在 Raw 只能搬移的寬鬆版本），`delete` 照舊。
 
 ## 檔案結構
 
@@ -141,7 +142,7 @@ pub struct ImageProps {
 - 控制點：`getTransformHandles` 對 image 的 margin 是 0、spacing 是 0；`resizeTest` 的側邊 `SPACING` 對 image 是 0。
 - 縮放：選取裡有 image 時預設等比例，Shift 反轉（`App.tsx` 的 `proportionalByDefault`）。`resizeSingleElement` 對 image 的 `scale` 翻轉照 JS（拉過對邊時 `scale` 的正負號跟著變）。
 - 渲染端這個任務只讓 `app` 編譯：`Element::Image` 仍畫成現在的虛線佔位框加類型名稱（Task 5 才畫圖）。
-- AI：`summary.rs` 的圖片行照決定 6；`batch` 的 `update` 對 image 接受 `x`、`y`、`width`、`height`；`SKILL.md` 的對應段落一起改。
+- AI：`summary.rs` 的圖片行照決定 7；`batch` 的 `update` 對 image 接受 `x`、`y`、`width`、`height`；`SKILL.md` 的對應段落一起改。
 
 - [ ] **Step 1：失敗的測試**
 
@@ -464,9 +465,10 @@ pub fn take_paste_requests(&self) -> usize;
 
 行為：
 
-- `pinch.rs` 的 `wl_keyboard` 追蹤 Ctrl 修飾鍵（`modifiers` 事件的 `mods_depressed`，Ctrl 對應的位元照 xkb 的 Control mask，值 4），Ctrl 按住時 key 47 按下就把計數加一；`take_paste_requests` 取出並歸零。
+- `pinch.rs` 的 `wl_keyboard` 追蹤 Ctrl 修飾鍵（`modifiers` 事件的 `mods_depressed`，Ctrl 對應的位元照 xkb 的 Control mask，值 4），Ctrl 按住時 key 47 按下就把計數加一，不論 Super 是否按住（`SUPER+V` 經 Hyprland `send_key_state` 送來的正是 Ctrl+V）；`take_paste_requests` 取出並歸零。
+- 畫布複製與剪下（決定 2）：`edit_input` 在沒有 egui 元件拿鍵盤時把 `Event::Copy` 轉成 `EditorInput::Copy`、`Event::Cut` 轉成新的 `EditorInput::Cut`，都不受 `super_held` 影響；`Editor` 新增 `cut_selection() -> Option<String>`（`actionCut`：回傳剪貼簿 JSON 並刪除選取，一步 undo），`app` 把回傳的文字寫進剪貼簿。既有的 `Key::C` 對應刪掉（它永遠收不到）。
 - 每幀：有貼上要求、編輯器在畫布狀態（不在文字編輯中、沒有 egui 元件拿鍵盤、畫布可寫）時，開一個背景執行緒 `clipboard_image::read()`，結果經 channel 回到 UI 執行緒：`Image` 走 `image_file::prepare`（同一個背景執行緒做完）再 `insert_images`（位置是最後的指標位置，沒有就畫面中心；`canvas_height` 是畫布高度的螢幕點數）；`Svg` 顯示通知；`Text` 走既有的 `Editor::paste`；`Empty` 什麼都不做。
-- 決定 2 的退回：第一次 `read()` 回 `Err` 後記住「data-control 不可用」，之後畫布照舊用 egui 的 `Event::Paste`。可用時 `edit_input` 不再把 `Event::Paste` 轉成 `EditorInput::Paste`（加一個 `FrameInput` 欄位控制）。
+- 決定 3 的退回：第一次 `read()` 回 `Err` 後記住「data-control 不可用」，之後畫布照舊用 egui 的 `Event::Paste`。可用時 `edit_input` 不再把 `Event::Paste` 轉成 `EditorInput::Paste`（加一個 `FrameInput` 欄位控制）。
 - 拖放：`ui.input(|i| i.raw.dropped_files)` 裡每個有 `path` 的檔案讀成位元組（有 `bytes` 就直接用），背景 `prepare`，全部完成後一次 `insert_images`（位置是放下時的指標位置）。非圖片檔忽略；SVG 通知；`TooBig` 通知「圖片太大（上限 4 MB）」；`Decode` 通知並 log。
 - 通知用既有的 `self.notice`。
 
@@ -497,7 +499,7 @@ fn ctrl_v_counts_as_a_paste_request() {
 }
 ```
 
-`edit_input.rs`：`FrameInput` 新欄位設定為「剪貼簿由 data-control 處理」時，`Event::Paste` 不產生 `EditorInput::Paste`。
+`edit_input.rs`：`FrameInput` 新欄位設定為「剪貼簿由 data-control 處理」時，`Event::Paste` 不產生 `EditorInput::Paste`；`Event::Copy`／`Event::Cut` 在 `super_held` 為真時仍產生 `EditorInput::Copy`／`EditorInput::Cut`，`keyboard_taken` 為真時不產生。`scene` 的 `editor_clipboard.rs`：`cut_selection` 回傳 JSON、元件被刪除、一次 undo 復原。
 
 Run: `cargo test -p app`
 Expected: 編譯失敗。
@@ -575,19 +577,20 @@ git commit -m "Draw image elements"
 
 - [ ] **Step 5：回報人工驗收清單**（使用者本人操作）
 
-1. 用截圖工具截一張圖（複製到剪貼簿），在 napkin 按 `Ctrl+V`：圖片出現在游標位置、被選取，`Ctrl+Z` 一次移除。
-2. 從瀏覽器複製一張圖片再 `Ctrl+V`：同上。剪貼簿只有文字時 `Ctrl+V` 照舊貼成文字；從 excalidraw.com 複製的元件照舊貼成元件。
-3. 從檔案管理員拖一張照片（大於 1440 px）進來：圖片出現，長邊不超過畫布高度一半；拖兩三張一次放下，排成格狀。
-4. 拖一個 SVG 檔進來：顯示「不支援 SVG 圖片」。
-5. 圖片可以搬移、拖角落等比例縮放（按 Shift 自由縮放）、用旋轉控制點旋轉、刪除；複製一份與複製貼上都正常。
-6. 存檔後把檔案拖進 excalidraw.com：圖片都在，位置、大小、角度相同；在 excalidraw.com 複製一張圖片元件再貼回 napkin：圖片顯示正常。
-7. 請 Claude 用 `napkin` 看畫布：摘要列出圖片，截圖裡看得到圖片內容。
+1. 用截圖工具截一張圖（複製到剪貼簿），在 napkin 按 `Super+V`：圖片出現在游標位置、被選取，`Ctrl+Z` 一次移除。`Ctrl+V` 也一樣。
+2. 從瀏覽器複製一張圖片再 `Super+V`：同上。剪貼簿只有文字時照舊貼成文字；從 excalidraw.com 複製的元件照舊貼成元件。
+3. 在畫布選幾個元件按 `Super+C`，到 excalidraw.com 貼上：元件出現。`Super+X`：元件被剪下，`Ctrl+Z` 復原。
+4. 從檔案管理員拖一張照片（大於 1440 px）進來：圖片出現，長邊不超過畫布高度一半；拖兩三張一次放下，排成格狀。
+5. 拖一個 SVG 檔進來：顯示「不支援 SVG 圖片」。
+6. 圖片可以搬移、拖角落等比例縮放（按 Shift 自由縮放）、用旋轉控制點旋轉、刪除；複製一份與複製貼上都正常。
+7. 存檔後把檔案拖進 excalidraw.com：圖片都在，位置、大小、角度相同；在 excalidraw.com 複製一張圖片元件再貼回 napkin：圖片顯示正常。
+8. 請 Claude 用 `napkin` 看畫布：摘要列出圖片，截圖裡看得到圖片內容。
 
 ---
 
 ## 自我檢查
 
-- spec §4「來源」：Task 4（`Ctrl+V` 經 `wl_keyboard` 與 `wl-clipboard-rs`、MIME 優先順序、拖放、位置、退回）。
+- spec §4「來源」：Task 4（`Super+V`／`Ctrl+V` 經 `wl_keyboard` 與 `wl-clipboard-rs`、MIME 優先順序、拖放、位置、退回）；使用者在審計畫時要求的 `Super+C`／`Super+X` 畫布複製剪下也在 Task 4。
 - 「儲存」：Task 1（型別化元件、`files`）、Task 2（`addMissingFiles`、剪貼簿帶 `files`）、Task 3（SHA-1、1440 px、4 MiB、data URL）。
 - 「大小」：Task 2 的 `natural_placement` 與一步 undo。
 - 「縮放與旋轉」：Task 1 的預設等比例與 margin 0；旋轉由 M6c 提供，Task 1 只確認 image 進入控制點的可旋轉清單。
