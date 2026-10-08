@@ -202,7 +202,7 @@ pub fn apply_drag(
 /// `unbindBindingElement`: clears the arrow at `pos`'s binding for `end` and, unless the
 /// arrow's other end is bound to the same element (that `boundElements` record then still
 /// covers the remaining end), removes the arrow from that element's `boundElements`.
-fn unbind_arrow_end(
+pub(crate) fn unbind_arrow_end(
     file: &mut SceneFile,
     id_to_pos: &HashMap<&str, usize>,
     pos: usize,

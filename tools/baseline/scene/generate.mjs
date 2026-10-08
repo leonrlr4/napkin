@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, encode, runCase, writeGroup } from "../lib/harness.mjs";
-import { boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, zindexCases } from "./cases.mjs";
+import { boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -28,6 +28,7 @@ const lib = await bundleExcalidraw(
   export { syncMovedIndices, syncInvalidIndices } from "@excalidraw/element/fractionalIndex";
   export { moveOneLeft, moveOneRight } from "@excalidraw/element/zindex";
   export { Scene } from "@excalidraw/element/Scene";
+  export { transformElements } from "@excalidraw/element/resizeElements";
   export { applyDarkModeFilter, isTransparent, getFontString, DEFAULT_GRID_SIZE } from "@excalidraw/common";
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
@@ -289,6 +290,43 @@ writeGroup(
         lib.handleBindTextResize(container, scene, op.handle, op.keepAspect, op.fromCenter, op.flipY);
       }
       return boundTextOutput(live);
+    }),
+  })),
+);
+
+/** `[{id, x, y, width, height, angle, points?, fontSize?, text?}]` for every element. */
+function transformOutput(elements) {
+  return elements.map((el) => ({
+    id: el.id,
+    x: el.x,
+    y: el.y,
+    width: el.width,
+    height: el.height,
+    angle: el.angle,
+    ...(el.points ? { points: el.points.map((p) => [p[0], p[1]]) } : {}),
+    ...(el.type === "text" ? { fontSize: el.fontSize, text: el.text } : {}),
+  }));
+}
+
+writeGroup(
+  outDir,
+  "transform",
+  source,
+  transformCases.map(([name, elements, ids, handle, pointer, center, flags]) => ({
+    name,
+    call: "transformElements",
+    args: [elements, ids, handle, pointer, center, flags],
+    ...runCase(name, () => {
+      const live = structuredClone(elements);
+      const scene = new lib.Scene(live);
+      const originalElements = new Map(structuredClone(elements).map((el) => [el.id, el]));
+      const selected = ids.map((id) => live.find((el) => el.id === id));
+      lib.transformElements(
+        originalElements, handle, selected, scene,
+        flags.shift, flags.fromCenter, flags.keepAspect,
+        pointer[0], pointer[1], center[0], center[1],
+      );
+      return transformOutput(live);
     }),
   })),
 );

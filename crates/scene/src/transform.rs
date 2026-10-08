@@ -1,7 +1,7 @@
 //! Resize handles and pointer-driven resizing (`packages/element/src/transformHandles.ts`,
-//! `packages/element/src/resizeTest.ts`, the resize half of
+//! `packages/element/src/resizeTest.ts`, the resize and rotation halves of
 //! `packages/element/src/resizeElements.ts`, `packages/common/src/points.ts`'s
-//! `rescalePoints`, all at commit `afa3a653fc5d2b742adcbd5a6063187b056d2419`; a resized
+//! `rescalePoints`, all at the pinned commit; a resized
 //! container's label is placed with [`crate::bound_text`]).
 //!
 //! napkin only ever draws and hit-tests the four corner squares: it never renders the
@@ -15,12 +15,15 @@
 //! A resized rectangle, diamond or ellipse rewraps its label, and a standalone text resized
 //! from its left or right side gets a fixed width and wraps to it.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::bound_text::{
-    approx_min_container_size, bound_text_max_size, handle_bind_text_resize, live_bound_text,
-    min_text_element_width, text_line_height,
+    approx_min_container_size, bound_text_max_size, bound_text_position, handle_bind_text_resize,
+    live_bound_text, min_text_element_width, text_line_height,
 };
 use crate::collision::{DEFAULT_TRANSFORM_HANDLE_SPACING, SIDE_RESIZING_THRESHOLD};
-use crate::element::{Element, TextElement};
+use crate::edit::unbind_arrow_end;
+use crate::element::{Element, LinearEnd, TextElement};
 use crate::env::Env;
 use crate::file::SceneFile;
 use crate::geometry::{
@@ -948,6 +951,167 @@ fn multi_flip(handle: HandleKind, pointer: [f64; 2], anchor: [f64; 2]) -> (bool,
     }
 }
 
+/// `SHIFT_LOCKING_ANGLE`.
+const SHIFT_LOCKING_ANGLE: f64 = std::f64::consts::PI / 12.0;
+
+/// Sets `angle` on a typed element; whether the value changed. `Raw` never rotates.
+fn set_angle(element: &mut Element, angle: f64) -> bool {
+    match element {
+        Element::Raw(_) => false,
+        _ => {
+            let base = element.base_mut().expect("typed element");
+            let changed = base.angle != angle;
+            base.angle = angle;
+            changed
+        }
+    }
+}
+
+fn is_elbow_arrow(element: &Element) -> bool {
+    matches!(element, Element::Arrow(l) if l.elbowed == Some(true))
+}
+
+/// `transformElements`' rotation branch: `rotateSingleElement` when `targets` (ascending
+/// positions, bound text excluded the same way `resize_elements` excludes it) holds one
+/// element, `rotateMultipleElements` around `center` otherwise. Recomputed from `start` on
+/// every call, so repeated calls with the same arguments are idempotent. `discrete` is Shift
+/// (`shouldRotateWithDiscreteAngle`). Returns whether anything changed. Raw and elbow-arrow
+/// elements never rotate. Rotating a bound arrow unbinds the ends whose target is not
+/// rotated with it; arrows do not follow a rotated shape.
+pub fn rotate_elements(
+    file: &mut SceneFile,
+    start: &SceneFile,
+    targets: &[usize],
+    pointer: [f64; 2],
+    center: [f64; 2],
+    discrete: bool,
+    env: &mut impl Env,
+) -> bool {
+    let id_to_pos: HashMap<&str, usize> = start
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| e.id().map(|id| (id, i)))
+        .collect();
+    let mut changed = false;
+
+    if let [only] = targets {
+        let orig = &start.elements[*only];
+        if is_elbow_arrow(orig) || matches!(orig, Element::Raw(_)) {
+            return false;
+        }
+        let Some((bounds, _)) = element_absolute_coords(orig) else {
+            return false;
+        };
+        let cx = (bounds[0] + bounds[2]) / 2.0;
+        let cy = (bounds[1] + bounds[3]) / 2.0;
+        let mut angle =
+            5.0 * std::f64::consts::PI / 2.0 + rough::js::atan2(pointer[1] - cy, pointer[0] - cx);
+        if discrete {
+            angle += SHIFT_LOCKING_ANGLE / 2.0;
+            angle -= angle % SHIFT_LOCKING_ANGLE;
+        }
+        let angle = normalize_radians(angle);
+
+        if orig.kind() == "arrow" {
+            for end in [LinearEnd::Start, LinearEnd::End] {
+                if file.elements[*only].binding_target(end).is_some() {
+                    unbind_arrow_end(file, &id_to_pos, *only, end, env);
+                    changed = true;
+                }
+            }
+        }
+        if set_angle(&mut file.elements[*only], angle) {
+            bump_version(&mut file.elements[*only], env);
+            changed = true;
+        }
+        if orig.kind() != "arrow" {
+            changed |= rotate_label(file, *only, angle, env);
+        }
+        return changed;
+    }
+
+    let mut centre_angle = 5.0 * std::f64::consts::PI / 2.0
+        + rough::js::atan2(pointer[1] - center[1], pointer[0] - center[0]);
+    if discrete {
+        centre_angle += SHIFT_LOCKING_ANGLE / 2.0;
+        centre_angle -= centre_angle % SHIFT_LOCKING_ANGLE;
+    }
+    let rotated_ids: HashSet<&str> = targets
+        .iter()
+        .filter_map(|&i| start.elements[i].id())
+        .collect();
+
+    for &position in targets {
+        let orig = &start.elements[position];
+        if orig.container_id().is_some() || matches!(orig, Element::Raw(_)) || is_elbow_arrow(orig)
+        {
+            continue;
+        }
+        let (Some(placement), Some((bounds, _))) =
+            (orig.placement(), element_absolute_coords(orig))
+        else {
+            continue;
+        };
+        let cx = (bounds[0] + bounds[2]) / 2.0;
+        let cy = (bounds[1] + bounds[3]) / 2.0;
+        let [rotated_cx, rotated_cy] = rotate_point(
+            [cx, cy],
+            center,
+            centre_angle + placement.angle - placement.angle,
+        );
+        let angle = normalize_radians(centre_angle + placement.angle);
+
+        let before = file.elements[position].clone();
+        file.elements[position].set_position(
+            placement.x + (rotated_cx - cx),
+            placement.y + (rotated_cy - cy),
+        );
+        set_angle(&mut file.elements[position], angle);
+        if file.elements[position] != before {
+            bump_version(&mut file.elements[position], env);
+            changed = true;
+        }
+
+        if orig.kind() == "arrow" {
+            for end in [LinearEnd::Start, LinearEnd::End] {
+                let Some(target_id) = file.elements[position].binding_target(end) else {
+                    continue;
+                };
+                if !rotated_ids.contains(target_id) {
+                    unbind_arrow_end(file, &id_to_pos, position, end, env);
+                    changed = true;
+                }
+            }
+        } else {
+            changed |= rotate_label(file, position, angle, env);
+        }
+    }
+    changed
+}
+
+/// Gives `container`'s label the container's `angle` and its `computeBoundTextPosition`
+/// position, bumping its version when either differs.
+fn rotate_label(file: &mut SceneFile, container: usize, angle: f64, env: &mut impl Env) -> bool {
+    let Some(label) = live_bound_text(file, container) else {
+        return false;
+    };
+    let Element::Text(text) = &file.elements[label] else {
+        return false;
+    };
+    let Some([x, y]) = bound_text_position(&file.elements[container], text) else {
+        return false;
+    };
+    let before = file.elements[label].clone();
+    file.elements[label].set_position(x, y);
+    set_angle(&mut file.elements[label], angle);
+    if file.elements[label] != before {
+        bump_version(&mut file.elements[label], env);
+        return true;
+    }
+    false
+}
+
 /// `resizeMultipleElements` for `targets` (ascending positions), from their state in `start`.
 #[expect(
     clippy::too_many_arguments,
@@ -1038,6 +1202,11 @@ pub fn resize_elements(
     };
 
     let keep_aspect_ratio = options.keep_aspect_ratio
+        || targets.iter().any(|&i| {
+            start.elements[i]
+                .placement()
+                .is_some_and(|p| p.angle != 0.0)
+        })
         || targets
             .iter()
             .any(|&i| matches!(start.elements[i], Element::Text(_)))
@@ -1703,5 +1872,104 @@ mod tests {
         assert!((rect[0] - 87.789_321_881_345_24).abs() < 1e-9, "{rect:?}");
         assert!((rect[1] - 37.644_660_940_672_62).abs() < 1e-9, "{rect:?}");
         assert_eq!((rect[2], rect[3]), (24.0, 25.0));
+    }
+
+    #[test]
+    fn rotating_a_single_element_sets_its_angle_from_the_pointer() {
+        let start = sample::file(vec![rect("r", [0.0, 0.0, 100.0, 50.0])]);
+        let mut file = start.clone();
+        // Pointer straight right of the center (50, 25): 5π/2 + atan2(0, 50), normalized.
+        assert!(rotate_elements(
+            &mut file,
+            &start,
+            &[0],
+            [100.0, 25.0],
+            [50.0, 25.0],
+            false,
+            &mut TestEnv
+        ));
+        let p = file.elements[0].placement().unwrap();
+        assert!(
+            (p.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+            "{}",
+            p.angle
+        );
+        assert_eq!([p.x, p.y, p.width, p.height], [0.0, 0.0, 100.0, 50.0]);
+    }
+
+    #[test]
+    fn shift_snaps_to_fifteen_degrees() {
+        let start = sample::file(vec![rect("r", [0.0, 0.0, 100.0, 50.0])]);
+        let mut file = start.clone();
+        rotate_elements(
+            &mut file,
+            &start,
+            &[0],
+            [100.0, 30.0],
+            [50.0, 25.0],
+            true,
+            &mut TestEnv,
+        );
+        let angle = file.elements[0].placement().unwrap().angle;
+        assert!(
+            (angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+            "{angle}"
+        );
+    }
+
+    #[test]
+    fn rotating_two_elements_turns_them_around_the_common_center() {
+        let start = sample::file(vec![
+            rect("a", [0.0, 0.0, 40.0, 20.0]),
+            rect("b", [60.0, 0.0, 40.0, 20.0]),
+        ]);
+        let mut file = start.clone();
+        rotate_elements(
+            &mut file,
+            &start,
+            &[0, 1],
+            [100.0, 10.0],
+            [50.0, 10.0],
+            false,
+            &mut TestEnv,
+        );
+        let a = file.elements[0].placement().unwrap();
+        let b = file.elements[1].placement().unwrap();
+        // a's center (20, 10) turns a quarter clockwise around (50, 10) to (50, -20).
+        assert!(
+            (a.x - 30.0).abs() < 1e-9 && (a.y + 30.0).abs() < 1e-9,
+            "{a:?}"
+        );
+        assert!(
+            (b.x - 30.0).abs() < 1e-9 && (b.y - 30.0).abs() < 1e-9,
+            "{b:?}"
+        );
+        assert!((a.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_container_label_turns_with_its_container() {
+        let start = sample::file(vec![
+            sample::with(
+                rect("r", [0.0, 0.0, 100.0, 50.0]),
+                json!({"boundElements": [{"id": "t", "type": "text"}]}),
+            ),
+            sample::with(
+                sample::text("t", [26.0, 12.5, 48.0, 25.0], "hi", Some("r")),
+                json!({"textAlign": "center", "verticalAlign": "middle"}),
+            ),
+        ]);
+        let mut file = start.clone();
+        rotate_elements(
+            &mut file,
+            &start,
+            &[0],
+            [100.0, 25.0],
+            [50.0, 25.0],
+            false,
+            &mut TestEnv,
+        );
+        let t = file.elements[1].placement().unwrap();
+        assert!((t.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
     }
 }
