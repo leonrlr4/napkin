@@ -91,7 +91,6 @@ fn key_input(key: egui::Key, modifiers: egui::Modifiers) -> Option<EditorInput> 
             egui::Key::D => Some(EditorInput::Command(Command::Duplicate)),
             egui::Key::CloseBracket => Some(EditorInput::Command(Command::BringForward)),
             egui::Key::OpenBracket => Some(EditorInput::Command(Command::SendBackward)),
-            egui::Key::C => Some(EditorInput::Copy),
             _ => None,
         };
     }
@@ -174,6 +173,12 @@ pub fn translate(input: &FrameInput, capture: &mut PointerCapture) -> Vec<Editor
                 if let Some(mapped) = key_input(*key, *modifiers) {
                     out.push(mapped);
                 }
+            }
+            // egui-winit sends Ctrl+C only as `Event::Copy`, never as a `Key` event. omarchy's
+            // Super+C arrives as that same Ctrl+C with Super still physically held, so
+            // `super_held` must not block it.
+            egui::Event::Copy if !input.keyboard_taken => {
+                out.push(EditorInput::Copy);
             }
             // A focused `TextEdit` (editing a text element) takes this event itself; forwarding
             // it here too would paste into the canvas at the same time.
@@ -390,7 +395,6 @@ mod tests {
             key(egui::Key::D, ctrl),
             key(egui::Key::CloseBracket, ctrl),
             key(egui::Key::OpenBracket, ctrl),
-            key(egui::Key::C, ctrl),
         ];
         assert_eq!(
             translate(&frame(&events), &mut PointerCapture::default()),
@@ -402,9 +406,30 @@ mod tests {
                 EditorInput::Command(Command::Duplicate),
                 EditorInput::Command(Command::BringForward),
                 EditorInput::Command(Command::SendBackward),
-                EditorInput::Copy,
             ]
         );
+    }
+
+    /// egui-winit turns Ctrl+C into `Event::Copy` and sends no `Key` event for it, and
+    /// omarchy's Super+C reaches napkin as that same Ctrl+C while Super is still held.
+    #[test]
+    fn copy_event_becomes_copy_input_even_with_super_held() {
+        let events = [egui::Event::Copy];
+        assert_eq!(
+            translate(&frame(&events), &mut PointerCapture::default()),
+            vec![EditorInput::Copy]
+        );
+
+        let mut super_down = frame(&events);
+        super_down.super_held = true;
+        assert_eq!(
+            translate(&super_down, &mut PointerCapture::default()),
+            vec![EditorInput::Copy]
+        );
+
+        let mut typing = frame(&events);
+        typing.keyboard_taken = true;
+        assert_eq!(translate(&typing, &mut PointerCapture::default()), vec![]);
     }
 
     #[test]
