@@ -117,3 +117,20 @@ fn paste_only_adds_files_that_pasted_images_use() {
     assert!(other.file().file_data("f1").is_some());
     assert!(other.file().file_data("stray").is_none());
 }
+
+#[test]
+fn a_deleted_image_leaves_no_files_entry_in_the_saved_text_until_undone() {
+    let mut e = editor(vec![]);
+    e.insert_images(vec![png("f1", [100.0, 100.0])], [0.0, 0.0], 900.0, 1.0);
+    let saved = |e: &scene::editor::Editor<_>| -> serde_json::Value {
+        serde_json::from_str(&e.file().to_json_string()).unwrap()
+    };
+    assert!(saved(&e)["files"]["f1"].is_object());
+
+    assert!(e.command(Command::Delete));
+    assert!(saved(&e)["files"].as_object().unwrap().is_empty());
+    assert!(e.file().file_data("f1").is_some(), "memory keeps the file");
+
+    assert!(e.command(Command::Undo));
+    assert!(saved(&e)["files"]["f1"].is_object());
+}

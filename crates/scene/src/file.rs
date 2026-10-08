@@ -148,7 +148,18 @@ impl SceneFile {
     /// the written text only; `self.app_state` is untouched.
     pub fn to_json_string_with_view(&self, view: Option<NapkinView>) -> String {
         let mut root = self.root.clone();
-        let elements = Value::Array(self.elements.iter().map(Element::to_value).collect());
+        let element_values: Vec<Value> = self.elements.iter().map(Element::to_value).collect();
+        // `serializeAsJSON`'s `filterOutDeletedFiles`: only files a live element references
+        // are written. `self.root` keeps every entry, so undoing a delete finds its file.
+        if let Some(Value::Object(files)) = root.get_mut("files") {
+            let referenced: std::collections::HashSet<&str> = element_values
+                .iter()
+                .filter(|e| e.get("isDeleted").and_then(Value::as_bool) != Some(true))
+                .filter_map(|e| e.get("fileId").and_then(Value::as_str))
+                .collect();
+            files.retain(|id, _| referenced.contains(id.as_str()));
+        }
+        let elements = Value::Array(element_values);
         if root.contains_key("elements") || !self.elements.is_empty() {
             root.insert("elements".into(), elements);
         }
@@ -275,6 +286,9 @@ mod tests {
             file.file_data("f1").unwrap().data_url,
             "data:image/png;base64,AAAA"
         );
+        file.elements.push(Element::from_value(
+            json!({"type":"image","id":"i","fileId":"f1","isDeleted":false}),
+        ));
         let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
         assert_eq!(written["files"]["f1"]["mimeType"], json!("image/png"));
         assert_eq!(written["files"]["f1"]["id"], json!("f1"));
@@ -282,6 +296,19 @@ mod tests {
             &written["files"]["f1"]["lastRetrieved"],
             &json!(1.0)
         ));
+    }
+
+    #[test]
+    fn only_files_a_live_element_references_are_written() {
+        let text = r##"{"type":"excalidraw","elements":[
+            {"type":"image","id":"live","fileId":"f1","isDeleted":false},
+            {"type":"image","id":"gone","fileId":"f2","isDeleted":true}],
+            "files":{"f1":{"dataURL":"a"},"f2":{"dataURL":"b"},"f3":{"dataURL":"c"}}}"##;
+        let file = SceneFile::from_json_str(text).unwrap();
+        let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
+        let files = written["files"].as_object().unwrap();
+        assert_eq!(files.keys().collect::<Vec<_>>(), ["f1"]);
+        assert!(file.root["files"]["f2"].is_object(), "in-memory files stay");
     }
 
     #[test]

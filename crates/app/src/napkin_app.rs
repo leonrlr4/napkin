@@ -519,6 +519,12 @@ impl NapkinApp {
     /// until the editor is idle, since decoding can outlast the gesture that was in progress
     /// when it started.
     fn run_intake(&mut self, ctx: &egui::Context, camera: Camera, canvas_min: egui::Pos2) {
+        // Taken first so a paste requested while the file is unreadable is discarded here
+        // instead of replaying once the editor exists.
+        let requests = self
+            .pinch
+            .as_ref()
+            .map_or(0, PinchListener::take_paste_requests);
         if self.unreadable.is_some() {
             return;
         }
@@ -528,10 +534,6 @@ impl NapkinApp {
         let pointer_at = self.capture.last().unwrap_or_else(|| {
             camera.view_to_scene([self.canvas_size[0] / 2.0, self.canvas_size[1] / 2.0])
         });
-        let requests = self
-            .pinch
-            .as_ref()
-            .map_or(0, PinchListener::take_paste_requests);
         if requests > 0
             && !self.clipboard_unavailable
             && editor.is_idle()

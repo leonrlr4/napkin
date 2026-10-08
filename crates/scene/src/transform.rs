@@ -831,7 +831,7 @@ pub fn resize_element(
     let next_width = next_width * flip_factor_x;
     let next_height = next_height * flip_factor_y;
     let orig_scale = match orig {
-        Element::Image(i) => i.scale,
+        Element::Image(i) => i.scale(),
         _ => [1.0, 1.0],
     };
     // `resizeSingleElement` mutates `scale` before its `nextWidth !== 0` guard, so a
@@ -843,9 +843,9 @@ pub fn resize_element(
     if next_width == 0.0 || next_height == 0.0 {
         // Geometry stays as the previous pointer move left it; only `scale` changes.
         if let Element::Image(current) = &mut file.elements[position]
-            && current.scale != next_scale
+            && current.scale() != next_scale
         {
-            current.scale = next_scale;
+            current.scale = Some(next_scale);
             bump_version(&mut file.elements[position], env);
             return true;
         }
@@ -945,7 +945,7 @@ pub fn resize_element(
             i.base.width = next_width.abs();
             i.base.height = next_height.abs();
             // Dragging past the opposite edge flips the image; `scale` keeps the sign.
-            i.scale = next_scale;
+            i.scale = Some(next_scale);
         }
         Element::Text(_) | Element::Raw(_) => unreachable!("handled above"),
     }
@@ -1489,6 +1489,9 @@ pub fn resize_elements(
                 i.base.width = new_width;
                 i.base.height = new_height;
                 i.base.angle = new_angle;
+                // `resizeMultipleElements` flips by the group's flip factors, from `start`.
+                let [sx, sy] = i.scale();
+                i.scale = Some([sx * flip_factor_x, sy * flip_factor_y]);
             }
             Element::Text(t) => {
                 t.base.x = new_x;

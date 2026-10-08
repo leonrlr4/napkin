@@ -33,8 +33,10 @@ pub enum PrepareError {
 
 /// `initializeImage`'s file work, off the UI thread: sniffs the format from the bytes
 /// (not the claimed MIME type), rejects SVG, takes the SHA-1 of the original bytes as the
-/// `fileId`, downsizes past 1440 px on the long side and re-encodes, rejects anything still
-/// over 4 MiB, and builds the data URL. `now_ms` stamps `created`/`lastRetrieved`.
+/// `fileId`, bakes the EXIF orientation into the pixels (so any image whose orientation is
+/// not the identity is re-encoded even when small), downsizes past 1440 px on the long side
+/// and re-encodes, rejects anything still over 4 MiB, and builds the data URL. `now_ms`
+/// stamps `created`/`lastRetrieved`.
 pub fn prepare(bytes: &[u8], now_ms: f64) -> Result<PreparedImage, PrepareError> {
     prepare_with_limit(bytes, now_ms, MAX_FILE_BYTES)
 }

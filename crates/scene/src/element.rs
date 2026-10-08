@@ -137,11 +137,21 @@ pub struct ImageElement {
     pub file_id: Slot<String>,
     /// `"pending"`, `"saved"` or `"error"`.
     pub status: String,
-    pub scale: [f64; 2],
+    /// Absent in files written before Excalidraw added it; absent stays absent on write.
+    /// Read it through `ImageElement::scale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<[f64; 2]>,
     #[serde(default, skip_serializing_if = "Slot::is_missing")]
     pub crop: Slot<ImageCrop>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl ImageElement {
+    /// The flip sign pair; a missing `scale` is `[1, 1]`.
+    pub fn scale(&self) -> [f64; 2] {
+        self.scale.unwrap_or([1.0, 1.0])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -639,6 +649,27 @@ mod tests {
         let written = element.to_value();
         assert!(semantic_eq(&written, &value));
         assert!(written.get("crop").is_none() && written.get("fileId").is_none());
+    }
+
+    #[test]
+    fn an_image_without_scale_stays_typed_and_keeps_the_key_missing() {
+        let value = json!({
+            "id": "i", "type": "image", "x": 10, "y": 20, "width": 300, "height": 200,
+            "angle": 0, "strokeColor": "transparent", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0", "roundness": null,
+            "seed": 1, "version": 3, "versionNonce": 7, "isDeleted": false, "boundElements": null,
+            "updated": 1, "link": null, "locked": false,
+            "status": "saved", "fileId": "abc"
+        });
+        let element = Element::from_value(value.clone());
+        let Element::Image(image) = &element else {
+            panic!("{element:?}");
+        };
+        assert_eq!(image.scale(), [1.0, 1.0]);
+        let written = element.to_value();
+        assert!(semantic_eq(&written, &value));
+        assert!(written.get("scale").is_none());
     }
 
     #[test]

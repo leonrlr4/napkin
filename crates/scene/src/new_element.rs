@@ -284,7 +284,7 @@ pub fn new_image_element(props: ElementProps, image: ImageProps, env: &mut impl 
         base,
         file_id: image.file_id.map_or(Slot::Null, Slot::Value),
         status: image.status.unwrap_or_else(|| "pending".to_owned()),
-        scale: image.scale.unwrap_or([1.0, 1.0]),
+        scale: Some(image.scale.unwrap_or([1.0, 1.0])),
         crop: Slot::Null,
         extra,
     })

@@ -1979,10 +1979,11 @@ fn image_quad_vertices(
         inset(&mut u0, &mut u1, texture_size[0]);
         inset(&mut v0, &mut v1, texture_size[1]);
     }
-    if image.scale[0] < 0.0 {
+    let [flip_x, flip_y] = image.scale();
+    if flip_x < 0.0 {
         std::mem::swap(&mut u0, &mut u1);
     }
-    if image.scale[1] < 0.0 {
+    if flip_y < 0.0 {
         std::mem::swap(&mut v0, &mut v1);
     }
     let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];

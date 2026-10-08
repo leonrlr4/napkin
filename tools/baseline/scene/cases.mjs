@@ -643,6 +643,10 @@ export const transformCases = [
   ["resizeImage_flipped_e_flipBack", [pic({ scale: [-1, 1] })], ["a"], "e", [40, 150], [0, 0], NONE],
   ["resizeImage_flipped_e_stays", [pic({ scale: [-1, 1] })], ["a"], "e", [250, 150], [0, 0], NONE],
   ["resizeImage_rotated_se", [pic({ angle: 0.6 })], ["a"], "se", aroundCenter(pic({ id: "x", angle: 0.6 }), [330, 220], 0.6), [0, 0], NONE],
+  ["resizeMultiImage_se", [pic(), element("rectangle", { id: "b", x: 320, y: 100, width: 40, height: 40 })], ["a", "b"], "se", [400, 260], [0, 0], NONE],
+  ["resizeMultiImage_se_flipBoth", [pic(), element("rectangle", { id: "b", x: 320, y: 100, width: 40, height: 40 })], ["a", "b"], "se", [50, 60], [0, 0], NONE],
+  ["resizeMultiImage_e_flipX", [pic(), element("rectangle", { id: "b", x: 320, y: 100, width: 40, height: 40 })], ["a", "b"], "e", [60, 150], [0, 0], NONE],
+  ["resizeMultiImage_flipped_e_flipBack", [pic({ scale: [-1, 1] }), element("rectangle", { id: "b", x: 320, y: 100, width: 40, height: 40 })], ["a", "b"], "e", [60, 150], [0, 0], NONE],
 ];
 
 /** Shapes `s` (left) and `u` (right) with arrow `w` bound from `s` to `u`. */

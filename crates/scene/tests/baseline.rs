@@ -750,7 +750,7 @@ fn transform() {
                             out["fontSize"] = json!(t.font_size);
                             out["text"] = json!(t.text);
                         }
-                        Element::Image(i) => out["scale"] = json!(i.scale),
+                        Element::Image(i) => out["scale"] = json!(i.scale()),
                         _ => {}
                     }
                     if e.kind() == "arrow" {

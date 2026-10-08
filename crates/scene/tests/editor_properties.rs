@@ -264,3 +264,60 @@ fn a_bigger_font_rewraps_the_label_and_grows_the_container() {
     assert_eq!(rect_of(&e, "r")[3], 90.0 + 10.0);
     assert!(element(&e, "r").version() > version);
 }
+
+fn saved_image(id: &str, x: f64) -> serde_json::Value {
+    json!({
+        "id": id, "type": "image", "x": x, "y": 0, "width": 5, "height": 5, "angle": 0,
+        "strokeColor": "transparent", "backgroundColor": "transparent", "fillStyle": "solid",
+        "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100,
+        "groupIds": [], "frameId": null, "index": null, "roundness": null, "seed": 1,
+        "version": 1, "versionNonce": 1, "isDeleted": false, "boundElements": null,
+        "updated": 1, "link": null, "locked": false,
+        "status": "saved", "fileId": "f", "scale": [1, 1], "crop": null
+    })
+}
+
+#[test]
+fn opacity_changes_an_image_and_reads_back_in_the_panel() {
+    let mut e = editor(vec![saved_image("i", 0.0)]);
+    e.command(Command::SelectAll);
+    assert_eq!(e.panel().opacity, Some(100.0));
+    assert!(e.set_property(Property::Opacity(40.0), &mut CharWidthMeasure));
+    assert_eq!(e.file().elements[0].to_value()["opacity"], json!(40.0));
+    assert_eq!(e.panel().opacity, Some(40.0));
+}
+
+#[test]
+fn opacity_on_a_mixed_selection_changes_the_image_too() {
+    let mut e = editor(vec![
+        saved_image("i", 0.0),
+        sample::generic("rectangle", "r", [20.0, 0.0, 10.0, 10.0]),
+    ]);
+    e.command(Command::SelectAll);
+    assert!(e.set_property(Property::Opacity(30.0), &mut CharWidthMeasure));
+    for element in &e.file().elements {
+        assert_eq!(element.to_value()["opacity"], json!(30.0));
+    }
+    assert_eq!(e.panel().opacity, Some(30.0));
+}
+
+#[test]
+fn stroke_color_still_skips_an_image_in_a_mixed_selection() {
+    let mut e = editor(vec![
+        saved_image("i", 0.0),
+        sample::generic("rectangle", "r", [20.0, 0.0, 10.0, 10.0]),
+    ]);
+    e.command(Command::SelectAll);
+    assert!(e.set_property(
+        Property::StrokeColor("#e03131".into()),
+        &mut CharWidthMeasure
+    ));
+    assert_eq!(
+        e.file().elements[0].to_value()["strokeColor"],
+        json!("transparent")
+    );
+    assert_eq!(
+        e.file().elements[1].to_value()["strokeColor"],
+        json!("#e03131")
+    );
+}

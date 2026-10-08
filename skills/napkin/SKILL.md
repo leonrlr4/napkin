@@ -32,7 +32,7 @@ container, folded into the container's line rather than shown on its own), `text
 `#1e1e1e`), `bg=<color>` (omitted when `transparent`), `start=<id>` / `end=<id>` (an
 arrow's bindings), `points=<JSON>` (lines and arrows only), `groups=<id,id>`,
 `angle=<radians>` (omitted when 0) and `locked`. An `image` line has only the type,
-`x y w h` and `angle=` (no `stroke=`, `bg=` or file id). `label=` and `text=` show the text as
+`x y w h`, `angle=`, `groups=` and `locked` (no `stroke=`, `bg=` or file id). `label=` and `text=` show the text as
 typed, without the line breaks napkin added to wrap it. Numbers are rounded to 2 decimals.
 `stroke=`/`bg=` only ever show the color; fill style, stroke style, stroke width and other
 styling only show up in `--full` or `render`. Example, after drawing a small flow:
@@ -111,7 +111,7 @@ Every type also accepts `strokeColor`, `backgroundColor`, `fillStyle`
 `update` takes `{"id": "...", "set": {...}}`; `set` accepts a subset of the same fields
 depending on the element's type (a text label bound to a container can't take `x`/`y` —
 move the container instead; a container's `set.text` edits/creates its label; lines and
-arrows can't take `text` at all; an `image` takes only `x`, `y`, `width` and `height`
+arrows can't take `text` at all; an `image` takes only `x`, `y`, `width`, `height` and `opacity`
 and `add` can't create one; an unrecognized ("raw") element can only have `x`/`y`
 changed). `delete` takes `{"ids": [...]}`; deleting a container deletes its label and
 unbinds any arrows pointing at it.

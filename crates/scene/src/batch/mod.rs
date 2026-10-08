@@ -857,7 +857,7 @@ fn apply_freedraw_update(
     Ok(())
 }
 
-/// `x`, `y`, `width` (>0) and `height` (>0) for an image; anything else errors. `width` and
+/// `x`, `y`, `width` (>0), `height` (>0) and `opacity` for an image; anything else errors. `width` and
 /// `height` are set as given, without keeping the aspect ratio.
 fn apply_image_update(
     next: &mut SceneFile,
@@ -871,6 +871,7 @@ fn apply_image_update(
     let mut new_y = None;
     let mut new_width = None;
     let mut new_height = None;
+    let mut new_opacity = None;
     for (key, v) in set {
         match key.as_str() {
             "x" => new_x = Some(validate::finite(v).map_err(|m| op_err(pos, Some("set.x"), m))?),
@@ -883,11 +884,15 @@ fn apply_image_update(
                 new_height =
                     Some(validate::positive(v).map_err(|m| op_err(pos, Some("set.height"), m))?);
             }
+            "opacity" => {
+                new_opacity =
+                    Some(validate::opacity(v).map_err(|m| op_err(pos, Some("set.opacity"), m))?);
+            }
             other => {
                 return Err(op_err(
                     pos,
                     Some(&format!("set.{other}")),
-                    format!("{id} is an image napkin can only move and resize"),
+                    format!("{id} is an image napkin can only move, resize and fade"),
                 ));
             }
         }
@@ -905,6 +910,9 @@ fn apply_image_update(
         }
         if let Some(h) = new_height {
             base.height = h;
+        }
+        if let Some(o) = new_opacity {
+            base.opacity = o;
         }
     }
     if next.elements[index].placement() != before.placement() {
@@ -1123,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_image_takes_position_and_size_but_no_style() {
+    fn a_typed_image_takes_position_size_and_opacity_but_no_other_style() {
         let image = sample::with(
             sample::generic("rectangle", "pic", [0.0, 0.0, 200.0, 100.0]),
             json!({"type": "image", "strokeColor": "transparent", "status": "saved",
@@ -1146,6 +1154,13 @@ mod tests {
             get(&next, "pic").version(),
             get(&file, "pic").version() + 1.0
         );
+
+        let (faded, _) = apply(
+            &file,
+            json!({"ops": [{"op": "update", "id": "pic", "set": {"opacity": 40}}]}),
+        )
+        .unwrap();
+        assert_eq!(get(&faded, "pic").to_value()["opacity"], json!(40.0));
 
         let errors = apply(
             &file,

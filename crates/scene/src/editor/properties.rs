@@ -194,6 +194,12 @@ fn is_typed_kind(kind: &str) -> bool {
     )
 }
 
+/// Opacity is the one property an image takes (`opacity` is a plain `ElementBase` field it
+/// renders with); every other panel property skips it.
+fn has_opacity(kind: &str) -> bool {
+    is_typed_kind(kind) || kind == "image"
+}
+
 /// The element kind [`Tool`] creates, for `forToolOrSelection`'s "or the active tool" half;
 /// `None` for the tools that create nothing (`Selection`, `Hand`, `Eraser`).
 fn tool_kind(tool: Tool) -> Option<&'static str> {
@@ -422,7 +428,7 @@ pub(super) fn panel<E: Env>(editor: &Editor<E>) -> PanelState {
         opacity: pick(
             has_selection,
             &target,
-            is_typed_kind,
+            has_opacity,
             opacity_value,
             style.opacity,
         ),
@@ -771,7 +777,13 @@ fn mutate(
             redraw_text(next, measure);
             true
         }
-        Property::Opacity(opacity) => mutate_base(next, |b| b.opacity = *opacity),
+        Property::Opacity(opacity) => match next {
+            Element::Image(i) => {
+                i.base.opacity = *opacity;
+                true
+            }
+            _ => mutate_base(next, |b| b.opacity = *opacity),
+        },
     }
 }
 
