@@ -33,3 +33,4 @@ wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wgpu = "30"
+wl-clipboard-rs = "0.9"

@@ -10,18 +10,21 @@ use eframe::egui;
 use scene::editor::{Editor, Modifiers, PointerEvent, Tool};
 use scene::env::SystemEnv;
 use scene::file::NapkinView;
+use scene::image::PreparedImage;
 use scene::text::TextMeasure;
 
 use crate::agent;
 use crate::autosave::{Autosave, DocumentState, Trigger};
 use crate::bench;
 use crate::camera::{Camera, SceneRect, normalized_zoom};
+use crate::clipboard_image::{self, ClipboardContent};
 use crate::control::Response;
 use crate::control::handler::{self, Session, handle};
 use crate::control::render::Rasterize;
 use crate::control::server::{BindError, Incoming, Server, socket_path};
 use crate::edit_input::{self, EditorInput, PointerCapture};
 use crate::fonts;
+use crate::image_file::{self, PrepareError};
 use crate::input::{self, CanvasInput};
 use crate::overlay::{self, OverlayColors};
 use crate::pinch::{PinchListener, PinchTracker};
@@ -45,6 +48,104 @@ const PENDING_REQUEST_RETRY: Duration = Duration::from_millis(50);
 
 /// How long a notice stays on screen (spec §8).
 const NOTICE_DURATION: Duration = Duration::from_secs(10);
+
+/// What a background clipboard read or file preparation sends back to the UI thread.
+enum Intake {
+    /// Prepared images to insert around `at` (scene coordinates) as one step.
+    Images {
+        images: Vec<PreparedImage>,
+        at: [f64; 2],
+    },
+    /// Clipboard text to paste at `at`.
+    Text {
+        text: String,
+        at: [f64; 2],
+    },
+    Notice(String),
+    /// `clipboard_image::read` found no data-control: canvas pastes go back to egui's text
+    /// paste.
+    ClipboardUnavailable,
+}
+
+/// The notice for a file that could not become an image; `None` for files that are not
+/// images at all, which are ignored.
+fn prepare_error_notice(error: &PrepareError) -> Option<String> {
+    match error {
+        PrepareError::Svg => Some("不支援 SVG 圖片".to_owned()),
+        PrepareError::Unsupported => None,
+        PrepareError::TooBig => Some("圖片太大（上限 4 MB）".to_owned()),
+        PrepareError::Decode(reason) => {
+            eprintln!("napkin: could not decode the image: {reason}");
+            Some("無法讀取圖片".to_owned())
+        }
+    }
+}
+
+fn now_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
+}
+
+/// Reads the clipboard and prepares any image on a background thread.
+fn spawn_clipboard_read(tx: mpsc::Sender<Intake>, ctx: egui::Context, at: [f64; 2]) {
+    std::thread::spawn(move || {
+        let message = match clipboard_image::read() {
+            Err(reason) => {
+                eprintln!("napkin: clipboard data-control unavailable: {reason}");
+                Some(Intake::ClipboardUnavailable)
+            }
+            Ok(ClipboardContent::Image(bytes)) => match image_file::prepare(&bytes, now_ms()) {
+                Ok(image) => Some(Intake::Images {
+                    images: vec![image],
+                    at,
+                }),
+                Err(error) => prepare_error_notice(&error).map(Intake::Notice),
+            },
+            Ok(ClipboardContent::Svg) => Some(Intake::Notice("不支援 SVG 圖片".to_owned())),
+            Ok(ClipboardContent::Text(text)) => Some(Intake::Text { text, at }),
+            Ok(ClipboardContent::Empty) => None,
+        };
+        if let Some(message) = message {
+            let _ = tx.send(message);
+            ctx.request_repaint();
+        }
+    });
+}
+
+/// Reads and prepares dropped files on a background thread; the images go back together so
+/// they are inserted as one step, and the first failure becomes the notice.
+fn spawn_dropped_files(
+    tx: mpsc::Sender<Intake>,
+    ctx: egui::Context,
+    files: Vec<egui::DroppedFileHandle>,
+    at: [f64; 2],
+) {
+    std::thread::spawn(move || {
+        let mut images = Vec::new();
+        let mut notice = None;
+        for file in files {
+            let bytes = match file.bytes() {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    eprintln!("napkin: could not read {}: {reason}", file.path().display());
+                    continue;
+                }
+            };
+            match image_file::prepare(&bytes, now_ms()) {
+                Ok(image) => images.push(image),
+                Err(error) => notice = notice.or_else(|| prepare_error_notice(&error)),
+            }
+        }
+        if let Some(notice) = notice {
+            let _ = tx.send(Intake::Notice(notice));
+        }
+        if !images.is_empty() {
+            let _ = tx.send(Intake::Images { images, at });
+        }
+        ctx.request_repaint();
+    });
+}
 
 /// `self.editor` is always `Some` past the `load_error` early return in `ui()`: `load_error`
 /// is set exactly when the app was constructed without one (spec §8), and nothing ever clears
@@ -109,6 +210,13 @@ pub struct NapkinApp {
     pinch: Option<PinchListener>,
     /// Turns this listener's begin-relative `scale` into per-event zoom factors.
     pinch_tracker: PinchTracker,
+    /// Results of background clipboard reads and file preparation; `intake_tx` is cloned into
+    /// each worker thread.
+    intake_tx: mpsc::Sender<Intake>,
+    intake_rx: mpsc::Receiver<Intake>,
+    /// Set once a clipboard read reports no data-control support: canvas pastes then use
+    /// egui's `Event::Paste` text.
+    clipboard_unavailable: bool,
     /// Where the open canvas is written; `None` means changes are never saved (spec §5.4,
     /// `--bench` and a missing `$HOME` with no file argument).
     path: Option<PathBuf>,
@@ -321,6 +429,7 @@ impl NapkinApp {
             let ctx = cc.egui_ctx.clone();
             SaveWorker::spawn(move || ctx.request_repaint())
         });
+        let (intake_tx, intake_rx) = mpsc::channel();
         NapkinApp {
             display,
             load_error,
@@ -339,6 +448,9 @@ impl NapkinApp {
             focused: true,
             pinch,
             pinch_tracker: PinchTracker::default(),
+            intake_tx,
+            intake_rx,
+            clipboard_unavailable: false,
             path,
             unreadable: None,
             notice: notice.map(|message| (message, Instant::now())),
@@ -995,6 +1107,10 @@ impl eframe::App for NapkinApp {
                                     i.pointer
                                         .button_double_clicked(egui::PointerButton::Primary)
                                 }),
+                                // Ctrl+V requests only arrive through the Wayland keyboard
+                                // listener, so without it egui's paste is the only one.
+                                clipboard_handled_elsewhere: self.pinch.is_some()
+                                    && !self.clipboard_unavailable,
                             };
                             for action in edit_input::translate(&frame_input, &mut self.capture) {
                                 match action {
@@ -1045,6 +1161,11 @@ impl eframe::App for NapkinApp {
                                             ui.ctx().copy_text(text);
                                         }
                                     }
+                                    EditorInput::Cut => {
+                                        if let Some(text) = editor.cut_selection() {
+                                            ui.ctx().copy_text(text);
+                                        }
+                                    }
                                     EditorInput::Paste(text) => {
                                         let at = self.capture.last().unwrap_or_else(|| {
                                             camera.view_to_scene([
@@ -1068,6 +1189,73 @@ impl eframe::App for NapkinApp {
                                                 ctx: Some(ui.ctx()),
                                             },
                                         );
+                                    }
+                                }
+                            }
+                        }
+                        if self.unreadable.is_none() {
+                            let pointer_at = self.capture.last().unwrap_or_else(|| {
+                                camera.view_to_scene([
+                                    self.canvas_size[0] / 2.0,
+                                    self.canvas_size[1] / 2.0,
+                                ])
+                            });
+                            let requests = self
+                                .pinch
+                                .as_ref()
+                                .map_or(0, PinchListener::take_paste_requests);
+                            if requests > 0
+                                && !self.clipboard_unavailable
+                                && editor.is_idle()
+                                && !ui.ctx().egui_wants_keyboard_input()
+                            {
+                                spawn_clipboard_read(
+                                    self.intake_tx.clone(),
+                                    ui.ctx().clone(),
+                                    pointer_at,
+                                );
+                            }
+                            let dropped = ui.input(|i| i.raw.dropped_files.clone());
+                            if !dropped.is_empty() {
+                                let at = ui.input(|i| i.pointer.latest_pos()).map_or(
+                                    pointer_at,
+                                    |pos| {
+                                        camera.view_to_scene([
+                                            (pos.x - response.rect.min.x) as f64,
+                                            (pos.y - response.rect.min.y) as f64,
+                                        ])
+                                    },
+                                );
+                                spawn_dropped_files(
+                                    self.intake_tx.clone(),
+                                    ui.ctx().clone(),
+                                    dropped,
+                                    at,
+                                );
+                            }
+                            while let Ok(intake) = self.intake_rx.try_recv() {
+                                match intake {
+                                    Intake::Images { images, at } => {
+                                        editor.insert_images(
+                                            images,
+                                            at,
+                                            self.canvas_size[1],
+                                            camera.zoom,
+                                        );
+                                    }
+                                    Intake::Text { text, at } => {
+                                        let measure = resolve_measure(
+                                            &mut self.measure,
+                                            &mut self.measure_rx,
+                                            Some(ui.ctx()),
+                                        );
+                                        editor.paste(&text, at, measure);
+                                    }
+                                    Intake::Notice(message) => {
+                                        self.notice = Some((message, Instant::now()));
+                                    }
+                                    Intake::ClipboardUnavailable => {
+                                        self.clipboard_unavailable = true;
                                     }
                                 }
                             }
@@ -1398,6 +1586,20 @@ mod tests {
 
     use super::*;
     use crate::camera::MAX_ZOOM;
+
+    #[test]
+    fn unsupported_files_are_ignored_and_the_rest_get_a_notice() {
+        assert_eq!(prepare_error_notice(&PrepareError::Unsupported), None);
+        assert_eq!(
+            prepare_error_notice(&PrepareError::Svg).as_deref(),
+            Some("不支援 SVG 圖片")
+        );
+        assert_eq!(
+            prepare_error_notice(&PrepareError::TooBig).as_deref(),
+            Some("圖片太大（上限 4 MB）")
+        );
+        assert!(prepare_error_notice(&PrepareError::Decode("bad".into())).is_some());
+    }
 
     /// One headless frame shaped like `NapkinApp::ui`: a central panel whose canvas widget takes
     /// the whole window, and a small `egui::Area` (the toolbar) over its top-left corner.

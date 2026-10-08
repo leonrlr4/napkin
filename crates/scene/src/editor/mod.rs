@@ -463,6 +463,18 @@ impl<E: Env> Editor<E> {
         clipboard::serialize(&self.file, &self.selection)
     }
 
+    /// `actionCut`: the clipboard JSON for the selection, which is then deleted as one history
+    /// step. `None` (and nothing deleted) when nothing is selected or the editor is busy with a
+    /// gesture or text edit.
+    pub fn cut_selection(&mut self) -> Option<String> {
+        if !self.is_idle() {
+            return None;
+        }
+        let text = self.copy_selection()?;
+        self.command(Command::Delete);
+        Some(text)
+    }
+
     /// Pastes clipboard `text` at `at`, as one history step, and selects what was pasted.
     /// Excalidraw data (`addElementsFromPasteOrLibrary`) is repaired the way loading a file
     /// repairs it (`edit::repair_on_load`'s duplicate-id and index fixes), its deleted elements

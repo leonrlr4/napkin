@@ -16,6 +16,8 @@ pub enum EditorInput {
     Tool(Tool),
     Command(Command),
     Copy,
+    /// Ctrl+X: copy the selection, then delete it.
+    Cut,
     /// `egui::Event::Paste`'s text (Ctrl+V, converted by egui itself).
     Paste(String),
     DoubleClick(PointerEvent),
@@ -60,6 +62,9 @@ pub struct FrameInput<'a> {
     /// The primary button was double-clicked this frame
     /// (`InputState::pointer::button_double_clicked`).
     pub double_clicked: bool,
+    /// Canvas pastes are read from the Wayland clipboard directly (images included), so
+    /// egui's `Event::Paste` would paste the same text a second time.
+    pub clipboard_handled_elsewhere: bool,
 }
 
 /// `egui::Modifiers` to the editor's own type: `ctrl` covers both the physical Ctrl key and
@@ -180,9 +185,15 @@ pub fn translate(input: &FrameInput, capture: &mut PointerCapture) -> Vec<Editor
             egui::Event::Copy if !input.keyboard_taken => {
                 out.push(EditorInput::Copy);
             }
+            // Likewise Ctrl+X, which egui-winit reports only as `Event::Cut`.
+            egui::Event::Cut if !input.keyboard_taken => {
+                out.push(EditorInput::Cut);
+            }
             // A focused `TextEdit` (editing a text element) takes this event itself; forwarding
             // it here too would paste into the canvas at the same time.
-            egui::Event::Paste(text) if !input.keyboard_taken => {
+            egui::Event::Paste(text)
+                if !input.keyboard_taken && !input.clipboard_handled_elsewhere =>
+            {
                 out.push(EditorInput::Paste(text.clone()));
             }
             _ => {}
@@ -240,6 +251,7 @@ mod tests {
             super_held: false,
             pointer_over_ui: false,
             double_clicked: false,
+            clipboard_handled_elsewhere: false,
         }
     }
 
@@ -430,6 +442,29 @@ mod tests {
         let mut typing = frame(&events);
         typing.keyboard_taken = true;
         assert_eq!(translate(&typing, &mut PointerCapture::default()), vec![]);
+    }
+
+    #[test]
+    fn cut_event_becomes_cut_input_even_with_super_held() {
+        let events = [egui::Event::Cut];
+        let mut super_down = frame(&events);
+        super_down.super_held = true;
+        assert_eq!(
+            translate(&super_down, &mut PointerCapture::default()),
+            vec![EditorInput::Cut]
+        );
+
+        let mut typing = frame(&events);
+        typing.keyboard_taken = true;
+        assert_eq!(translate(&typing, &mut PointerCapture::default()), vec![]);
+    }
+
+    #[test]
+    fn paste_event_is_ignored_when_the_clipboard_is_read_directly() {
+        let events = [egui::Event::Paste("hello".to_string())];
+        let mut direct = frame(&events);
+        direct.clipboard_handled_elsewhere = true;
+        assert_eq!(translate(&direct, &mut PointerCapture::default()), vec![]);
     }
 
     #[test]

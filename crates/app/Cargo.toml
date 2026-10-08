@@ -30,6 +30,7 @@ wayland-backend.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wgpu.workspace = true
+wl-clipboard-rs.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
