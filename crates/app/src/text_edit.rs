@@ -20,6 +20,17 @@ fn text_edit_id() -> egui::Id {
     egui::Id::new("napkin-text-edit-buffer")
 }
 
+/// How opaque the overlay's selection highlight is over the canvas.
+const SELECTION_ALPHA: f32 = 0.35;
+
+/// The overlay's selection highlight: a translucent tint of the text's own color, which always
+/// contrasts with the canvas because the text itself has to. The egui theme's
+/// `selection.bg_fill` comes from the omarchy theme and is meant for the UI panels; over the
+/// canvas it can be nearly the canvas color itself.
+fn selection_fill(text_color: egui::Color32) -> egui::Color32 {
+    text_color.gamma_multiply(SELECTION_ALPHA)
+}
+
 /// What the overlay decided this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TextEditOutcome {
@@ -124,6 +135,7 @@ pub fn show(
         .fixed_pos(anchor)
         .pivot(pivot_align)
         .show(ui.ctx(), |ui| {
+            ui.visuals_mut().selection.bg_fill = selection_fill(color);
             if first_frame {
                 // The `TextEdit` below keeps the same id across every edit, so without this its
                 // persisted `TextEditState` (cursor position, and its own Ctrl+Z/Ctrl+Y undo
@@ -183,6 +195,16 @@ pub fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selection_highlight_is_a_tint_of_the_text_color() {
+        // An omarchy theme's own `selection` color can sit within a few shades of the dark
+        // canvas (`#230e18` over `#121212`), which left selected text looking unselected.
+        let text = egui::Color32::from_rgb(0xe0, 0xe0, 0xe0);
+        let fill = selection_fill(text);
+        assert_eq!(fill, text.gamma_multiply(SELECTION_ALPHA));
+        assert!(fill.a() > 40 && fill.a() < 160, "{fill:?}");
+    }
 
     fn sample_editing(text_align: &str) -> TextEditing {
         TextEditing {
