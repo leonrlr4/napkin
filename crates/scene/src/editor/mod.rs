@@ -40,7 +40,8 @@ use crate::file::SceneFile;
 use crate::fractional_index;
 use crate::geometry::{Bounds, GeometryCache, rotate_point};
 use crate::history::History;
-use crate::new_element::{self, ElementProps, TextProps};
+use crate::image::{self, PreparedImage};
+use crate::new_element::{self, ElementProps, ImageProps, TextProps};
 use crate::selection::{self, Selection};
 use crate::text::TextMeasure;
 use crate::transform;
@@ -482,7 +483,10 @@ impl<E: Env> Editor<E> {
         let selection_before = self.selection.clone();
 
         let new_ids = match parsed {
-            Pasted::Elements(raw_elements) => {
+            Pasted::Elements {
+                elements: raw_elements,
+                files,
+            } => {
                 let mut temp = SceneFile::new();
                 temp.elements = raw_elements;
                 edit::repair_on_load(&mut temp, &mut self.env);
@@ -515,6 +519,16 @@ impl<E: Env> Editor<E> {
                     &mut self.env,
                 );
                 let file = clone_scene(&mut self.file, &mut self.scene_clones);
+                // `addElementsFromPasteOrLibrary`: only the files the pasted images refer to.
+                for data in files {
+                    let used = duplicated.elements.iter().any(|e| {
+                        matches!(e, Element::Image(image)
+                            if image.file_id.value() == Some(&data.id))
+                    });
+                    if used {
+                        file.add_missing_file(data);
+                    }
+                }
                 file.elements.extend(duplicated.elements);
                 let moved: HashSet<String> = duplicated.new_ids.iter().cloned().collect();
                 fractional_index::sync_moved_indices(&mut file.elements, &moved, &mut self.env);
@@ -587,6 +601,58 @@ impl<E: Env> Editor<E> {
             }
         };
 
+        self.selection = Selection::from_ids(new_ids);
+        self.finish_edit(&before, &selection_before)
+    }
+
+    /// `insertImages` with every file already prepared: adds the files, creates one saved
+    /// image per entry laid out on a grid around `at` (`gridPadding = 50 / zoom`), selects them
+    /// and switches to the selection tool, all as one history step. `canvas_height` is the
+    /// canvas's height in screen points. Returns `false` when `images` is empty or the editor
+    /// is not idle. The files stay in the scene when the step is undone.
+    pub fn insert_images(
+        &mut self,
+        images: Vec<PreparedImage>,
+        at: [f64; 2],
+        canvas_height: f64,
+        zoom: f64,
+    ) -> bool {
+        if images.is_empty() || !self.is_idle() {
+            return false;
+        }
+        self.set_tool(Tool::Selection);
+        let before = Arc::clone(&self.file);
+        let selection_before = self.selection.clone();
+
+        let natural: Vec<[f64; 4]> = images
+            .iter()
+            .map(|image| image::natural_placement(at, image.natural_size, canvas_height, zoom))
+            .collect();
+        let placed = image::position_on_grid(&natural, at, 50.0 / zoom);
+
+        let stroke_width = self.style.stroke_width.value(false);
+        let mut new_ids = Vec::with_capacity(images.len());
+        let file = clone_scene(&mut self.file, &mut self.scene_clones);
+        for (image, [x, y, width, height]) in images.into_iter().zip(placed) {
+            let props = self.style.props([x, y], width, height, None, stroke_width);
+            let element = new_element::new_image_element(
+                props,
+                ImageProps {
+                    file_id: Some(image.file.id.clone()),
+                    status: Some("saved".into()),
+                    scale: None,
+                },
+                &mut self.env,
+            );
+            new_ids.push(
+                element
+                    .id()
+                    .expect("new image element has an id")
+                    .to_owned(),
+            );
+            file.add_missing_file(image.file);
+            edit::append_element(file, element, &mut self.env);
+        }
         self.selection = Selection::from_ids(new_ids);
         self.finish_edit(&before, &selection_before)
     }

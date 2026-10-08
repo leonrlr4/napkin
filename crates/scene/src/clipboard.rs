@@ -7,21 +7,21 @@
 //!
 //! `serializeAsClipboardJSON`'s frame handling (stripping `frameId` from an element copied
 //! without its containing frame) is not ported: napkin has no typed frame element, so it never
-//! takes that branch. `files` is always `{}`: napkin does not copy images (spec's element list,
-//! §1.2).
+//! takes that branch. `files` carries the data of every copied image.
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::element::Element;
-use crate::file::SceneFile;
+use crate::file::{FileData, SceneFile};
 use crate::selection::Selection;
 
 /// `serializeAsClipboardJSON` for the selected, non-deleted elements, plus a selected
-/// container's bound text (`getSelectedElements` with `includeBoundTextElement: true`).
+/// container's bound text (`getSelectedElements` with `includeBoundTextElement: true`) and the
+/// `files` entry of every selected image that has one.
 /// `None` when nothing is selected: an empty `elements: []` payload would still parse back on
 /// paste as (useless) Excalidraw data instead of falling through to plain text.
 pub fn serialize(file: &SceneFile, selection: &Selection) -> Option<String> {
-    let elements: Vec<Value> = file
+    let selected: Vec<&Element> = file
         .elements
         .iter()
         .filter(|element| {
@@ -31,19 +31,31 @@ pub fn serialize(file: &SceneFile, selection: &Selection) -> Option<String> {
                         .container_id()
                         .is_some_and(|container_id| selection.contains(container_id)))
         })
-        .map(Element::to_value)
         .collect();
-    if elements.is_empty() {
+    if selected.is_empty() {
         return None;
     }
-    Some(json!({"type": "excalidraw/clipboard", "elements": elements, "files": {}}).to_string())
+    let mut files = Map::new();
+    for element in &selected {
+        if let Element::Image(image) = element
+            && let Some(file_id) = image.file_id.value()
+            && let Some(data) = file.file_data(file_id)
+        {
+            files.insert(file_id.clone(), data.to_value());
+        }
+    }
+    let elements: Vec<Value> = selected.into_iter().map(Element::to_value).collect();
+    Some(json!({"type": "excalidraw/clipboard", "elements": elements, "files": files}).to_string())
 }
 
 /// What [`parse`] found in a pasted string.
 pub enum Pasted {
     /// An `excalidraw/clipboard` (or `excalidraw-api/clipboard`, or a whole `.excalidraw`
-    /// file's) payload's elements.
-    Elements(Vec<Element>),
+    /// file's) payload's elements and its `files` entries.
+    Elements {
+        elements: Vec<Element>,
+        files: Vec<FileData>,
+    },
     /// Anything else, trimmed.
     Text(String),
 }
@@ -58,9 +70,17 @@ pub fn parse(text: &str) -> Option<Pasted> {
         )
         && let Some(Value::Array(elements)) = root.get("elements")
     {
-        return Some(Pasted::Elements(
-            elements.iter().cloned().map(Element::from_value).collect(),
-        ));
+        let files = match root.get("files") {
+            Some(Value::Object(files)) => files
+                .iter()
+                .filter_map(|(key, entry)| FileData::from_value(key, entry))
+                .collect(),
+            _ => Vec::new(),
+        };
+        return Some(Pasted::Elements {
+            elements: elements.iter().cloned().map(Element::from_value).collect(),
+            files,
+        });
     }
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -117,7 +137,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(parse(&json_text), Some(Pasted::Elements(elements)) if elements.len() == 1)
+            matches!(parse(&json_text), Some(Pasted::Elements { elements, .. }) if elements.len() == 1)
         );
         assert!(matches!(parse("  hello  "), Some(Pasted::Text(text)) if text == "hello"));
         assert!(parse("   ").is_none());

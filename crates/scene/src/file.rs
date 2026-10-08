@@ -52,6 +52,38 @@ pub struct FileData {
     pub last_retrieved: f64,
 }
 
+impl FileData {
+    /// The `BinaryFileData` JSON object.
+    pub fn to_value(&self) -> Value {
+        json!({
+            "mimeType": self.mime_type,
+            "id": self.id,
+            "dataURL": self.data_url,
+            "created": self.created,
+            "lastRetrieved": self.last_retrieved,
+        })
+    }
+
+    /// Reads a `files` entry stored under `key`; `None` without string `mimeType` and
+    /// `dataURL`. The entry's own `id` wins over `key` (`addMissingFiles` uses `fileData.id`).
+    pub fn from_value(key: &str, entry: &Value) -> Option<FileData> {
+        Some(FileData {
+            id: entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(key)
+                .to_owned(),
+            mime_type: entry.get("mimeType")?.as_str()?.to_owned(),
+            data_url: entry.get("dataURL")?.as_str()?.to_owned(),
+            created: entry.get("created").and_then(Value::as_f64).unwrap_or(0.0),
+            last_retrieved: entry
+                .get("lastRetrieved")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneFile {
     /// Every top-level key in file order. `elements` and `appState` hold `null` while the
@@ -172,16 +204,7 @@ impl SceneFile {
         files
             .as_object_mut()
             .expect("normalized to an object above")
-            .insert(
-                data.id.clone(),
-                json!({
-                    "mimeType": data.mime_type,
-                    "id": data.id,
-                    "dataURL": data.data_url,
-                    "created": data.created,
-                    "lastRetrieved": data.last_retrieved,
-                }),
-            );
+            .insert(data.id.clone(), data.to_value());
         true
     }
 
