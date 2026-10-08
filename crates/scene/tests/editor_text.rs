@@ -340,3 +340,18 @@ fn a_container_too_small_for_padding_has_no_wrap_width() {
     assert!(e.double_click(at(4.0, 4.0), &mut CharWidthMeasure));
     assert_eq!(e.text_editing().unwrap().wrap_width, None);
 }
+
+/// `getTextBindableContainerAtPosition` stops at the topmost element whose box contains the
+/// point, whatever its type: a text drawn over a big transparent rectangle is that topmost
+/// element, so the rectangle behind it never becomes the container.
+#[test]
+fn double_click_on_text_inside_a_bigger_transparent_rectangle_edits_the_text() {
+    let mut e = editor(vec![
+        sample::generic("rectangle", "frame", [0.0, 0.0, 600.0, 400.0]),
+        sample::text("t", [100.0, 100.0, 120.0, 50.0], "hello\nworld", None),
+    ]);
+    assert!(e.double_click(at(150.0, 120.0), &mut CharWidthMeasure));
+    let editing = e.text_editing().expect("editing");
+    assert_eq!(editing.element_id.as_deref(), Some("t"));
+    assert_eq!(editing.text, "hello\nworld");
+}

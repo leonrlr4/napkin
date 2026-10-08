@@ -43,7 +43,7 @@ use crate::file::SceneFile;
 use crate::fractional_index;
 use crate::geometry::GeometryCache;
 use crate::new_element::{ElementProps, TextProps, bump_version, new_text_element};
-use crate::selection::{self, Selection};
+use crate::selection::Selection;
 use crate::text::{self, TextMeasure};
 
 use super::{Editor, PointerEvent, Tool, clone_scene};
@@ -105,29 +105,51 @@ fn topmost_hit(
         })
 }
 
-/// Topmost non-deleted rectangle, diamond or ellipse whose (rotation-aware) bounding box
-/// contains `point` (`getTextBindableContainerAtPosition`'s hit-test loop, napkin's three
-/// container kinds only; unlike the JS, this does not skip a locked one, matching it exactly).
+/// `getTextBindableContainerAtPosition`'s hit-test loop: the topmost live element whose
+/// (unrotated, `getElementAbsoluteCoords`) box strictly contains `point`, or an arrow whose
+/// outline is hit, whatever its type (frames are skipped). That element is the container only
+/// if it is a rectangle, diamond or ellipse, so a text drawn over a bigger shape shadows the
+/// shape behind it. Locked elements are not skipped, as in the JS.
 fn container_at(
     geometry: &mut GeometryCache,
     elements: &[Element],
     point: [f64; 2],
+    zoom: f64,
 ) -> Option<usize> {
-    elements
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, element)| {
-            if element.is_deleted()
-                || !matches!(
-                    element,
-                    Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
-                )
-            {
-                return None;
+    let [x, y] = point;
+    let mut hit = None;
+    for (index, element) in elements.iter().enumerate().rev() {
+        if element.is_deleted() {
+            continue;
+        }
+        if element.kind() == "arrow"
+            && collision::hit_element_itself(
+                geometry,
+                element,
+                point,
+                collision::hit_threshold(element, zoom),
+            )
+        {
+            hit = Some(index);
+            break;
+        }
+        let Some(([x1, y1, x2, y2], _)) = geometry.absolute_coords(element) else {
+            continue;
+        };
+        if x1 < x && x < x2 && y1 < y && y < y2 {
+            if matches!(element.kind(), "frame" | "magicframe") {
+                continue;
             }
-            selection::hit_element_bounding_box(geometry, element, point, 0.0).then_some(index)
-        })
+            hit = Some(index);
+            break;
+        }
+    }
+    hit.filter(|&index| {
+        matches!(
+            elements[index],
+            Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_)
+        )
+    })
 }
 
 /// The position of `id`'s live (non-deleted) element, if it still has one.
@@ -212,7 +234,7 @@ fn text_tool_target(editor: &mut Editor<impl Env>, point: [f64; 2], zoom: f64) -
             return Target::ExistingText(label);
         }
     }
-    match container_at(&mut editor.geometry, &editor.file.elements, point) {
+    match container_at(&mut editor.geometry, &editor.file.elements, point, zoom) {
         Some(index) if near_container_center(&editor.file.elements[index], point) => {
             Target::NewLabel(index)
         }
@@ -233,7 +255,7 @@ fn text_tool_target(editor: &mut Editor<impl Env>, point: [f64; 2], zoom: f64) -
 /// exact center before the shared center-snap check ever runs), else only within the same
 /// center-snap threshold [`text_tool_target`] uses.
 fn double_click_target(editor: &mut Editor<impl Env>, point: [f64; 2], zoom: f64) -> Target {
-    if let Some(index) = container_at(&mut editor.geometry, &editor.file.elements, point) {
+    if let Some(index) = container_at(&mut editor.geometry, &editor.file.elements, point, zoom) {
         let container = editor.file.elements[index].clone();
         if let Some(label) = bound_label_of(&editor.file.elements, &container) {
             return Target::ExistingText(label);
