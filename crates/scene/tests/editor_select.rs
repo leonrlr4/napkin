@@ -240,12 +240,14 @@ fn hand_tool_ignores_the_pointer_and_multi_selection_has_a_dashed_box() {
 }
 
 #[test]
-fn rotated_elements_move_but_have_no_handles() {
+fn rotated_elements_move_and_show_handles() {
     let rotated = sample::with(solid("r", [0.0, 0.0, 100.0, 20.0]), json!({"angle": 0.5}));
     let mut e = editor(vec![rotated]);
     click(&mut e, at(50.0, 10.0));
     assert_eq!(selected(&e), ["r"]);
-    assert!(e.overlay(1.0).handles.is_empty());
+    let overlay = e.overlay(1.0);
+    assert_eq!(overlay.handles.len(), 4);
+    assert!(overlay.rotation_handle.is_some());
     drag(&mut e, at(50.0, 10.0), [60.0, 10.0]);
     assert_eq!(rect_of(&e, "r")[..2], [10.0, 0.0]);
 }
@@ -389,4 +391,23 @@ fn scaling_a_labeled_container_with_shift_scales_its_label_font() {
     drag(&mut e, shift(304.0, 54.0), [604.0, 104.0]);
     let font = element(&e, "t").to_value()["fontSize"].as_f64().unwrap();
     assert!(font > 20.0, "{font}");
+}
+
+#[test]
+fn rotated_element_shows_turned_resize_and_grab_cursors() {
+    let mut e = editor(vec![sample::with(
+        solid("a", [0.0, 0.0, 100.0, 50.0]),
+        json!({"angle": std::f64::consts::FRAC_PI_4}),
+    )]);
+    click(&mut e, at(50.0, 25.0));
+    let overlay = e.overlay(1.0);
+    let center = |b: [f64; 4]| at((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+
+    // The southeast corner square turned an eighth: its nwse axis becomes north-south.
+    e.pointer_move(center(overlay.handles[3]), &mut CharWidthMeasure);
+    assert_eq!(e.cursor(), Cursor::ResizeNs);
+
+    let rotation = overlay.rotation_handle.expect("rotation handle");
+    e.pointer_move(center(rotation), &mut CharWidthMeasure);
+    assert_eq!(e.cursor(), Cursor::Grab);
 }

@@ -115,6 +115,7 @@ pub enum Cursor {
     ResizeNesw,
     ResizeNs,
     ResizeEw,
+    Grab,
 }
 
 /// What the app should draw on top of the scene for the current selection and gesture.
@@ -128,6 +129,8 @@ pub struct Overlay {
     pub selection_box: Option<Bounds>,
     /// Corner handle squares (`transform::selection_handles`).
     pub handles: Vec<Bounds>,
+    /// The rotation handle square (`transform::selection_handles`).
+    pub rotation_handle: Option<Bounds>,
     /// A single selected line or non-elbow arrow: its points in scene coordinates.
     pub points: Vec<[f64; 2]>,
     /// The rubber band while box selecting, normalized.
@@ -634,11 +637,14 @@ impl<E: Env> Editor<E> {
             None
         };
 
-        let handles =
-            transform::selection_handles(&mut self.geometry, &self.file, &self.selection, zoom)
-                .into_iter()
-                .map(|(_, bounds)| bounds)
-                .collect();
+        let selection_handles =
+            transform::selection_handles(&mut self.geometry, &self.file, &self.selection, zoom);
+        let handles = selection_handles
+            .resize
+            .into_iter()
+            .map(|(_, bounds)| bounds)
+            .collect();
+        let rotation_handle = selection_handles.rotation;
 
         let points = match single {
             Some(position) if select::is_plain_linear(&self.file.elements[position]) => {
@@ -654,6 +660,7 @@ impl<E: Env> Editor<E> {
             outlines,
             selection_box,
             handles,
+            rotation_handle,
             points,
             box_selection,
         }

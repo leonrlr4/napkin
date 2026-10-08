@@ -10,6 +10,7 @@
 //! `afa3a653fc5d2b742adcbd5a6063187b056d2419`.
 
 use std::collections::HashMap;
+use std::f64::consts::PI;
 use std::sync::Arc;
 
 use crate::collision;
@@ -188,7 +189,8 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
         &editor.selection,
         event.at,
         event.zoom,
-    ) {
+    ) && handle != HandleKind::Rotation
+    {
         let offset = transform::resize_offset(
             &mut editor.geometry,
             &editor.file,
@@ -536,6 +538,50 @@ fn update_cursor(editor: &mut Editor<impl Env>, event: PointerEvent) {
     editor.cursor = compute_cursor(editor, event);
 }
 
+/// `getCursorForResizingElement`: the cursor for dragging `handle`. A single element swaps the
+/// diagonal pair when exactly one of its width and height is negative, and turns the resize
+/// axis by its angle in 45 degree steps (`rotateResizeCursor`).
+fn resize_cursor(editor: &Editor<impl Env>, handle: HandleKind) -> Cursor {
+    // Clockwise from north-south, the order `RESIZE_CURSORS` lists.
+    const AXES: [Cursor; 4] = [
+        Cursor::ResizeNs,
+        Cursor::ResizeNesw,
+        Cursor::ResizeEw,
+        Cursor::ResizeNwse,
+    ];
+    let positions = editor.selection.positions(&editor.file);
+    let placement = match positions.as_slice() {
+        [only] => editor.file.elements[*only].placement(),
+        _ => None,
+    };
+    let swap = placement.is_some_and(|p| p.height.signum() * p.width.signum() == -1.0);
+    let axis = match handle {
+        HandleKind::Rotation => return Cursor::Grab,
+        HandleKind::N | HandleKind::S => 0,
+        HandleKind::E | HandleKind::W => 2,
+        HandleKind::Nw | HandleKind::Se => {
+            if swap {
+                1
+            } else {
+                3
+            }
+        }
+        HandleKind::Ne | HandleKind::Sw => {
+            if swap {
+                3
+            } else {
+                1
+            }
+        }
+    };
+    let steps = placement.map_or(0.0, |p| rough::js::math_round(p.angle / (PI / 4.0)));
+    // JS indexes with `%`, which keeps the dividend's sign; a negative index finds no cursor.
+    match usize::try_from((axis as i64 + steps as i64) % 4) {
+        Ok(index) => AXES[index],
+        Err(_) => Cursor::Default,
+    }
+}
+
 fn compute_cursor(editor: &mut Editor<impl Env>, event: PointerEvent) -> Cursor {
     if editor.tool != Tool::Selection {
         return if editor.tool == Tool::Hand {
@@ -552,12 +598,7 @@ fn compute_cursor(editor: &mut Editor<impl Env>, event: PointerEvent) -> Cursor 
         event.at,
         event.zoom,
     ) {
-        return match handle {
-            HandleKind::Nw | HandleKind::Se => Cursor::ResizeNwse,
-            HandleKind::Ne | HandleKind::Sw => Cursor::ResizeNesw,
-            HandleKind::N | HandleKind::S => Cursor::ResizeNs,
-            HandleKind::E | HandleKind::W => Cursor::ResizeEw,
-        };
+        return resize_cursor(editor, handle);
     }
 
     if hit_point(editor, event.at, event.zoom).is_some() {
