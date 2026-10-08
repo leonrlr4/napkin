@@ -81,6 +81,11 @@ fn prepare_error_notice(error: &PrepareError) -> Option<String> {
     }
 }
 
+/// The next queued intake, in arrival order, once the editor can take it.
+fn next_applicable(queue: &mut VecDeque<Intake>, editor_idle: bool) -> Option<Intake> {
+    if editor_idle { queue.pop_front() } else { None }
+}
+
 fn now_ms() -> f64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -217,6 +222,8 @@ pub struct NapkinApp {
     /// Set once a clipboard read reports no data-control support: canvas pastes then use
     /// egui's `Event::Paste` text.
     clipboard_unavailable: bool,
+    /// Images and text that finished loading, waiting for the editor to be idle.
+    pending_intake: VecDeque<Intake>,
     /// Where the open canvas is written; `None` means changes are never saved (spec §5.4,
     /// `--bench` and a missing `$HOME` with no file argument).
     path: Option<PathBuf>,
@@ -451,6 +458,7 @@ impl NapkinApp {
             intake_tx,
             intake_rx,
             clipboard_unavailable: false,
+            pending_intake: VecDeque::new(),
             path,
             unreadable: None,
             notice: notice.map(|message| (message, Instant::now())),
@@ -503,6 +511,68 @@ impl NapkinApp {
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => self.measure_rx = None,
+        }
+    }
+
+    /// Starts the background work this frame asks for (a Ctrl+V clipboard read, dropped file
+    /// preparation) and applies what finished. Images and text wait in `pending_intake`
+    /// until the editor is idle, since decoding can outlast the gesture that was in progress
+    /// when it started.
+    fn run_intake(&mut self, ctx: &egui::Context, camera: Camera, canvas_min: egui::Pos2) {
+        if self.unreadable.is_some() {
+            return;
+        }
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let pointer_at = self.capture.last().unwrap_or_else(|| {
+            camera.view_to_scene([self.canvas_size[0] / 2.0, self.canvas_size[1] / 2.0])
+        });
+        let requests = self
+            .pinch
+            .as_ref()
+            .map_or(0, PinchListener::take_paste_requests);
+        if requests > 0
+            && !self.clipboard_unavailable
+            && editor.is_idle()
+            && !ctx.egui_wants_keyboard_input()
+        {
+            spawn_clipboard_read(self.intake_tx.clone(), ctx.clone(), pointer_at);
+        }
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped.is_empty() {
+            let at = ctx
+                .input(|i| i.pointer.latest_pos())
+                .map_or(pointer_at, |pos| {
+                    camera.view_to_scene([
+                        (pos.x - canvas_min.x) as f64,
+                        (pos.y - canvas_min.y) as f64,
+                    ])
+                });
+            spawn_dropped_files(self.intake_tx.clone(), ctx.clone(), dropped, at);
+        }
+        while let Ok(intake) = self.intake_rx.try_recv() {
+            match intake {
+                Intake::Notice(message) => self.notice = Some((message, Instant::now())),
+                Intake::ClipboardUnavailable => self.clipboard_unavailable = true,
+                queued => self.pending_intake.push_back(queued),
+            }
+        }
+        while let Some(intake) = next_applicable(&mut self.pending_intake, editor.is_idle()) {
+            match intake {
+                Intake::Images { images, at } => {
+                    editor.insert_images(images, at, self.canvas_size[1], camera.zoom);
+                }
+                Intake::Text { text, at } => {
+                    let measure =
+                        resolve_measure(&mut self.measure, &mut self.measure_rx, Some(ctx));
+                    editor.paste(&text, at, measure);
+                }
+                Intake::Notice(_) | Intake::ClipboardUnavailable => {}
+            }
+        }
+        if !self.pending_intake.is_empty() {
+            ctx.request_repaint();
         }
     }
 
@@ -1193,73 +1263,6 @@ impl eframe::App for NapkinApp {
                                 }
                             }
                         }
-                        if self.unreadable.is_none() {
-                            let pointer_at = self.capture.last().unwrap_or_else(|| {
-                                camera.view_to_scene([
-                                    self.canvas_size[0] / 2.0,
-                                    self.canvas_size[1] / 2.0,
-                                ])
-                            });
-                            let requests = self
-                                .pinch
-                                .as_ref()
-                                .map_or(0, PinchListener::take_paste_requests);
-                            if requests > 0
-                                && !self.clipboard_unavailable
-                                && editor.is_idle()
-                                && !ui.ctx().egui_wants_keyboard_input()
-                            {
-                                spawn_clipboard_read(
-                                    self.intake_tx.clone(),
-                                    ui.ctx().clone(),
-                                    pointer_at,
-                                );
-                            }
-                            let dropped = ui.input(|i| i.raw.dropped_files.clone());
-                            if !dropped.is_empty() {
-                                let at = ui.input(|i| i.pointer.latest_pos()).map_or(
-                                    pointer_at,
-                                    |pos| {
-                                        camera.view_to_scene([
-                                            (pos.x - response.rect.min.x) as f64,
-                                            (pos.y - response.rect.min.y) as f64,
-                                        ])
-                                    },
-                                );
-                                spawn_dropped_files(
-                                    self.intake_tx.clone(),
-                                    ui.ctx().clone(),
-                                    dropped,
-                                    at,
-                                );
-                            }
-                            while let Ok(intake) = self.intake_rx.try_recv() {
-                                match intake {
-                                    Intake::Images { images, at } => {
-                                        editor.insert_images(
-                                            images,
-                                            at,
-                                            self.canvas_size[1],
-                                            camera.zoom,
-                                        );
-                                    }
-                                    Intake::Text { text, at } => {
-                                        let measure = resolve_measure(
-                                            &mut self.measure,
-                                            &mut self.measure_rx,
-                                            Some(ui.ctx()),
-                                        );
-                                        editor.paste(&text, at, measure);
-                                    }
-                                    Intake::Notice(message) => {
-                                        self.notice = Some((message, Instant::now()));
-                                    }
-                                    Intake::ClipboardUnavailable => {
-                                        self.clipboard_unavailable = true;
-                                    }
-                                }
-                            }
-                        }
                         ui.ctx().set_cursor_icon(if panning {
                             egui::CursorIcon::Grab
                         } else {
@@ -1281,6 +1284,7 @@ impl eframe::App for NapkinApp {
                     // makes is covered by the save this same frame decides to make, rather than
                     // waiting for the next one.
                     let camera_for_requests = *camera;
+                    self.run_intake(ui.ctx(), camera_for_requests, response.rect.min);
                     self.serve_requests(frame, ui.ctx(), camera_for_requests);
 
                     if let Some(editor) = self.editor.as_mut()
@@ -1586,6 +1590,24 @@ mod tests {
 
     use super::*;
     use crate::camera::MAX_ZOOM;
+
+    #[test]
+    fn queued_intake_waits_for_an_idle_editor_and_keeps_order() {
+        let text = |t: &str| Intake::Text {
+            text: t.to_owned(),
+            at: [0.0, 0.0],
+        };
+        let mut queue = VecDeque::from([text("a"), text("b")]);
+        assert!(next_applicable(&mut queue, false).is_none());
+        assert_eq!(queue.len(), 2);
+        assert!(
+            matches!(next_applicable(&mut queue, true), Some(Intake::Text { text, .. }) if text == "a")
+        );
+        assert!(
+            matches!(next_applicable(&mut queue, true), Some(Intake::Text { text, .. }) if text == "b")
+        );
+        assert!(next_applicable(&mut queue, true).is_none());
+    }
 
     #[test]
     fn unsupported_files_are_ignored_and_the_rest_get_a_notice() {

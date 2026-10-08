@@ -170,3 +170,21 @@ fn cut_returns_clipboard_json_and_deletes_in_one_undo_step() {
         1
     );
 }
+
+#[test]
+fn cut_of_several_elements_is_one_undo_step() {
+    let mut e = editor(vec![
+        sample::generic("rectangle", "a", [0.0, 0.0, 10.0, 10.0]),
+        sample::generic("rectangle", "b", [50.0, 0.0, 10.0, 10.0]),
+    ]);
+    e.command(Command::SelectAll);
+    let text = e.cut_selection().expect("selection is cut");
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["elements"].as_array().unwrap().len(), 2);
+    assert!(e.file().elements.iter().all(|x| x.is_deleted()));
+    assert!(e.command(Command::Undo));
+    assert_eq!(
+        e.file().elements.iter().filter(|x| !x.is_deleted()).count(),
+        2
+    );
+}
