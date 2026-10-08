@@ -444,16 +444,14 @@ fn apply_resize_move(
     );
 }
 
-/// The pivot of a rotation of `targets`: a single element's own center (absolute coords), the
-/// center of the common bounds otherwise. The rotation handle only exists for a selection of
-/// rotatable elements, so the fallback is never taken from the UI.
-/// Whether a rotation of two or more elements is in progress. Excalidraw hides the selection
-/// box and the transform handles of a multi-selection while it is rotating
-/// (`appState.isRotating` in `renderSelectionElement`'s caller).
+/// Whether a rotation of two or more elements is in progress (their box and handles hide).
 pub(super) fn is_rotating_group(gesture: &Gesture) -> bool {
     matches!(gesture, Gesture::Rotate(state) if state.targets.len() >= 2)
 }
 
+/// The pivot of a rotation of `targets`: a single element's own center (absolute coords), the
+/// center of the common bounds otherwise. The rotation handle only exists for a selection of
+/// rotatable elements, so the fallback is never taken from the UI.
 fn rotation_center(editor: &mut Editor<impl Env>, targets: &[usize]) -> [f64; 2] {
     if let [only] = targets
         && let Some((_, center)) = editor

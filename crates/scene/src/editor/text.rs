@@ -495,7 +495,8 @@ pub(super) fn double_click(
 /// [`bound_text::redraw_text_bounding_box`]: wrapped to the container (or to the text's own
 /// width), growing the container and recentred in it. An `autoResize` standalone text is not
 /// wrapped; it grows away from the edge its alignment pins, in its own rotated frame
-/// (`getAdjustedDimensions`, [`text::adjusted_origin`]). A label whose container is `Raw` is measured but not wrapped.
+/// (`getAdjustedDimensions`, [`text::adjusted_origin`]). A label whose container is `Raw` is
+/// measured but not wrapped.
 fn update_existing_text(
     file: &mut SceneFile,
     id: &str,

@@ -56,44 +56,6 @@ pub fn measure_text(
     [width, height]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sample::CharWidthMeasure;
-
-    #[test]
-    fn line_heights_follow_font_metadata() {
-        assert_eq!(line_height(5.0), 1.25);
-        assert_eq!(line_height(6.0), 1.25);
-        assert_eq!(line_height(7.0), 1.15);
-        assert_eq!(line_height(8.0), 1.25);
-        assert_eq!(line_height(2.0), 1.15);
-        assert_eq!(line_height(3.0), 1.2);
-        assert_eq!(line_height(9.0), 1.15);
-        assert_eq!(
-            line_height(42.0),
-            1.25,
-            "unknown ids fall back to Excalifont"
-        );
-    }
-
-    #[test]
-    fn normalizes_line_endings_and_tabs() {
-        assert_eq!(normalize_text("a\r\nb\rc\nd\te"), "a\nb\nc\nd        e");
-    }
-
-    #[test]
-    fn measures_the_widest_line_and_counts_empty_lines() {
-        let mut measure = CharWidthMeasure;
-        // "abc" is 3 * 0.6 * 20 = 36 wide; the empty middle line counts as one line (" ").
-        assert_eq!(
-            measure_text("ab\n\nabc", 5.0, 20.0, 1.25, &mut measure),
-            [36.0, 75.0]
-        );
-        assert_eq!(measure_text("", 5.0, 10.0, 1.2, &mut measure), [6.0, 12.0]);
-    }
-}
-
 /// The new top-left of an auto-resizing standalone text whose size changes from its stored
 /// `width`/`height` to `next_size`: `getAdjustedDimensions`' anchor-preserving branch. The edge
 /// or corner its `textAlign`/`verticalAlign` pins stays put in the text's own rotated frame
@@ -163,4 +125,42 @@ pub(crate) fn adjusted_origin(
             t.base.y
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sample::CharWidthMeasure;
+
+    #[test]
+    fn line_heights_follow_font_metadata() {
+        assert_eq!(line_height(5.0), 1.25);
+        assert_eq!(line_height(6.0), 1.25);
+        assert_eq!(line_height(7.0), 1.15);
+        assert_eq!(line_height(8.0), 1.25);
+        assert_eq!(line_height(2.0), 1.15);
+        assert_eq!(line_height(3.0), 1.2);
+        assert_eq!(line_height(9.0), 1.15);
+        assert_eq!(
+            line_height(42.0),
+            1.25,
+            "unknown ids fall back to Excalifont"
+        );
+    }
+
+    #[test]
+    fn normalizes_line_endings_and_tabs() {
+        assert_eq!(normalize_text("a\r\nb\rc\nd\te"), "a\nb\nc\nd        e");
+    }
+
+    #[test]
+    fn measures_the_widest_line_and_counts_empty_lines() {
+        let mut measure = CharWidthMeasure;
+        // "abc" is 3 * 0.6 * 20 = 36 wide; the empty middle line counts as one line (" ").
+        assert_eq!(
+            measure_text("ab\n\nabc", 5.0, 20.0, 1.25, &mut measure),
+            [36.0, 75.0]
+        );
+        assert_eq!(measure_text("", 5.0, 10.0, 1.2, &mut measure), [6.0, 12.0]);
+    }
 }
