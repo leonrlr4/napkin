@@ -21,7 +21,7 @@ const lib = await bundleExcalidraw(
   "scene",
   `
   export { ShapeCache, generateRoughOptions, getFreedrawOutlinePoints } from "@excalidraw/element/shape";
-  export { newElement, newLinearElement, newArrowElement, newFreeDrawElement, newTextElement } from "@excalidraw/element/newElement";
+  export { newElement, newLinearElement, newArrowElement, newFreeDrawElement, newTextElement, newImageElement } from "@excalidraw/element/newElement";
   export { setCustomTextMetricsProvider } from "@excalidraw/element/textMeasurements";
   export { wrapText, parseTokens } from "@excalidraw/element/textWrapping";
   export { redrawTextBoundingBox, handleBindTextResize } from "@excalidraw/element/textElement";
@@ -305,6 +305,7 @@ function transformOutput(elements) {
     angle: el.angle,
     ...(el.points ? { points: el.points.map((p) => [p[0], p[1]]) } : {}),
     ...(el.type === "text" ? { fontSize: el.fontSize, text: el.text } : {}),
+    ...(el.type === "image" ? { scale: el.scale } : {}),
     ...(el.type === "arrow"
       ? { startBinding: el.startBinding?.elementId ?? null, endBinding: el.endBinding?.elementId ?? null }
       : {}),

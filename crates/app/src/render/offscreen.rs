@@ -17,6 +17,8 @@ pub fn render_rgba(
     renderer: &mut CanvasRenderer,
     frame: &CanvasFrame,
 ) -> Vec<u8> {
+    // One pass draws everything, so every image must be decoded before `prepare` plans it.
+    renderer.images().preload(&frame.file);
     let prepared = renderer.prepare(device, queue, frame);
     queue.submit(prepared);
 

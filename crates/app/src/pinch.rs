@@ -5,12 +5,16 @@
 //!
 //! The same event queue also binds a `wl_keyboard` to track whether a Super key is down
 //! ([`PinchListener::super_held`]): egui-winit drops the Super modifier on Linux, so Hyprland's
-//! unbound SUPER+letter combinations would otherwise reach napkin's own tool shortcuts.
+//! unbound SUPER+letter combinations would otherwise reach napkin's own tool shortcuts. It also
+//! counts Ctrl+V presses ([`PinchListener::take_paste_requests`]): egui-winit reports Ctrl+V
+//! only when the clipboard holds text, so an image on the clipboard would never reach the app
+//! through egui.
 //!
 //! Derived from the M0 spike (`spikes/m0/src/bin/pinch_probe.rs`, commit `7e14330`), which
 //! proved the binding flow works on this machine (Hyprland 0.56, `zwp_pointer_gestures_v1`
 //! version 3).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -72,6 +76,18 @@ impl PinchTracker {
 /// Linux evdev `KEY_LEFTMETA` / `KEY_RIGHTMETA`.
 pub const SUPER_KEYS: [u32; 2] = [125, 126];
 
+/// Linux evdev `KEY_V`.
+const KEY_V: u32 = 47;
+
+/// xkb's `Control` modifier bit in `wl_keyboard.modifiers`' `mods_depressed`.
+pub const CONTROL_MASK: u32 = 4;
+
+/// Whether a key press with these depressed modifiers is Ctrl+V. Super is deliberately not
+/// consulted: omarchy's SUPER+V reaches the focused surface as Ctrl+V with Super still held.
+pub fn is_paste_key(key: u32, mods_depressed: u32) -> bool {
+    key == KEY_V && mods_depressed & CONTROL_MASK != 0
+}
+
 /// Which Super keys are down, from `wl_keyboard` `enter`/`key`/`leave`.
 #[derive(Debug, Default)]
 pub struct SuperTracker {
@@ -121,6 +137,10 @@ struct GestureState {
     keyboard_bound: bool,
     /// Shared with [`PinchListener::super_held`].
     super_tracker: Arc<Mutex<SuperTracker>>,
+    /// `mods_depressed` from the latest `modifiers` event.
+    mods_depressed: u32,
+    /// Shared with [`PinchListener::take_paste_requests`].
+    paste_requests: Arc<AtomicUsize>,
 }
 
 // The registry can add/remove globals after the initial roundtrip; this listener only needs
@@ -176,6 +196,23 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for GestureState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        match &event {
+            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
+                state.mods_depressed = *mods_depressed;
+            }
+            wl_keyboard::Event::Leave { .. } => state.mods_depressed = 0,
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } if matches!(key_state.into_result(), Ok(wl_keyboard::KeyState::Pressed))
+                && is_paste_key(*key, state.mods_depressed) =>
+            {
+                state.paste_requests.fetch_add(1, Ordering::Relaxed);
+                state.ctx.request_repaint();
+            }
+            _ => {}
+        }
         let Ok(mut tracker) = state.super_tracker.lock() else {
             return;
         };
@@ -203,7 +240,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for GestureState {
             }
             // `Keymap` carries a file descriptor this listener has no use for; dropping the
             // event closes it (`OwnedFd`'s `Drop`). `Modifiers` and `RepeatInfo` don't affect
-            // whether a Super key is down.
+            // whether a Super key is down (`Modifiers` is read above for Ctrl).
             _ => {}
         }
     }
@@ -262,6 +299,9 @@ pub struct PinchListener {
     join_handle: Option<JoinHandle<()>>,
     /// Updated by the dispatch thread's `wl_keyboard` handling; read by [`PinchListener::super_held`].
     super_tracker: Arc<Mutex<SuperTracker>>,
+    /// Ctrl+V presses the dispatch thread has seen since the last
+    /// [`PinchListener::take_paste_requests`].
+    paste_requests: Arc<AtomicUsize>,
 }
 
 impl PinchListener {
@@ -309,6 +349,7 @@ impl PinchListener {
 
         let (tx, rx) = mpsc::channel();
         let super_tracker = Arc::new(Mutex::new(SuperTracker::default()));
+        let paste_requests = Arc::new(AtomicUsize::new(0));
         let mut state = GestureState {
             gestures,
             ctx: cc.egui_ctx.clone(),
@@ -316,6 +357,8 @@ impl PinchListener {
             pointer_gesture_bound: false,
             keyboard_bound: false,
             super_tracker: Arc::clone(&super_tracker),
+            mods_depressed: 0,
+            paste_requests: Arc::clone(&paste_requests),
         };
 
         let join_handle = std::thread::Builder::new()
@@ -371,6 +414,7 @@ impl PinchListener {
             stop_fd,
             join_handle: Some(join_handle),
             super_tracker,
+            paste_requests,
         })
     }
 
@@ -386,6 +430,12 @@ impl PinchListener {
             .lock()
             .map(|tracker| tracker.held())
             .unwrap_or(false)
+    }
+
+    /// Ctrl+V presses since the last call, however Ctrl got pressed (a real Ctrl key, or
+    /// Hyprland's `SUPER+V` binding sending Ctrl+V to the focused surface).
+    pub fn take_paste_requests(&self) -> usize {
+        self.paste_requests.swap(0, Ordering::Relaxed)
     }
 
     /// Wakes the dispatch thread and joins it. Idempotent.
@@ -411,6 +461,17 @@ impl Drop for PinchListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_v_counts_as_a_paste_request() {
+        assert!(is_paste_key(47, CONTROL_MASK));
+        assert!(
+            is_paste_key(47, CONTROL_MASK | 64),
+            "Super held alongside Ctrl"
+        );
+        assert!(!is_paste_key(47, 0));
+        assert!(!is_paste_key(46, CONTROL_MASK));
+    }
 
     #[test]
     fn tracks_either_super_key() {

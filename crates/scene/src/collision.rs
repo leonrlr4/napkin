@@ -273,15 +273,15 @@ fn rounded_corner(edge_end: [f64; 2], corner: [f64; 2], next_edge_start: [f64; 2
 }
 
 // ---------------------------------------------------------------------------
-// Rectanguloid (rectangle, text, and any `Raw` element regardless of its own `type`, exactly
-// as `distanceToElement`'s switch maps image/frame/embeddable/stickynote/iframe/magicframe to
-// `distanceToRectanguloidElement` as well: none of those have a napkin `Element` variant of
-// their own, so this arm covers them uniformly)
+// Rectanguloid (rectangle, text, image, and any `Raw` element regardless of its own `type`,
+// exactly as `distanceToElement`'s switch maps image/frame/embeddable/stickynote/iframe/
+// magicframe to `distanceToRectanguloidElement` as well: the types without a napkin
+// `Element` variant of their own land in the `Raw` arm)
 // ---------------------------------------------------------------------------
 
 /// `getCornerRadius(Math.min(width, height), element)`, then `deconstructRectanguloidElement`'s
 /// `if (radius === 0) radius = 0.01`. A `Rectangle`'s own `roundness` applies; every other
-/// element this is called for (text, `Raw`) has none.
+/// element this is called for (text, image, `Raw`) has none.
 fn rectanguloid_radius(element: &Element, min_dim: f64) -> f64 {
     let none = Slot::Missing;
     let roundness = match element {
@@ -843,7 +843,7 @@ pub fn is_point_in_element(
             };
             is_point_in_ellipse(placement, to_local_frame(point, center, placement))
         }
-        Element::Rectangle(_) | Element::Text(_) | Element::Raw(_) => {
+        Element::Rectangle(_) | Element::Text(_) | Element::Image(_) | Element::Raw(_) => {
             is_point_in_rectanguloid(geometry, element, point)
         }
     }
@@ -870,7 +870,7 @@ pub fn distance_to_element(
             }
             min
         }
-        Element::Rectangle(_) | Element::Text(_) | Element::Raw(_) => {
+        Element::Rectangle(_) | Element::Text(_) | Element::Image(_) | Element::Raw(_) => {
             distance_to_rectanguloid(geometry, element, point)
         }
     }
@@ -1043,7 +1043,7 @@ fn segment_distance_to_element(
             ];
             segment_to_ellipse_distance(seg, placement)
         }
-        Element::Rectangle(_) | Element::Text(_) | Element::Raw(_) => {
+        Element::Rectangle(_) | Element::Text(_) | Element::Image(_) | Element::Raw(_) => {
             let Some((_, center)) = geometry.absolute_coords(element) else {
                 return f64::INFINITY;
             };

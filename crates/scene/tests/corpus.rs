@@ -11,7 +11,7 @@ use serde_json::Value;
 use testkit::{Compare, diff};
 
 /// Element types `Element::from_value` parses into structs.
-const TYPED: [&str; 7] = [
+const TYPED: [&str; 8] = [
     "rectangle",
     "diamond",
     "ellipse",
@@ -19,6 +19,7 @@ const TYPED: [&str; 7] = [
     "arrow",
     "text",
     "freedraw",
+    "image",
 ];
 
 fn corpus() -> Vec<(String, String)> {

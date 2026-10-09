@@ -42,6 +42,48 @@ pub struct NapkinView {
     pub zoom: f64,
 }
 
+/// One entry of the document's `files` map (`BinaryFileData`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileData {
+    pub id: String,
+    pub mime_type: String,
+    pub data_url: String,
+    pub created: f64,
+    pub last_retrieved: f64,
+}
+
+impl FileData {
+    /// The `BinaryFileData` JSON object.
+    pub fn to_value(&self) -> Value {
+        json!({
+            "mimeType": self.mime_type,
+            "id": self.id,
+            "dataURL": self.data_url,
+            "created": self.created,
+            "lastRetrieved": self.last_retrieved,
+        })
+    }
+
+    /// Reads a `files` entry stored under `key`; `None` without string `mimeType` and
+    /// `dataURL`. The entry's own `id` wins over `key` (`addMissingFiles` uses `fileData.id`).
+    pub fn from_value(key: &str, entry: &Value) -> Option<FileData> {
+        Some(FileData {
+            id: entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(key)
+                .to_owned(),
+            mime_type: entry.get("mimeType")?.as_str()?.to_owned(),
+            data_url: entry.get("dataURL")?.as_str()?.to_owned(),
+            created: entry.get("created").and_then(Value::as_f64).unwrap_or(0.0),
+            last_retrieved: entry
+                .get("lastRetrieved")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneFile {
     /// Every top-level key in file order. `elements` and `appState` hold `null` while the
@@ -106,7 +148,18 @@ impl SceneFile {
     /// the written text only; `self.app_state` is untouched.
     pub fn to_json_string_with_view(&self, view: Option<NapkinView>) -> String {
         let mut root = self.root.clone();
-        let elements = Value::Array(self.elements.iter().map(Element::to_value).collect());
+        let element_values: Vec<Value> = self.elements.iter().map(Element::to_value).collect();
+        // `serializeAsJSON`'s `filterOutDeletedFiles`: only files a live element references
+        // are written. `self.root` keeps every entry, so undoing a delete finds its file.
+        if let Some(Value::Object(files)) = root.get_mut("files") {
+            let referenced: std::collections::HashSet<&str> = element_values
+                .iter()
+                .filter(|e| e.get("isDeleted").and_then(Value::as_bool) != Some(true))
+                .filter_map(|e| e.get("fileId").and_then(Value::as_str))
+                .collect();
+            files.retain(|id, _| referenced.contains(id.as_str()));
+        }
+        let elements = Value::Array(element_values);
         if root.contains_key("elements") || !self.elements.is_empty() {
             root.insert("elements".into(), elements);
         }
@@ -123,6 +176,47 @@ impl SceneFile {
         let mut value = Value::Object(root);
         normalize_numbers(&mut value);
         serde_json::to_string_pretty(&value).expect("JSON values serialize")
+    }
+
+    /// `files[id]`'s `dataURL` and `mimeType`; `None` when the entry or either string is
+    /// missing. `created` and `lastRetrieved` read as 0 when absent.
+    pub fn file_data(&self, id: &str) -> Option<FileData> {
+        let entry = self.root.get("files")?.get(id)?;
+        Some(FileData {
+            id: id.to_owned(),
+            mime_type: entry.get("mimeType")?.as_str()?.to_owned(),
+            data_url: entry.get("dataURL")?.as_str()?.to_owned(),
+            created: entry.get("created").and_then(Value::as_f64).unwrap_or(0.0),
+            last_retrieved: entry
+                .get("lastRetrieved")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+        })
+    }
+
+    /// `addMissingFiles`: stores `data` under `files[data.id]` unless an entry with a
+    /// `dataURL` is already there. Returns whether it stored one.
+    pub fn add_missing_file(&mut self, data: FileData) -> bool {
+        let has_data = self
+            .root
+            .get("files")
+            .and_then(|files| files.get(&data.id))
+            .is_some_and(|entry| entry.get("dataURL").is_some_and(Value::is_string));
+        if has_data {
+            return false;
+        }
+        let files = self
+            .root
+            .entry("files")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !files.is_object() {
+            *files = Value::Object(Map::new());
+        }
+        files
+            .as_object_mut()
+            .expect("normalized to an object above")
+            .insert(data.id.clone(), data.to_value());
+        true
     }
 
     pub fn view_background_color(&self) -> &str {
@@ -171,6 +265,50 @@ mod tests {
         let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
         assert!(semantic_eq(&written, &serde_json::from_str(text).unwrap()));
         assert_eq!(file.view_background_color(), "#fffce8");
+    }
+
+    #[test]
+    fn files_are_read_and_added_without_overwriting() {
+        let mut file = SceneFile::new();
+        let data = FileData {
+            id: "f1".into(),
+            mime_type: "image/png".into(),
+            data_url: "data:image/png;base64,AAAA".into(),
+            created: 1.0,
+            last_retrieved: 1.0,
+        };
+        assert!(file.add_missing_file(data.clone()));
+        assert!(!file.add_missing_file(FileData {
+            data_url: "data:image/png;base64,BBBB".into(),
+            ..data
+        }));
+        assert_eq!(
+            file.file_data("f1").unwrap().data_url,
+            "data:image/png;base64,AAAA"
+        );
+        file.elements.push(Element::from_value(
+            json!({"type":"image","id":"i","fileId":"f1","isDeleted":false}),
+        ));
+        let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
+        assert_eq!(written["files"]["f1"]["mimeType"], json!("image/png"));
+        assert_eq!(written["files"]["f1"]["id"], json!("f1"));
+        assert!(semantic_eq(
+            &written["files"]["f1"]["lastRetrieved"],
+            &json!(1.0)
+        ));
+    }
+
+    #[test]
+    fn only_files_a_live_element_references_are_written() {
+        let text = r##"{"type":"excalidraw","elements":[
+            {"type":"image","id":"live","fileId":"f1","isDeleted":false},
+            {"type":"image","id":"gone","fileId":"f2","isDeleted":true}],
+            "files":{"f1":{"dataURL":"a"},"f2":{"dataURL":"b"},"f3":{"dataURL":"c"}}}"##;
+        let file = SceneFile::from_json_str(text).unwrap();
+        let written: Value = serde_json::from_str(&file.to_json_string()).unwrap();
+        let files = written["files"].as_object().unwrap();
+        assert_eq!(files.keys().collect::<Vec<_>>(), ["f1"]);
+        assert!(file.root["files"]["f2"].is_object(), "in-memory files stay");
     }
 
     #[test]

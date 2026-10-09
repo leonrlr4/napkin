@@ -267,8 +267,9 @@ fn push_op_set(
     }
 }
 
-/// The dashed placeholder box drawn for [`ElementShape::Placeholder`] and [`Element::Raw`]
-/// (spec §1.2): a `[6, 4]`-dashed `#868e96` rectangle over `(0, 0)`-`(width, height)`.
+/// The dashed placeholder box drawn for [`ElementShape::Placeholder`], [`Element::Raw`] and
+/// [`Element::Image`] (spec §1.2): a `[6, 4]`-dashed `#868e96` rectangle over
+/// `(0, 0)`-`(width, height)`.
 fn push_placeholder(builder: &mut Builder, frame: &Frame) {
     let color = render_color("#868e96", frame.style.dark);
     let mut box_builder = Path::builder();
@@ -300,7 +301,9 @@ pub fn tessellate(element: &Element, shape: &ElementShape, style: &Style) -> Mes
         style,
     };
 
-    if matches!(element, Element::Raw(_)) || matches!(shape, ElementShape::Placeholder) {
+    if matches!(element, Element::Raw(_) | Element::Image(_))
+        || matches!(shape, ElementShape::Placeholder)
+    {
         push_placeholder(&mut builder, &frame);
         return builder.finish();
     }
@@ -448,6 +451,23 @@ mod tests {
     #[test]
     fn raw_elements_become_dashed_placeholder_boxes() {
         let image = json!({ "id": "i", "type": "image", "x": 0, "y": 0, "width": 40, "height": 30, "angle": 0 });
+        let mesh = mesh_of(image, 1.0);
+        assert!(!mesh.indices.is_empty());
+        let bounds = mesh.bounds.expect("non-empty mesh");
+        assert!(bounds.max[0] <= 41.0 && bounds.max[1] <= 31.0, "{bounds:?}");
+    }
+
+    #[test]
+    fn typed_images_also_become_dashed_placeholder_boxes() {
+        let image = sample::with(
+            sample::generic("rectangle", "i", [0.0, 0.0, 40.0, 30.0]),
+            json!({"type": "image", "strokeColor": "transparent", "status": "saved",
+                   "fileId": "f", "scale": [1, 1], "crop": null}),
+        );
+        assert!(matches!(
+            Element::from_value(image.clone()),
+            Element::Image(_)
+        ));
         let mesh = mesh_of(image, 1.0);
         assert!(!mesh.indices.is_empty());
         let bounds = mesh.bounds.expect("non-empty mesh");

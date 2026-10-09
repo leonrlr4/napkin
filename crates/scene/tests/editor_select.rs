@@ -531,3 +531,28 @@ fn a_two_point_arrow_has_no_rotation_handle() {
     click(&mut e, at(50.0, 20.0));
     assert_eq!(e.overlay(1.0).rotation_handle, None);
 }
+
+#[test]
+fn an_image_resizes_proportionally_by_default_and_freely_with_shift() {
+    let image = json!({
+        "id": "i", "type": "image", "x": 0, "y": 0, "width": 200, "height": 100,
+        "angle": 0, "strokeColor": "transparent", "backgroundColor": "transparent",
+        "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
+        "opacity": 100, "groupIds": [], "frameId": null, "index": "a0", "roundness": null,
+        "seed": 1, "version": 1, "versionNonce": 1, "isDeleted": false, "boundElements": null,
+        "updated": 1, "link": null, "locked": false,
+        "status": "saved", "fileId": "f", "scale": [1, 1], "crop": null
+    });
+    let mut e = editor(vec![image.clone()]);
+    click(&mut e, at(100.0, 50.0));
+    // Image handles have no margin: the se square's center sits at the corner (200, 100).
+    drag(&mut e, at(200.0, 100.0), [400.0, 120.0]);
+    let [_, _, w, h] = rect_of(&e, "i");
+    assert!((w / h - 2.0).abs() < 1e-9, "{w} {h}");
+
+    let mut e = editor(vec![image]);
+    click(&mut e, at(100.0, 50.0));
+    drag(&mut e, shift(200.0, 100.0), [400.0, 120.0]);
+    let [_, _, w, h] = rect_of(&e, "i");
+    assert!((w / h - 2.0).abs() > 0.1, "{w} {h}");
+}

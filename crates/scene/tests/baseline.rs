@@ -14,8 +14,8 @@ use scene::fractional_index::{
     generate_key_between, generate_n_keys_between, sync_invalid_indices, sync_moved_indices,
 };
 use scene::new_element::{
-    ElementProps, GenericKind, TextProps, new_arrow_element, new_freedraw_element,
-    new_generic_element, new_line_element, new_text_element,
+    ElementProps, GenericKind, ImageProps, TextProps, new_arrow_element, new_freedraw_element,
+    new_generic_element, new_image_element, new_line_element, new_text_element,
 };
 use scene::sample::{self, CharWidthMeasure};
 use scene::selection::Selection;
@@ -73,7 +73,8 @@ fn props_from(opts: &Value) -> ElementProps {
             "locked" => props.locked = v.as_bool().expect("locked"),
             "type" | "id" | "seed" | "points" | "pressures" | "simulatePressure"
             | "strokeOptions" | "startArrowhead" | "endArrowhead" | "text" | "fontSize"
-            | "fontFamily" | "textAlign" | "verticalAlign" | "containerId" | "lineHeight" => {}
+            | "fontFamily" | "textAlign" | "verticalAlign" | "containerId" | "lineHeight"
+            | "fileId" | "status" | "scale" => {}
             other => panic!("unknown newElement option {other}"),
         }
     }
@@ -120,6 +121,18 @@ fn new_element() {
                 }),
                 env,
             ),
+            ("newImageElement", _) => new_image_element(
+                props,
+                ImageProps {
+                    file_id: head("fileId"),
+                    status: head("status"),
+                    scale: opts.get("scale").map(|s| {
+                        let s = s.as_array().expect("scale");
+                        [num(&s[0]), num(&s[1])]
+                    }),
+                },
+                env,
+            ),
             ("newTextElement", _) => new_text_element(
                 props,
                 TextProps {
@@ -149,7 +162,7 @@ fn key_arg(case: &Case, i: usize) -> Option<&str> {
 }
 
 /// Elements shaped like the generator's `{ id, type, index, version, versionNonce, updated }`.
-/// They lack most fields, so they load as `Raw`, which is also the path images and frames take.
+/// They lack most fields, so they load as `Raw`, which is also the path frames take.
 fn index_elements(indices: &Value) -> Vec<Element> {
     indices
         .as_array()
@@ -737,6 +750,7 @@ fn transform() {
                             out["fontSize"] = json!(t.font_size);
                             out["text"] = json!(t.text);
                         }
+                        Element::Image(i) => out["scale"] = json!(i.scale()),
                         _ => {}
                     }
                     if e.kind() == "arrow" {

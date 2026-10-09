@@ -185,13 +185,19 @@ fn is_text(kind: &str) -> bool {
     kind == "text"
 }
 
-/// Any of napkin's seven typed kinds; `false` for a `Raw` element's kind string (an image, a
-/// frame, ...).
+/// The seven kinds with property panel entries; `false` for an image and for a `Raw`
+/// element's kind string (a frame, ...).
 fn is_typed_kind(kind: &str) -> bool {
     matches!(
         kind,
         "rectangle" | "diamond" | "ellipse" | "line" | "arrow" | "freedraw" | "text"
     )
+}
+
+/// Opacity is the one property an image takes (`opacity` is a plain `ElementBase` field it
+/// renders with); every other panel property skips it.
+fn has_opacity(kind: &str) -> bool {
+    is_typed_kind(kind) || kind == "image"
 }
 
 /// The element kind [`Tool`] creates, for `forToolOrSelection`'s "or the active tool" half;
@@ -422,7 +428,7 @@ pub(super) fn panel<E: Env>(editor: &Editor<E>) -> PanelState {
         opacity: pick(
             has_selection,
             &target,
-            is_typed_kind,
+            has_opacity,
             opacity_value,
             style.opacity,
         ),
@@ -644,7 +650,12 @@ fn rewrap_label(
     }
 }
 
+/// Runs `f` on a styleable element's `ElementBase`. An image (like `Raw`) has no property
+/// panel entry, so a property change leaves it untouched.
 fn mutate_base(element: &mut Element, f: impl FnOnce(&mut ElementBase)) -> bool {
+    if matches!(element, Element::Image(_)) {
+        return false;
+    }
     match element.base_mut() {
         Some(base) => {
             f(base);
@@ -766,7 +777,13 @@ fn mutate(
             redraw_text(next, measure);
             true
         }
-        Property::Opacity(opacity) => mutate_base(next, |b| b.opacity = *opacity),
+        Property::Opacity(opacity) => match next {
+            Element::Image(i) => {
+                i.base.opacity = *opacity;
+                true
+            }
+            _ => mutate_base(next, |b| b.opacity = *opacity),
+        },
     }
 }
 

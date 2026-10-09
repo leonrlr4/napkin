@@ -10,10 +10,12 @@ name = "napkin"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 bytemuck.workspace = true
 eframe.workspace = true
 egui-wgpu.workspace = true
 glyphon.workspace = true
+image.workspace = true
 lyon.workspace = true
 png.workspace = true
 raw-window-handle.workspace = true
@@ -22,11 +24,13 @@ rustix.workspace = true
 scene.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
 toml.workspace = true
 wayland-backend.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wgpu.workspace = true
+wl-clipboard-rs.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true

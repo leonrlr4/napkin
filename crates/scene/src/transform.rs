@@ -9,9 +9,10 @@
 //! porting the slash/backslash corner omission for a two-point line or arrow, it shows no
 //! corner handles at all for that case. Resizing from an edge still works everywhere else
 //! through the line-proximity test in [`handle_at`], which mirrors `resizeTest`'s fallback
-//! independently of what squares are drawn. Sticky notes, elbow-arrow fixed-point mirroring,
-//! image `scale` and arrow labels are out of scope (napkin has no sticky note or image
-//! element, elbow arrows never gain handles at all, and an arrow's label is not rewrapped).
+//! independently of what squares are drawn. Sticky notes, elbow-arrow fixed-point mirroring
+//! and arrow labels are out of scope (napkin has no sticky note element, elbow arrows never
+//! gain handles at all, and an arrow's label is not rewrapped). A single image has no handle
+//! margin or spacing and its `scale` signs follow the flip.
 //! A resized rectangle, diamond or ellipse rewraps its label, and a standalone text resized
 //! from its left or right side gets a fixed width and wraps to it.
 
@@ -70,11 +71,13 @@ pub struct ResizeOptions {
 
 /// `getTransformHandlesFromCoords` at angle 0 for a mouse pointer on desktop: the four corner
 /// squares in `nw, ne, sw, se` order, minus `omit`, as `[min_x, min_y, max_x, max_y]` rather
-/// than JS's `[x, y, width, height]`.
+/// than JS's `[x, y, width, height]`. `spacing` is the `spacing` argument: an image passes 0,
+/// which puts a square's center on the corner when `margin` is 0 too.
 pub fn corner_handles(
     bounds: Bounds,
     zoom: f64,
     margin: f64,
+    spacing: f64,
     omit: &[HandleKind],
 ) -> Vec<(HandleKind, Bounds)> {
     use HandleKind::*;
@@ -82,7 +85,7 @@ pub fn corner_handles(
     let [x1, y1, x2, y2] = bounds;
     let handle = HANDLE_SIZE / zoom;
     let dashed_line_margin = margin / zoom;
-    let centering_offset = (HANDLE_SIZE - DEFAULT_TRANSFORM_HANDLE_SPACING * 2.0) / (2.0 * zoom);
+    let centering_offset = (HANDLE_SIZE - spacing * 2.0) / (2.0 * zoom);
     let left = x1 - dashed_line_margin - handle + centering_offset;
     let top = y1 - dashed_line_margin - handle + centering_offset;
     let right = x2 + dashed_line_margin - centering_offset;
@@ -119,16 +122,17 @@ fn transform_handles(
     angle: f64,
     zoom: f64,
     margin: f64,
+    spacing: f64,
     omit: &[HandleKind],
 ) -> SelectionHandles {
-    let resize = corner_handles(bounds, zoom, margin, omit)
+    let resize = corner_handles(bounds, zoom, margin, spacing, omit)
         .into_iter()
         .map(|(kind, square)| (kind, turn_square(square, center, angle)))
         .collect();
 
     let [x1, y1, x2, _] = bounds;
     let handle = HANDLE_SIZE / zoom;
-    let centering_offset = (HANDLE_SIZE - DEFAULT_TRANSFORM_HANDLE_SPACING * 2.0) / (2.0 * zoom);
+    let centering_offset = (HANDLE_SIZE - spacing * 2.0) / (2.0 * zoom);
     let left = x1 + (x2 - x1) / 2.0 - handle / 2.0;
     let top = y1 - margin / zoom - handle + centering_offset - ROTATION_RESIZE_HANDLE_GAP / zoom;
     let rotation = turn_square([left, top, left + handle, top + handle], center, angle);
@@ -173,6 +177,11 @@ struct HandleFrame {
     center: [f64; 2],
     angle: f64,
     margin: f64,
+    /// `getTransformHandlesFromCoords`'s `spacing`.
+    spacing: f64,
+    /// Whether [`handle_at`] widens the edge test box by the side threshold (`resizeTest`'s
+    /// `SPACING`, which is 0 for an image).
+    pad_sides: bool,
     omit: Vec<HandleKind>,
 }
 
@@ -210,8 +219,14 @@ fn resizable_bounds(
         if is_two_point_linear(element) {
             return None;
         }
-        let margin = if matches!(element, Element::Line(_) | Element::Arrow(_)) {
-            DEFAULT_TRANSFORM_HANDLE_SPACING + 8.0
+        let margin = match element {
+            Element::Line(_) | Element::Arrow(_) => DEFAULT_TRANSFORM_HANDLE_SPACING + 8.0,
+            Element::Image(_) => 0.0,
+            _ => DEFAULT_TRANSFORM_HANDLE_SPACING,
+        };
+        let is_image = matches!(element, Element::Image(_));
+        let spacing = if is_image {
+            0.0
         } else {
             DEFAULT_TRANSFORM_HANDLE_SPACING
         };
@@ -225,6 +240,8 @@ fn resizable_bounds(
             center,
             angle: element.placement()?.angle,
             margin,
+            spacing,
+            pad_sides: !is_image,
             omit,
         })
     } else {
@@ -234,6 +251,8 @@ fn resizable_bounds(
             center: [(bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0],
             angle: 0.0,
             margin: 4.0,
+            spacing: DEFAULT_TRANSFORM_HANDLE_SPACING,
+            pad_sides: true,
             omit: Vec::new(),
         })
     }
@@ -257,6 +276,7 @@ pub fn selection_handles(
             frame.angle,
             zoom,
             frame.margin,
+            frame.spacing,
             &frame.omit,
         ),
         None => SelectionHandles::default(),
@@ -299,6 +319,7 @@ pub fn handle_at(
         frame.angle,
         zoom,
         frame.margin,
+        frame.spacing,
         &frame.omit,
     );
     let inside = |bounds: Bounds| {
@@ -320,9 +341,15 @@ pub fn handle_at(
 
     // `resizeTest` measures the edges from the element's own coords; a multi-selection uses
     // its common bounds at angle 0.
-    let spacing = SIDE_RESIZING_THRESHOLD / zoom;
+    let threshold = SIDE_RESIZING_THRESHOLD / zoom;
+    let side_padding = if frame.pad_sides { threshold } else { 0.0 };
     let [x1, y1, x2, y2] = frame.bounds;
-    let (px1, py1, px2, py2) = (x1 - spacing, y1 - spacing, x2 + spacing, y2 + spacing);
+    let (px1, py1, px2, py2) = (
+        x1 - side_padding,
+        y1 - side_padding,
+        x2 + side_padding,
+        y2 + side_padding,
+    );
     let turn = |p: [f64; 2]| rotate_point(p, frame.center, frame.angle);
     let (top_left, top_right) = (turn([px1, py1]), turn([px2, py1]));
     let (bottom_left, bottom_right) = (turn([px1, py2]), turn([px2, py2]));
@@ -333,7 +360,7 @@ pub fn handle_at(
         (HandleKind::W, [bottom_left, top_left]),
     ];
     for (kind, segment) in sides {
-        if distance_to_segment(point, segment) < spacing {
+        if distance_to_segment(point, segment) < threshold {
             return Some(kind);
         }
     }
@@ -637,6 +664,15 @@ fn font_size_for_width(text: &TextElement, target_width: f64) -> Option<f64> {
     (next_font_size >= MIN_FONT_SIZE).then_some(next_font_size)
 }
 
+/// `Math.sign(value) || fallback`: the sign of `value`, or `fallback` when it is 0 or -0.
+fn js_sign_or(value: f64, fallback: f64) -> f64 {
+    if value == 0.0 {
+        fallback
+    } else {
+        value.signum()
+    }
+}
+
 /// `resizeSingleElement` / `resizeSingleTextElement` for the element at `position`, from its
 /// state in `start`, plus the position of its bound text. Returns whether anything changed.
 ///
@@ -794,7 +830,25 @@ pub fn resize_element(
     }
     let next_width = next_width * flip_factor_x;
     let next_height = next_height * flip_factor_y;
+    let orig_scale = match orig {
+        Element::Image(i) => i.scale(),
+        _ => [1.0, 1.0],
+    };
+    // `resizeSingleElement` mutates `scale` before its `nextWidth !== 0` guard, so a
+    // degenerate drag can still flip an image's `scale` without resizing it.
+    let next_scale = [
+        js_sign_or(next_width, orig_scale[0]) * orig_scale[0],
+        js_sign_or(next_height, orig_scale[1]) * orig_scale[1],
+    ];
     if next_width == 0.0 || next_height == 0.0 {
+        // Geometry stays as the previous pointer move left it; only `scale` changes.
+        if let Element::Image(current) = &mut file.elements[position]
+            && current.scale() != next_scale
+        {
+            current.scale = Some(next_scale);
+            bump_version(&mut file.elements[position], env);
+            return true;
+        }
         return false;
     }
 
@@ -884,6 +938,14 @@ pub fn resize_element(
             if let Some(points) = rescaled_points {
                 f.points = points;
             }
+        }
+        Element::Image(i) => {
+            i.base.x = new_origin[0];
+            i.base.y = new_origin[1];
+            i.base.width = next_width.abs();
+            i.base.height = next_height.abs();
+            // Dragging past the opposite edge flips the image; `scale` keeps the sign.
+            i.scale = Some(next_scale);
         }
         Element::Text(_) | Element::Raw(_) => unreachable!("handled above"),
     }
@@ -1421,6 +1483,16 @@ pub fn resize_elements(
                     f.points = points;
                 }
             }
+            Element::Image(i) => {
+                i.base.x = new_x;
+                i.base.y = new_y;
+                i.base.width = new_width;
+                i.base.height = new_height;
+                i.base.angle = new_angle;
+                // `resizeMultipleElements` flips by the group's flip factors, from `start`.
+                let [sx, sy] = i.scale();
+                i.scale = Some([sx * flip_factor_x, sy * flip_factor_y]);
+            }
             Element::Text(t) => {
                 t.base.x = new_x;
                 t.base.y = new_y;
@@ -1540,6 +1612,34 @@ mod tests {
         file
     }
 
+    #[test]
+    fn a_zero_size_pointer_keeps_the_previous_frames_result() {
+        let start = sample::file(vec![sample::generic(
+            "rectangle",
+            "a",
+            [0.0, 0.0, 100.0, 50.0],
+        )]);
+        let mut file = start.clone();
+        let mut geometry = GeometryCache::default();
+        let mut go = |file: &mut SceneFile, pointer| {
+            resize_element(
+                &mut geometry,
+                file,
+                &start,
+                0,
+                HandleKind::Se,
+                pointer,
+                PLAIN,
+                &mut CharWidthMeasure,
+                &mut TestEnv,
+            )
+        };
+        assert!(go(&mut file, [150.0, 80.0]));
+        assert_eq!(rect_of(&file, 0), [0.0, 0.0, 150.0, 80.0]);
+        assert!(!go(&mut file, [0.0, 80.0]));
+        assert_eq!(rect_of(&file, 0), [0.0, 0.0, 150.0, 80.0]);
+    }
+
     fn rect_of(file: &SceneFile, position: usize) -> [f64; 4] {
         let p = file.elements[position].placement().expect("placement");
         [p.x, p.y, p.width, p.height]
@@ -1562,7 +1662,7 @@ mod tests {
     fn corner_handles_follow_transform_handle_geometry() {
         use HandleKind::*;
         assert_eq!(
-            corner_handles([0.0, 0.0, 100.0, 100.0], 1.0, 2.0, &[]),
+            corner_handles([0.0, 0.0, 100.0, 100.0], 1.0, 2.0, 2.0, &[]),
             vec![
                 (Nw, [-8.0, -8.0, 0.0, 0.0]),
                 (Ne, [100.0, -8.0, 108.0, 0.0]),
@@ -1570,7 +1670,7 @@ mod tests {
                 (Se, [100.0, 100.0, 108.0, 108.0]),
             ]
         );
-        let zoomed = corner_handles([0.0, 0.0, 100.0, 100.0], 2.0, 2.0, &[]);
+        let zoomed = corner_handles([0.0, 0.0, 100.0, 100.0], 2.0, 2.0, 2.0, &[]);
         assert_eq!(
             (zoomed[0], zoomed[3]),
             (
@@ -1579,10 +1679,10 @@ mod tests {
             )
         );
         assert_eq!(
-            corner_handles([0.0, 0.0, 100.0, 100.0], 1.0, 10.0, &[])[0],
+            corner_handles([0.0, 0.0, 100.0, 100.0], 1.0, 10.0, 2.0, &[])[0],
             (Nw, [-16.0, -16.0, -8.0, -8.0])
         );
-        let slash: Vec<HandleKind> = corner_handles([0.0, 0.0, 1.0, 1.0], 1.0, 2.0, &[Nw, Se])
+        let slash: Vec<HandleKind> = corner_handles([0.0, 0.0, 1.0, 1.0], 1.0, 2.0, 2.0, &[Nw, Se])
             .into_iter()
             .map(|(k, _)| k)
             .collect();

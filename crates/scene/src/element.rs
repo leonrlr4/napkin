@@ -126,6 +126,47 @@ pub struct TextElement {
     pub extra: Map<String, Value>,
 }
 
+/// `image`. `fileId` is `null` until a file is attached; the bytes live in the document's
+/// `files` map, not here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageElement {
+    #[serde(flatten)]
+    pub base: ElementBase,
+    #[serde(default, skip_serializing_if = "Slot::is_missing")]
+    pub file_id: Slot<String>,
+    /// `"pending"`, `"saved"` or `"error"`.
+    pub status: String,
+    /// Absent in files written before Excalidraw added it; absent stays absent on write.
+    /// Read it through `ImageElement::scale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Slot::is_missing")]
+    pub crop: Slot<ImageCrop>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl ImageElement {
+    /// The flip sign pair; a missing `scale` is `[1, 1]`.
+    pub fn scale(&self) -> [f64; 2] {
+        self.scale.unwrap_or([1.0, 1.0])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCrop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub natural_width: f64,
+    pub natural_height: f64,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 /// Which end of a line or arrow a binding or arrowhead applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinearEnd {
@@ -152,7 +193,8 @@ pub enum Element {
     Arrow(LinearElement),
     Text(TextElement),
     Freedraw(FreedrawElement),
-    /// Any other type (image, frame, embeddable, stickynote, ...), and any element of a
+    Image(ImageElement),
+    /// Any other type (frame, embeddable, stickynote, ...), and any element of a
     /// known type whose JSON the typed struct cannot reproduce exactly. Kept verbatim.
     Raw(Value),
 }
@@ -182,6 +224,7 @@ impl Element {
             Some("arrow") => exact(&value).map(Element::Arrow),
             Some("text") => exact(&value).map(Element::Text),
             Some("freedraw") => exact(&value).map(Element::Freedraw),
+            Some("image") => exact(&value).map(Element::Image),
             _ => None,
         };
         typed.unwrap_or(Element::Raw(value))
@@ -195,6 +238,7 @@ impl Element {
             Element::Line(e) | Element::Arrow(e) => serde_json::to_value(e),
             Element::Text(e) => serde_json::to_value(e),
             Element::Freedraw(e) => serde_json::to_value(e),
+            Element::Image(e) => serde_json::to_value(e),
             Element::Raw(v) => return v.clone(),
         };
         written.expect("element structs serialize to JSON")
@@ -206,6 +250,7 @@ impl Element {
             Element::Line(e) | Element::Arrow(e) => Some(&e.base),
             Element::Text(e) => Some(&e.base),
             Element::Freedraw(e) => Some(&e.base),
+            Element::Image(e) => Some(&e.base),
             Element::Raw(_) => None,
         }
     }
@@ -216,6 +261,7 @@ impl Element {
             Element::Line(e) | Element::Arrow(e) => Some(&mut e.base),
             Element::Text(e) => Some(&mut e.base),
             Element::Freedraw(e) => Some(&mut e.base),
+            Element::Image(e) => Some(&mut e.base),
             Element::Raw(_) => None,
         }
     }
@@ -263,6 +309,7 @@ impl Element {
             Element::Line(e) | Element::Arrow(e) => Some(&e.extra),
             Element::Text(e) => Some(&e.extra),
             Element::Freedraw(e) => Some(&e.extra),
+            Element::Image(e) => Some(&e.extra),
             Element::Raw(_) => None,
         }
     }
@@ -519,6 +566,7 @@ impl Element {
             Element::Line(e) | Element::Arrow(e) => Some(&mut e.extra),
             Element::Text(e) => Some(&mut e.extra),
             Element::Freedraw(e) => Some(&mut e.extra),
+            Element::Image(e) => Some(&mut e.extra),
             Element::Raw(_) => None,
         }
     }
@@ -567,6 +615,61 @@ mod tests {
             "version": 3, "versionNonce": 4, "isDeleted": false, "boundElements": null,
             "updated": 5, "link": null, "locked": false, "customData": {"k": [1, 2]}
         })
+    }
+
+    #[test]
+    fn an_excalidraw_image_round_trips_as_a_typed_image() {
+        let value = json!({
+            "id": "i", "type": "image", "x": 10, "y": 20, "width": 300, "height": 200,
+            "angle": 0, "strokeColor": "transparent", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0", "roundness": null,
+            "seed": 1, "version": 3, "versionNonce": 7, "isDeleted": false, "boundElements": null,
+            "updated": 1, "link": null, "locked": false,
+            "status": "saved", "fileId": "abc", "scale": [1, 1], "crop": null
+        });
+        let element = Element::from_value(value.clone());
+        assert!(matches!(element, Element::Image(_)), "{element:?}");
+        assert!(semantic_eq(&element.to_value(), &value));
+    }
+
+    #[test]
+    fn an_image_without_crop_or_file_id_stays_a_typed_image() {
+        let value = json!({
+            "id": "i", "type": "image", "x": 10, "y": 20, "width": 300, "height": 200,
+            "angle": 0, "strokeColor": "transparent", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0", "roundness": null,
+            "seed": 1, "version": 3, "versionNonce": 7, "isDeleted": false, "boundElements": null,
+            "updated": 1, "link": null, "locked": false,
+            "status": "saved", "scale": [1, 1]
+        });
+        let element = Element::from_value(value.clone());
+        assert!(matches!(element, Element::Image(_)), "{element:?}");
+        let written = element.to_value();
+        assert!(semantic_eq(&written, &value));
+        assert!(written.get("crop").is_none() && written.get("fileId").is_none());
+    }
+
+    #[test]
+    fn an_image_without_scale_stays_typed_and_keeps_the_key_missing() {
+        let value = json!({
+            "id": "i", "type": "image", "x": 10, "y": 20, "width": 300, "height": 200,
+            "angle": 0, "strokeColor": "transparent", "backgroundColor": "transparent",
+            "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1,
+            "opacity": 100, "groupIds": [], "frameId": null, "index": "a0", "roundness": null,
+            "seed": 1, "version": 3, "versionNonce": 7, "isDeleted": false, "boundElements": null,
+            "updated": 1, "link": null, "locked": false,
+            "status": "saved", "fileId": "abc"
+        });
+        let element = Element::from_value(value.clone());
+        let Element::Image(image) = &element else {
+            panic!("{element:?}");
+        };
+        assert_eq!(image.scale(), [1.0, 1.0]);
+        let written = element.to_value();
+        assert!(semantic_eq(&written, &value));
+        assert!(written.get("scale").is_none());
     }
 
     #[test]
