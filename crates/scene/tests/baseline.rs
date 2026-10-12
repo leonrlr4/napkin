@@ -732,12 +732,14 @@ fn transform() {
         let mut env = FixedEnv;
         if handle == "rotation" {
             scene::transform::rotate_elements(
+                &mut scene::geometry::GeometryCache::default(),
                 &mut file,
                 &start,
                 &targets,
                 pointer,
                 center,
                 flag("shift"),
+                &mut CharWidthMeasure,
                 &mut env,
             );
         } else {
@@ -789,6 +791,143 @@ fn transform() {
                     if e.kind() == "arrow" {
                         out["startBinding"] = json!(e.binding_target(LinearEnd::Start));
                         out["endBinding"] = json!(e.binding_target(LinearEnd::End));
+                    }
+                    out["boundElements"] = json!(
+                        e.bound_elements()
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    );
+                    out
+                })
+                .collect(),
+        )
+    });
+}
+
+#[test]
+fn bound_follow() {
+    check_group(&dir(), "bound_follow", |case| {
+        let mut start = scene::SceneFile::new();
+        start.elements = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .cloned()
+            .map(Element::from_value)
+            .collect();
+        let ids: Vec<&str> = case.args[1]
+            .as_array()
+            .expect("ids")
+            .iter()
+            .map(|id| id.as_str().expect("id"))
+            .collect();
+        let op = &case.args[2];
+        let point = |v: &Value| [num(&v[0]), num(&v[1])];
+
+        let mut file = start.clone();
+        let mut geometry = scene::geometry::GeometryCache::default();
+        let mut env = FixedEnv;
+        if let Some(offset) = op.get("drag") {
+            let targets = scene::edit::drag_targets(&start, &Selection::from_ids(ids));
+            scene::edit::apply_drag(
+                &mut geometry,
+                &mut file,
+                &start,
+                &targets,
+                point(offset),
+                &mut CharWidthMeasure,
+                &mut env,
+            );
+        } else {
+            let args = &op["transform"];
+            let handle = args[0].as_str().expect("handle");
+            let pointer = point(&args[1]);
+            let center = point(&args[2]);
+            let flag = |key: &str| args[3][key].as_bool().expect("flag");
+            let mut targets: Vec<usize> = ids
+                .iter()
+                .map(|id| {
+                    start
+                        .elements
+                        .iter()
+                        .position(|e| e.id() == Some(*id))
+                        .expect("element id")
+                })
+                .collect();
+            targets.sort_unstable();
+            if handle == "rotation" {
+                scene::transform::rotate_elements(
+                    &mut geometry,
+                    &mut file,
+                    &start,
+                    &targets,
+                    pointer,
+                    center,
+                    flag("shift"),
+                    &mut CharWidthMeasure,
+                    &mut env,
+                );
+            } else {
+                let handle = match handle {
+                    "n" => HandleKind::N,
+                    "s" => HandleKind::S,
+                    "e" => HandleKind::E,
+                    "w" => HandleKind::W,
+                    "nw" => HandleKind::Nw,
+                    "ne" => HandleKind::Ne,
+                    "sw" => HandleKind::Sw,
+                    "se" => HandleKind::Se,
+                    other => panic!("unknown handle {other}"),
+                };
+                scene::transform::resize_elements(
+                    &mut geometry,
+                    &mut file,
+                    &start,
+                    &targets,
+                    handle,
+                    pointer,
+                    scene::transform::ResizeOptions {
+                        keep_aspect_ratio: flag("keepAspect"),
+                        from_center: flag("fromCenter"),
+                    },
+                    &mut CharWidthMeasure,
+                    &mut env,
+                );
+            }
+        }
+        Value::Array(
+            file.elements
+                .iter()
+                .map(|e| {
+                    let p = e.placement().expect("placement");
+                    let mut out = json!({
+                        "id": e.id(), "x": p.x, "y": p.y, "width": p.width,
+                        "height": p.height, "angle": p.angle
+                    });
+                    match e {
+                        Element::Line(l) | Element::Arrow(l) => out["points"] = json!(l.points),
+                        Element::Freedraw(f) => out["points"] = json!(f.points),
+                        Element::Text(t) => {
+                            out["fontSize"] = json!(t.font_size);
+                            out["text"] = json!(t.text);
+                        }
+                        Element::Image(i) => out["scale"] = json!(i.scale()),
+                        _ => {}
+                    }
+                    if e.kind() == "arrow" {
+                        for (key, end) in [
+                            ("startBinding", LinearEnd::Start),
+                            ("endBinding", LinearEnd::End),
+                        ] {
+                            out[key] = e.binding_value(end).map_or(Value::Null, |binding| {
+                                json!({
+                                    "elementId": binding["elementId"],
+                                    "mode": binding["mode"],
+                                    "fixedPoint": binding["fixedPoint"],
+                                })
+                            });
+                        }
                     }
                     out["boundElements"] = json!(
                         e.bound_elements()

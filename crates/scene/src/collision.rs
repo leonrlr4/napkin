@@ -1175,9 +1175,12 @@ fn intersect_linear(
 /// `isBindableElement(element, false)`: an unlocked rectangle, diamond, ellipse, image, or a
 /// text that is not a container's label. A `Raw` element is never a target.
 pub fn is_bindable(element: &Element) -> bool {
-    if element.is_locked() {
-        return false;
-    }
+    !element.is_locked() && is_bindable_including_locked(element)
+}
+
+/// `isBindableElement(element)` (its `includeLocked` default): [`is_bindable`] without the
+/// `locked` check, which is what `updateBoundElements` applies to a changed element.
+pub fn is_bindable_including_locked(element: &Element) -> bool {
     match element {
         Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_) | Element::Image(_) => {
             true

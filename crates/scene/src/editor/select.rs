@@ -296,7 +296,7 @@ pub(super) fn pointer_move(
                 Gesture::Click(click)
             } else if click.hit.is_some() || click.in_box {
                 let state = begin_drag(editor, &click);
-                apply_drag_move(editor, &state, event);
+                apply_drag_move(editor, &state, event, measure);
                 Gesture::Drag(state)
             } else {
                 let mut state = begin_box_select(&click);
@@ -305,7 +305,7 @@ pub(super) fn pointer_move(
             }
         }
         Gesture::Drag(state) => {
-            apply_drag_move(editor, &state, event);
+            apply_drag_move(editor, &state, event, measure);
             Gesture::Drag(state)
         }
         Gesture::Resize(state) => {
@@ -313,7 +313,7 @@ pub(super) fn pointer_move(
             Gesture::Resize(state)
         }
         Gesture::Rotate(mut state) => {
-            apply_rotate_move(editor, &state, event);
+            apply_rotate_move(editor, &state, event, measure);
             state.moved = true;
             Gesture::Rotate(state)
         }
@@ -360,8 +360,8 @@ pub(super) fn finish_gesture(
             }
         }
         Gesture::Drag(state) => {
-            if let Some((event, _)) = release {
-                apply_drag_move(editor, &state, event);
+            if let Some((event, measure)) = release {
+                apply_drag_move(editor, &state, event, measure);
             }
             editor.finish_edit(&state.start, &state.selection_before);
         }
@@ -372,8 +372,8 @@ pub(super) fn finish_gesture(
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::Rotate(state) => {
-            if let Some((event, _)) = release.filter(|_| state.moved) {
-                apply_rotate_move(editor, &state, event);
+            if let Some((event, measure)) = release.filter(|_| state.moved) {
+                apply_rotate_move(editor, &state, event, measure);
             }
             editor.finish_edit(&state.start, &state.selection_before);
         }
@@ -410,13 +410,26 @@ fn begin_box_select(click: &ClickState) -> BoxSelectState {
     }
 }
 
-fn apply_drag_move(editor: &mut Editor<impl Env>, state: &DragState, event: PointerEvent) {
+fn apply_drag_move(
+    editor: &mut Editor<impl Env>,
+    state: &DragState,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     let mut offset = [event.at[0] - state.origin[0], event.at[1] - state.origin[1]];
     if event.modifiers.shift {
         offset = edit::lock_drag_axis(offset);
     }
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-    edit::apply_drag(file, &state.start, &state.targets, offset, &mut editor.env);
+    edit::apply_drag(
+        &mut editor.geometry,
+        file,
+        &state.start,
+        &state.targets,
+        offset,
+        measure,
+        &mut editor.env,
+    );
 }
 
 fn apply_resize_move(
@@ -472,15 +485,22 @@ fn rotation_center(editor: &mut Editor<impl Env>, targets: &[usize]) -> [f64; 2]
         })
 }
 
-fn apply_rotate_move(editor: &mut Editor<impl Env>, state: &RotateState, event: PointerEvent) {
+fn apply_rotate_move(
+    editor: &mut Editor<impl Env>,
+    state: &RotateState,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     transform::rotate_elements(
+        &mut editor.geometry,
         file,
         &state.start,
         &state.targets,
         event.at,
         state.center,
         event.modifiers.shift,
+        measure,
         &mut editor.env,
     );
 }

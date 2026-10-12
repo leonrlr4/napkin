@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::binding::update_bound_elements;
 use crate::bound_text::{
     approx_min_container_size, bound_text_max_size, bound_text_position, handle_bind_text_resize,
     live_bound_text, min_text_element_width, text_line_height,
@@ -687,7 +688,7 @@ fn js_sign_or(value: f64, fallback: f64) -> f64 {
     reason = "mirrors transformElements' pointer-resize contract: geometry cache, before/after scenes, target, handle, pointer and modifier keys are all independently needed"
 )]
 pub fn resize_element(
-    _geometry: &mut GeometryCache,
+    geometry: &mut GeometryCache,
     file: &mut SceneFile,
     start: &SceneFile,
     position: usize,
@@ -722,57 +723,22 @@ pub fn resize_element(
         options,
     );
     if let Element::Text(orig_text) = orig {
-        if matches!(handle, HandleKind::E | HandleKind::W) {
-            return resize_text_side(
-                file,
-                position,
-                orig_text,
-                handle,
-                next_width,
-                options.from_center,
-                measure,
-                env,
-            );
-        }
-        if next_width == 0.0 || next_height == 0.0 || !all_finite(&[next_width, next_height]) {
-            return false;
-        }
-        let metrics_width = orig_text.base.width * (next_height / orig_text.base.height);
-        let Some(font_size) = font_size_for_width(orig_text, metrics_width) else {
-            return false;
-        };
-        let prev_origin = [orig_text.base.x, orig_text.base.y];
-        let new_origin = get_resized_origin(
-            prev_origin,
-            [orig_text.base.width, orig_text.base.height],
-            [metrics_width, next_height],
-            placement.angle,
+        let changed = resize_single_text(
+            file,
+            position,
+            orig,
+            orig_text,
             handle,
-            false,
-            options.from_center,
+            placement,
+            [next_width, next_height],
+            options,
+            measure,
+            env,
         );
-        if !all_finite(&[metrics_width, font_size, new_origin[0], new_origin[1]]) {
-            return false;
-        }
-
-        let mut next = orig.clone();
-        let Element::Text(t) = &mut next else {
-            unreachable!("matched Element::Text above")
-        };
-        t.font_size = font_size;
-        t.base.width = metrics_width;
-        t.base.height = next_height;
-        t.base.x = new_origin[0];
-        t.base.y = new_origin[1];
-
-        // Always write `next` back, even when it equals `orig` (the pointer returned to its
-        // grab point): see the generic branch's identical comment below.
-        let changed = next != *orig;
-        file.elements[position] = next;
-        if changed {
-            bump_version(&mut file.elements[position], env);
-        }
-        return changed;
+        // `transformElements` re-fits the arrows bound to a resized text whether or not the
+        // resize took effect.
+        return update_bound_elements(geometry, file, position, &HashSet::new(), measure, env)
+            | changed;
     }
 
     if !all_finite(&[next_width, next_height]) {
@@ -976,6 +942,78 @@ pub fn resize_element(
         );
     }
 
+    changed |= update_bound_elements(geometry, file, position, &HashSet::new(), measure, env);
+    changed
+}
+
+/// `resizeSingleTextElement` for a text resized with a corner handle (the `E`/`W` sides go to
+/// `resize_text_side`): the font size scales with the height. Returns whether anything changed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors resizeSingleTextElement's inputs"
+)]
+fn resize_single_text(
+    file: &mut SceneFile,
+    position: usize,
+    orig: &Element,
+    orig_text: &TextElement,
+    handle: HandleKind,
+    placement: crate::element::Placement,
+    [next_width, next_height]: [f64; 2],
+    options: ResizeOptions,
+    measure: &mut dyn TextMeasure,
+    env: &mut impl Env,
+) -> bool {
+    if matches!(handle, HandleKind::E | HandleKind::W) {
+        return resize_text_side(
+            file,
+            position,
+            orig_text,
+            handle,
+            next_width,
+            options.from_center,
+            measure,
+            env,
+        );
+    }
+    if next_width == 0.0 || next_height == 0.0 || !all_finite(&[next_width, next_height]) {
+        return false;
+    }
+    let metrics_width = orig_text.base.width * (next_height / orig_text.base.height);
+    let Some(font_size) = font_size_for_width(orig_text, metrics_width) else {
+        return false;
+    };
+    let prev_origin = [orig_text.base.x, orig_text.base.y];
+    let new_origin = get_resized_origin(
+        prev_origin,
+        [orig_text.base.width, orig_text.base.height],
+        [metrics_width, next_height],
+        placement.angle,
+        handle,
+        false,
+        options.from_center,
+    );
+    if !all_finite(&[metrics_width, font_size, new_origin[0], new_origin[1]]) {
+        return false;
+    }
+
+    let mut next = orig.clone();
+    let Element::Text(t) = &mut next else {
+        unreachable!("matched Element::Text above")
+    };
+    t.font_size = font_size;
+    t.base.width = metrics_width;
+    t.base.height = next_height;
+    t.base.x = new_origin[0];
+    t.base.y = new_origin[1];
+
+    // Always write `next` back, even when it equals `orig` (the pointer returned to its
+    // grab point): see the generic branch's identical comment below.
+    let changed = next != *orig;
+    file.elements[position] = next;
+    if changed {
+        bump_version(&mut file.elements[position], env);
+    }
     changed
 }
 
@@ -1137,14 +1175,21 @@ fn is_elbow_arrow(element: &Element) -> bool {
 /// every call, so repeated calls with the same arguments are idempotent. `discrete` is Shift
 /// (`shouldRotateWithDiscreteAngle`). Returns whether anything changed. Raw and elbow-arrow
 /// elements never rotate. Rotating a bound arrow unbinds the ends whose target is not
-/// rotated with it; arrows do not follow a rotated shape.
+/// rotated with it; arrows bound to a rotated shape follow it, unless they are rotated in the
+/// same gesture.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors transformElements' rotation contract: geometry cache, before/after scenes, targets, pointer, pivot and modifier are all independently needed"
+)]
 pub fn rotate_elements(
+    geometry: &mut GeometryCache,
     file: &mut SceneFile,
     start: &SceneFile,
     targets: &[usize],
     pointer: [f64; 2],
     center: [f64; 2],
     discrete: bool,
+    measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) -> bool {
     let id_to_pos: HashMap<&str, usize> = start
@@ -1188,6 +1233,7 @@ pub fn rotate_elements(
         if orig.kind() != "arrow" {
             changed |= rotate_label(file, *only, angle, env);
         }
+        changed |= update_bound_elements(geometry, file, *only, &HashSet::new(), measure, env);
         return changed;
     }
 
@@ -1201,6 +1247,7 @@ pub fn rotate_elements(
         .iter()
         .filter_map(|&i| start.elements[i].id())
         .collect();
+    let rotated_owned: HashSet<String> = rotated_ids.iter().map(|&id| id.to_owned()).collect();
 
     for &position in targets {
         let orig = &start.elements[position];
@@ -1230,6 +1277,7 @@ pub fn rotate_elements(
             bump_version(&mut file.elements[position], env);
             changed = true;
         }
+        changed |= update_bound_elements(geometry, file, position, &rotated_owned, measure, env);
 
         if orig.kind() == "arrow" {
             for end in [LinearEnd::Start, LinearEnd::End] {
@@ -1520,6 +1568,10 @@ pub fn resize_elements(
         next_elements.push((position, next));
     }
 
+    let resized_ids: HashSet<String> = next_elements
+        .iter()
+        .filter_map(|(position, _)| start.elements[*position].id().map(str::to_owned))
+        .collect();
     let mut changed = false;
     for (position, next) in next_elements {
         if next != start.elements[position] {
@@ -1529,6 +1581,7 @@ pub fn resize_elements(
         } else {
             file.elements[position] = next;
         }
+        changed |= update_bound_elements(geometry, file, position, &resized_ids, measure, env);
     }
 
     for (position, label_position, font_size) in label_fonts {
@@ -2077,12 +2130,14 @@ mod tests {
         let mut file = start.clone();
         // Pointer straight right of the center (50, 25): 5π/2 + atan2(0, 50), normalized.
         assert!(rotate_elements(
+            &mut GeometryCache::default(),
             &mut file,
             &start,
             &[0],
             [100.0, 25.0],
             [50.0, 25.0],
             false,
+            &mut CharWidthMeasure,
             &mut TestEnv
         ));
         let p = file.elements[0].placement().unwrap();
@@ -2099,12 +2154,14 @@ mod tests {
         let start = sample::file(vec![rect("r", [0.0, 0.0, 100.0, 50.0])]);
         let mut file = start.clone();
         rotate_elements(
+            &mut GeometryCache::default(),
             &mut file,
             &start,
             &[0],
             [100.0, 30.0],
             [50.0, 25.0],
             true,
+            &mut CharWidthMeasure,
             &mut TestEnv,
         );
         let angle = file.elements[0].placement().unwrap().angle;
@@ -2122,12 +2179,14 @@ mod tests {
         ]);
         let mut file = start.clone();
         rotate_elements(
+            &mut GeometryCache::default(),
             &mut file,
             &start,
             &[0, 1],
             [100.0, 10.0],
             [50.0, 10.0],
             false,
+            &mut CharWidthMeasure,
             &mut TestEnv,
         );
         let a = file.elements[0].placement().unwrap();
@@ -2158,12 +2217,14 @@ mod tests {
         ]);
         let mut file = start.clone();
         rotate_elements(
+            &mut GeometryCache::default(),
             &mut file,
             &start,
             &[0],
             [100.0, 25.0],
             [50.0, 25.0],
             false,
+            &mut CharWidthMeasure,
             &mut TestEnv,
         );
         let t = file.elements[1].placement().unwrap();

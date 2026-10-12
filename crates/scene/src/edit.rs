@@ -21,13 +21,15 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::binding::update_bound_elements;
 use crate::element::{Element, LinearEnd};
 use crate::env::{Env, random_id};
 use crate::file::SceneFile;
 use crate::fractional_index;
-use crate::geometry::{element_absolute_coords, rotate_point, size_from_points};
+use crate::geometry::{GeometryCache, element_absolute_coords, rotate_point, size_from_points};
 use crate::new_element::bump_version;
 use crate::selection::Selection;
+use crate::text::TextMeasure;
 
 /// `SHIFT_LOCKING_ANGLE` (`packages/common/src/constants.ts`).
 const SHIFT_LOCKING_ANGLE: f64 = std::f64::consts::PI / 12.0;
@@ -117,11 +119,16 @@ pub fn drag_targets(file: &SceneFile, selection: &Selection) -> Vec<usize> {
 /// the module doc comment for why napkin puts arrow labels in `targets` at all, unlike
 /// Excalidraw). Every call recomputes from `start` and `targets`, so calling this repeatedly
 /// with the same arguments is idempotent, not cumulative.
+///
+/// Each moved primary target that is not an arrow calls `update_bound_elements`, so arrows bound
+/// to it follow, except those moving in the same drag.
 pub fn apply_drag(
+    geometry: &mut GeometryCache,
     file: &mut SceneFile,
     start: &SceneFile,
     targets: &[usize],
     offset: [f64; 2],
+    measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) {
     let target_positions: HashSet<usize> = targets.iter().copied().collect();
@@ -142,6 +149,12 @@ pub fn apply_drag(
         .iter()
         .copied()
         .filter(|&pos| !is_bound_text_target(pos))
+        .collect();
+    // `dragSelectedElements`' `elementsToUpdate`: arrows among them move with the shapes
+    // their ends are bound to, so they are not re-fitted to those shapes.
+    let primary_ids: HashSet<String> = primary_targets
+        .iter()
+        .filter_map(|&pos| start.elements[pos].id().map(str::to_owned))
         .collect();
     let past_threshold = offset[0].abs().max(offset[1].abs()) > DRAGGING_THRESHOLD;
 
@@ -183,6 +196,9 @@ pub fn apply_drag(
         }
 
         if start.elements[pos].kind() != "arrow" {
+            if primary_targets.contains(&pos) {
+                update_bound_elements(geometry, file, pos, &primary_ids, measure, env);
+            }
             continue;
         }
         for end in [LinearEnd::Start, LinearEnd::End] {
@@ -543,8 +559,7 @@ pub fn move_linear_point(
     if index >= points.len() {
         return;
     }
-    let (prev_coords, center) =
-        element_absolute_coords(start).expect("index in range implies a point");
+    let (_, center) = element_absolute_coords(start).expect("index in range implies a point");
 
     let new_local_point = if shift {
         let pivot_index = if index == 0 { 1 } else { index - 1 };
@@ -573,7 +588,71 @@ pub fn move_linear_point(
             [current[0] - offset[0], current[1] - offset[1]]
         })
         .collect();
+    commit_points(start, element, next_points, offset, env);
+}
 
+/// `LinearElementEditor.movePoints` + `_updatePoints` (non-elbow) for several points at once:
+/// `updates` are `(index, new local point)` pairs (a later pair for the same index wins);
+/// point 0 moving shifts every other point and the element's `x`/`y` the way
+/// [`move_linear_point`] does. `move_mid_points_with_element` is JS's option of that name: the
+/// points that are neither first, last nor in `updates` keep their local coordinates, so they
+/// travel with the element's origin instead of staying put on the canvas. Returns whether the
+/// element changed (and bumps it if so). A no-op for anything but a non-elbow line or arrow.
+pub fn move_points(
+    element: &mut Element,
+    updates: &[(usize, [f64; 2])],
+    move_mid_points_with_element: bool,
+    env: &mut impl Env,
+) -> bool {
+    let (Element::Line(l) | Element::Arrow(l)) = &*element else {
+        return false;
+    };
+    if l.elbowed == Some(true) || l.points.is_empty() {
+        return false;
+    }
+    let update_for = |index: usize| {
+        updates
+            .iter()
+            .rev()
+            .find(|(i, _)| *i == index)
+            .map(|&(_, point)| point)
+    };
+    let offset = update_for(0).unwrap_or([0.0, 0.0]);
+    let last = l.points.len() - 1;
+    let next_points: Vec<[f64; 2]> = l
+        .points
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| {
+            let updated = update_for(i);
+            let current = updated.unwrap_or(p);
+            if move_mid_points_with_element && i != 0 && i != last && updated.is_none() {
+                return current;
+            }
+            [current[0] - offset[0], current[1] - offset[1]]
+        })
+        .collect();
+    let start = element.clone();
+    commit_points(&start, element, next_points, offset, env)
+}
+
+/// `_updatePoints`' non-elbow branch: writes `next_points` into `element` (the line or arrow
+/// as it was before the move is `start`) together with the `x`/`y` that keeps every unmoved
+/// point where it was, `offset` being how far the first point moved. The offset is rotated
+/// about how far the new points' unrotated bounding-box center shifted, since a rotated
+/// element turns about that center. Bumps `element` only when it changed.
+fn commit_points(
+    start: &Element,
+    element: &mut Element,
+    next_points: Vec<[f64; 2]>,
+    offset: [f64; 2],
+    env: &mut impl Env,
+) -> bool {
+    let (base, angle) = match start {
+        Element::Line(l) | Element::Arrow(l) => ([l.base.x, l.base.y], l.base.angle),
+        _ => return false,
+    };
+    let (prev_coords, _) = element_absolute_coords(start).expect("a line or arrow with points");
     let mut next_start = start.clone();
     if let Element::Line(l) | Element::Arrow(l) = &mut next_start {
         l.points = next_points.clone();
@@ -602,9 +681,11 @@ pub fn move_linear_point(
         l.base.width = width;
         l.base.height = height;
     }
-    if *element != before {
+    let changed = *element != before;
+    if changed {
         bump_version(element, env);
     }
+    changed
 }
 
 /// `insertElementsAtIndex` for a single element with no frame, as called by
@@ -649,7 +730,7 @@ mod tests {
 
     use super::*;
     use crate::element::LinearEnd;
-    use crate::sample;
+    use crate::sample::{self, CharWidthMeasure};
 
     struct TestEnv(u8);
 
@@ -724,7 +805,15 @@ mod tests {
         let targets = drag_targets(&start, &selection);
         assert_eq!(targets, vec![0, 1, 2, 3, 5, 6]);
         let mut file = start.clone();
-        apply_drag(&mut file, &start, &targets, [10.0, 5.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [10.0, 5.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "r"), (10.0, 5.0));
         assert_eq!(xy(&file, "t"), (40.0, 45.0));
         assert_eq!(xy(&file, "a"), (10.0, 205.0));
@@ -734,7 +823,15 @@ mod tests {
         assert_eq!(get(&file, "other"), get(&start, "other"));
         assert_eq!(get(&file, "r").version(), get(&start, "r").version() + 1.0);
         // Re-applying from the same start is idempotent, not cumulative.
-        apply_drag(&mut file, &start, &targets, [10.0, 5.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [10.0, 5.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "r"), (10.0, 5.0));
     }
 
@@ -794,7 +891,15 @@ mod tests {
         let targets = drag_targets(&start, &selection);
         assert_eq!(targets, vec![2]);
         let mut file = start.clone();
-        apply_drag(&mut file, &start, &targets, [11.0, 0.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [11.0, 0.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "a"), (11.0, 200.0));
         // The arrow's own binding fields cannot be cleared (`Raw`'s restricted mutation
         // surface has no binding fields), so the target side is left untouched too: both
@@ -812,7 +917,15 @@ mod tests {
         let targets = drag_targets(&start, &selection);
         assert_eq!(targets, vec![2]);
         let mut file = start.clone();
-        apply_drag(&mut file, &start, &targets, [11.0, 0.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [11.0, 0.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "a"), (11.0, 200.0));
         assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), None);
         assert_eq!(get(&file, "a").binding_target(LinearEnd::End), None);
@@ -827,13 +940,29 @@ mod tests {
         let targets = drag_targets(&start, &selection);
         let mut file = start.clone();
         // Past the threshold: the arrow moves and unbinds both ends.
-        apply_drag(&mut file, &start, &targets, [30.0, 0.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [30.0, 0.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "a"), (30.0, 200.0));
         assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), None);
         // Same gesture, dragged back under the threshold: the arrow is no longer bound (in
         // `file`, mutated by the call above), so the lone-arrow guard no longer applies and it
         // follows the pointer back down to the new offset instead of staying at +30.
-        apply_drag(&mut file, &start, &targets, [3.0, 0.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [3.0, 0.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "a"), (3.0, 200.0));
     }
 
@@ -846,7 +975,15 @@ mod tests {
         let mut file = start.clone();
         // Under the dragging threshold: with more than one target, the threshold guard does
         // not apply at all (matches `dragSelectedElements`'s `elementsToUpdate.size > 1`).
-        apply_drag(&mut file, &start, &targets, [4.0, 0.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [4.0, 0.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
         assert_eq!(get(&file, "a").binding_target(LinearEnd::End), None);
         assert_eq!(get(&file, "r").bound_elements(), vec![("a", "arrow")]);
@@ -859,7 +996,15 @@ mod tests {
         let selection = Selection::from_ids(["a"]);
         let targets = drag_targets(&start, &selection);
         let mut file = start.clone();
-        apply_drag(&mut file, &start, &targets, [5.0, 5.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [5.0, 5.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "a"), xy(&start, "a"));
         assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
         assert_eq!(get(&file, "a").binding_target(LinearEnd::End), Some("s"));
@@ -875,7 +1020,15 @@ mod tests {
         // "a", is itself a target), so the lone-arrow guard still applies to "a".
         assert_eq!(targets, vec![2, 3]);
         let mut file = start.clone();
-        apply_drag(&mut file, &start, &targets, [5.0, 5.0], &mut TestEnv(0));
+        apply_drag(
+            &mut GeometryCache::default(),
+            &mut file,
+            &start,
+            &targets,
+            [5.0, 5.0],
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
         assert_eq!(xy(&file, "a"), xy(&start, "a"));
         assert_eq!(xy(&file, "l"), xy(&start, "l"));
         assert_eq!(get(&file, "a").binding_target(LinearEnd::Start), Some("r"));
@@ -982,5 +1135,57 @@ mod tests {
         assert_eq!(ids[2], "y");
         let indices: Vec<&str> = file.elements.iter().map(|e| e.index().unwrap()).collect();
         assert!(indices.windows(2).all(|w| w[0] < w[1]), "{indices:?}");
+    }
+
+    #[test]
+    fn move_points_shifts_the_origin_when_the_first_point_moves() {
+        let mut arrow = Element::from_value(sample::linear(
+            "arrow",
+            "a",
+            [10.0, 10.0],
+            &[[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]],
+        ));
+        assert!(move_points(
+            &mut arrow,
+            &[(0, [-20.0, 0.0])],
+            false,
+            &mut TestEnv(0)
+        ));
+        let Element::Arrow(l) = &arrow else { panic!() };
+        assert_eq!((l.base.x, l.base.y), (-10.0, 10.0));
+        assert_eq!(l.points, vec![[0.0, 0.0], [70.0, 0.0], [120.0, 0.0]]);
+    }
+
+    #[test]
+    fn move_points_can_carry_the_middle_points_with_the_element() {
+        let mut arrow = Element::from_value(sample::linear(
+            "arrow",
+            "a",
+            [0.0, 0.0],
+            &[[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]],
+        ));
+        move_points(&mut arrow, &[(0, [-20.0, 0.0])], true, &mut TestEnv(0));
+        let Element::Arrow(l) = &arrow else { panic!() };
+        // The middle point keeps its local coordinates, so it moves by the origin's shift.
+        assert_eq!(l.points[1], [50.0, 0.0]);
+        assert_eq!(l.base.x, -20.0);
+    }
+
+    #[test]
+    fn move_points_without_a_change_does_not_bump_the_version() {
+        let mut arrow = Element::from_value(sample::linear(
+            "arrow",
+            "a",
+            [0.0, 0.0],
+            &[[0.0, 0.0], [50.0, 0.0]],
+        ));
+        let before = arrow.clone();
+        assert!(!move_points(
+            &mut arrow,
+            &[(1, [50.0, 0.0])],
+            false,
+            &mut TestEnv(0)
+        ));
+        assert_eq!(arrow, before);
     }
 }

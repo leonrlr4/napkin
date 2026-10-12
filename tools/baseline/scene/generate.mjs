@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, encode, runCase, writeGroup } from "../lib/harness.mjs";
-import { arrowLabelCases, boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, intersectCases, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
+import { arrowLabelCases, boundFollowCases, boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, intersectCases, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -29,6 +29,7 @@ const lib = await bundleExcalidraw(
   export { moveOneLeft, moveOneRight } from "@excalidraw/element/zindex";
   export { Scene } from "@excalidraw/element/Scene";
   export { transformElements } from "@excalidraw/element/resizeElements";
+  export { dragSelectedElements } from "@excalidraw/element/dragElements";
   export { applyDarkModeFilter, isTransparent, getFontString, DEFAULT_GRID_SIZE } from "@excalidraw/common";
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
@@ -359,6 +360,80 @@ writeGroup(
       ];
     }),
   })),
+);
+
+/**
+ * `elements` with every arrow label put where `getBoundTextElementPosition` says it is:
+ * Excalidraw computes that position when it renders and stores nothing, napkin stores it.
+ */
+function settleArrowLabels(elements) {
+  const live = structuredClone(elements);
+  const scene = new lib.Scene(live);
+  const map = scene.getNonDeletedElementsMap();
+  for (const text of live.filter((el) => el.type === "text" && el.containerId)) {
+    const arrow = live.find((el) => el.id === text.containerId && el.type === "arrow");
+    if (!arrow) continue;
+    lib.handleBindTextResize(arrow, scene, false);
+    const position = lib.LinearElementEditor.getBoundTextElementPosition(arrow, text, map);
+    text.x = position.x;
+    text.y = position.y;
+  }
+  return live;
+}
+
+/** `transformOutput` with whole bindings and arrow labels at their computed positions. */
+function boundFollowOutput(live, scene) {
+  const map = scene.getNonDeletedElementsMap();
+  const binding = (b) => (b ? { elementId: b.elementId, mode: b.mode, fixedPoint: [...b.fixedPoint] } : null);
+  return transformOutput(live).map((out, index) => {
+    const el = live[index];
+    if (el.type === "arrow") {
+      out.startBinding = binding(el.startBinding);
+      out.endBinding = binding(el.endBinding);
+    }
+    const arrow = el.type === "text" && el.containerId ? live.find((a) => a.id === el.containerId) : null;
+    if (arrow?.type === "arrow") {
+      const position = lib.LinearElementEditor.getBoundTextElementPosition(arrow, el, map);
+      out.x = position.x;
+      out.y = position.y;
+    }
+    return out;
+  });
+}
+
+// hitElementItself memoizes on (id, version, versionNonce, point), as in the intersect group.
+let followNonce = 1_000_000;
+writeGroup(
+  outDir,
+  "bound_follow",
+  source,
+  boundFollowCases.map(([name, rawElements, ids, op]) => {
+    const elements = settleArrowLabels(rawElements);
+    return {
+      name,
+      call: op.drag ? "dragSelectedElements" : "transformElements",
+      args: [elements, ids, op],
+      ...runCase(name, () => {
+        const live = structuredClone(elements);
+        for (const el of live) el.versionNonce = (followNonce += 1);
+        const scene = new lib.Scene(live);
+        const originalElements = new Map(structuredClone(elements).map((el) => [el.id, el]));
+        const selected = ids.map((id) => live.find((el) => el.id === id));
+        if (op.drag) {
+          const [dx, dy] = op.drag;
+          lib.dragSelectedElements({ originalElements }, selected, { x: dx, y: dy }, scene, { x: 0, y: 0 }, null);
+        } else {
+          const [handle, pointer, center, flags] = op.transform;
+          lib.transformElements(
+            originalElements, handle, selected, scene,
+            flags.shift, flags.fromCenter, flags.keepAspect,
+            pointer[0], pointer[1], center[0], center[1],
+          );
+        }
+        return boundFollowOutput(live, scene);
+      }),
+    };
+  }),
 );
 
 // hitElementItself memoizes on (id, version, versionNonce, point); a unique nonce per case keeps
