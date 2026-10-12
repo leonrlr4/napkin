@@ -666,6 +666,39 @@ fn bound_text() {
 }
 
 #[test]
+fn arrow_label() {
+    check_group(&dir(), "arrow_label", |case| {
+        let mut file = scene::SceneFile::new();
+        file.elements = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .cloned()
+            .map(Element::from_value)
+            .collect();
+        let mut geometry = scene::geometry::GeometryCache::default();
+        scene::bound_text::sync_arrow_label(
+            &mut geometry,
+            &mut file,
+            0,
+            &mut CharWidthMeasure,
+            &mut FixedEnv,
+        );
+        let arrow = file.elements[0].placement().expect("arrow placement");
+        let Element::Text(label) = &file.elements[1] else {
+            panic!("typed label");
+        };
+        json!([
+            {"id": "w", "height": arrow.height},
+            {
+                "id": "t", "text": label.text, "width": label.base.width,
+                "height": label.base.height, "x": label.base.x, "y": label.base.y
+            },
+        ])
+    });
+}
+
+#[test]
 fn transform() {
     check_group(&dir(), "transform", |case| {
         let mut start = scene::SceneFile::new();

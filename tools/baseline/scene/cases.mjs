@@ -649,6 +649,56 @@ export const transformCases = [
   ["resizeMultiImage_flipped_e_flipBack", [pic({ scale: [-1, 1] }), element("rectangle", { id: "b", x: 320, y: 100, width: 40, height: 40 })], ["a", "b"], "e", [60, 150], [0, 0], NONE],
 ];
 
+/**
+ * [name, elements] for the arrow_label group. `elements` is arrow `w` (bound text `t`) followed
+ * by its label; each case runs handleBindTextResize on the arrow and then reads
+ * `LinearElementEditor.getBoundTextElementPosition`.
+ * Output: `[{id: "w", height}, {id: "t", text, width, height, x, y}]`.
+ */
+function arrowLabelCase(name, points, arrowOverrides = {}, text = "hello", labelOverrides = {}) {
+  return [
+    name,
+    [
+      linear("arrow", points, {
+        id: "w", x: 50, y: 40, boundElements: [{ id: "t", type: "text" }], ...arrowOverrides,
+      }),
+      label({
+        id: "t", x: 7, y: 9, width: 10, height: 25, text, originalText: text, containerId: "w",
+        labelPosition: null, ...labelOverrides,
+      }),
+    ],
+  ];
+}
+
+const CURVED = { roundness: { type: 2 } };
+const LONG_LABEL = "the quick brown fox jumps over the lazy dog and keeps on running far away";
+
+export const arrowLabelCases = [
+  arrowLabelCase("twoPoints", [[0, 0], [300, 0]]),
+  arrowLabelCase("twoPointsDiagonal", [[0, 0], [300, 120]]),
+  arrowLabelCase("threePoints", [[0, 0], [150, 80], [300, 0]]),
+  arrowLabelCase("fourPoints", [[0, 0], [100, 60], [200, -40], [320, 20]]),
+  arrowLabelCase("twoPointsCurved", [[0, 0], [300, 0]], CURVED),
+  arrowLabelCase("threePointsCurved", [[0, 0], [150, 80], [300, 0]], CURVED),
+  arrowLabelCase("fourPointsCurved", [[0, 0], [100, 60], [200, -40], [320, 20]], CURVED),
+  arrowLabelCase("fivePointsCurved", [[0, 0], [60, 50], [140, -30], [220, 40], [300, 0]], CURVED),
+  arrowLabelCase("labelPositionStraight", [[0, 0], [300, 0]], {}, "hello", { labelPosition: 0.25 }),
+  arrowLabelCase("labelPositionStraightMultiSegment", [[0, 0], [150, 80], [300, 0]], {}, "hello", { labelPosition: 0.7 }),
+  arrowLabelCase("labelPositionCurved", [[0, 0], [150, 80], [300, 0]], CURVED, "hello", { labelPosition: 0.25 }),
+  arrowLabelCase("labelPositionCurvedFourPoints", [[0, 0], [100, 60], [200, -40], [320, 20]], CURVED, "hello", { labelPosition: 0.8 }),
+  arrowLabelCase("labelPositionZero", [[0, 0], [300, 0]], {}, "hello", { labelPosition: 0 }),
+  arrowLabelCase("labelPositionOne", [[0, 0], [150, 80], [300, 0]], CURVED, "hello", { labelPosition: 1 }),
+  arrowLabelCase("labelPositionOutOfRange", [[0, 0], [300, 0]], {}, "hello", { labelPosition: 3 }),
+  arrowLabelCase("longTextWraps", [[0, 0], [600, 0]], {}, LONG_LABEL),
+  arrowLabelCase("longTextOnAShortArrowUsesMinWidth", [[0, 0], [120, 0]], {}, LONG_LABEL),
+  arrowLabelCase("veryShortArrow", [[0, 0], [30, 0]], {}, "hello world"),
+  arrowLabelCase("tallTextGrowsTheArrow", [[0, 0], [300, 100]], {}, "a\nb\nc\nd\ne"),
+  arrowLabelCase("largeFontMinWidth", [[0, 0], [100, 0]], {}, LONG_LABEL, { fontSize: 36 }),
+  arrowLabelCase("rotatedTwoPoints", [[0, 0], [300, 0]], { angle: 0.5 }),
+  arrowLabelCase("rotatedThreePoints", [[0, 0], [150, 80], [300, 0]], { angle: 0.5 }),
+  arrowLabelCase("rotatedCurvedLabelPosition", [[0, 0], [150, 80], [300, 0]], { angle: 0.5, ...CURVED }, "hello", { labelPosition: 0.4 }),
+];
+
 /** Shapes `s` (left) and `u` (right) with arrow `w` bound from `s` to `u`. */
 function boundArrowScene() {
   const binding = (elementId) => ({ elementId, focus: 0, gap: 4 });

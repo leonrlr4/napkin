@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, encode, runCase, writeGroup } from "../lib/harness.mjs";
-import { boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, intersectCases, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
+import { arrowLabelCases, boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, intersectCases, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -33,6 +33,7 @@ const lib = await bundleExcalidraw(
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
   export { duplicateElements } from "@excalidraw/element/duplicate";
+  export { LinearElementEditor } from "@excalidraw/element/linearElementEditor";
   export { intersectElementWithLineSegment, getHoveredElementForBinding, hitElementItself } from "@excalidraw/element/collision";
   `,
 );
@@ -333,6 +334,29 @@ writeGroup(
         pointer[0], pointer[1], center[0], center[1],
       );
       return transformOutput(live);
+    }),
+  })),
+);
+
+writeGroup(
+  outDir,
+  "arrow_label",
+  source,
+  arrowLabelCases.map(([name, elements]) => ({
+    name,
+    call: "handleBindTextResize",
+    args: [elements],
+    ...runCase(name, () => {
+      const live = structuredClone(elements);
+      const scene = new lib.Scene(live);
+      const [arrow, text] = live;
+      lib.handleBindTextResize(arrow, scene, null, false);
+      const map = scene.getNonDeletedElementsMap();
+      const position = lib.LinearElementEditor.getBoundTextElementPosition(arrow, text, map);
+      return [
+        { id: arrow.id, height: arrow.height },
+        { id: text.id, text: text.text, width: text.width, height: text.height, x: position.x, y: position.y },
+      ];
     }),
   })),
 );
