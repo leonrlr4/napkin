@@ -340,3 +340,42 @@ fn an_arrow_updated_in_the_same_batch_keeps_its_own_points() {
         .unwrap();
     assert_eq!(linear_end_point(arrow, LinearEnd::End), Some([50.0, 50.0]));
 }
+
+#[test]
+fn restyling_a_bound_arrow_in_the_same_batch_does_not_stop_it_following() {
+    use scene::binding::linear_end_point;
+    use scene::element::LinearEnd;
+
+    let mut editor = editor(vec![
+        sample::with(
+            sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+            json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+        ),
+        sample::with(
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+            json!({"endBinding": {"elementId": "r", "mode": "orbit",
+                                  "fixedPoint": [0.0, 0.5001]}}),
+        ),
+    ]);
+    let end_of = |editor: &scene::editor::Editor<_>| {
+        let arrow = editor
+            .file()
+            .elements
+            .iter()
+            .find(|e| e.id() == Some("a"))
+            .unwrap();
+        linear_end_point(arrow, LinearEnd::End).unwrap()
+    };
+    let before = end_of(&editor);
+    editor
+        .apply_batch(
+            &json!({"ops": [
+                {"op": "update", "id": "r", "set": {"x": 300}},
+                {"op": "update", "id": "a", "set": {"strokeColor": "#e03131", "opacity": 50}},
+            ]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let end = end_of(&editor);
+    assert!((end[0] - before[0] - 100.0).abs() < 1.0, "{end:?}");
+}

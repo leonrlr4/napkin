@@ -99,9 +99,9 @@ batches, since aliases don't carry over.
 
 Arrows follow the shapes they are bound to: an `update` that moves or resizes a shape moves
 the bound end of each arrow attached to it, keeping the end at the same relative spot on the
-shape's outline; the arrow's other end stays put. An arrow that the same batch also updates
-keeps the `points`/`x`/`y` its own `update` sets, so no separate `update` is needed to keep
-arrows attached.
+shape's outline; the arrow's other end stays put. An arrow that the same batch also moves
+or reshapes (`x`/`y`/`points`) keeps the geometry its own `update` sets; restyling it does not
+stop it from following. No separate `update` is needed to keep arrows attached.
 
 None of these accept a `label` except the three shape types above (arrows and lines don't
 get napkin-managed labels — add a separate `text` element instead).

@@ -159,25 +159,41 @@ pub fn apply_batch(
         errors.sort_by_key(|e| e.op);
         return Err(errors);
     }
-    follow_moved_shapes(file, &mut next, &report.updated, measure, env);
+    follow_moved_shapes(file, &mut next, measure, env);
     Ok((next, report))
 }
 
 /// Moves the arrows bound to every shape the batch moved or resized (`updateBoundElements`).
-/// An arrow the same batch also updated keeps what its own `update` set
-/// (`simultaneouslyUpdated`).
+/// An arrow the batch also moved or reshaped keeps what its own `update` set.
 fn follow_moved_shapes(
     before: &SceneFile,
     next: &mut SceneFile,
-    updated: &[String],
     measure: &mut dyn TextMeasure,
     env: &mut impl Env,
 ) {
-    let simultaneous: HashSet<String> = updated.iter().cloned().collect();
-    let old_placements: HashMap<&str, Option<Placement>> = before
+    let old_elements: HashMap<&str, &Element> = before
         .elements
         .iter()
-        .filter_map(|e| Some((e.id()?, e.placement())))
+        .filter_map(|e| Some((e.id()?, e)))
+        .collect();
+    let old_placements: HashMap<&str, Option<Placement>> = old_elements
+        .iter()
+        .map(|(&id, e)| (id, e.placement()))
+        .collect();
+    // `simultaneouslyUpdated`: elements the batch moved together with the shapes. An arrow
+    // that was only restyled still follows its shape.
+    let simultaneous: HashSet<String> = next
+        .elements
+        .iter()
+        .filter_map(|e| {
+            let id = e.id()?;
+            let old = old_elements.get(id)?;
+            let points = |e: &Element| match e {
+                Element::Line(l) | Element::Arrow(l) => Some(l.points.clone()),
+                _ => None,
+            };
+            (e.placement() != old.placement() || points(e) != points(old)).then(|| id.to_owned())
+        })
         .collect();
     let mut geometry = GeometryCache::default();
     for index in 0..next.elements.len() {

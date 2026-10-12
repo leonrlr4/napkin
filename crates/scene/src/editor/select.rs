@@ -423,6 +423,8 @@ pub(super) fn finish_gesture(
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::PointDrag(mut state) => {
+            // A tool switch has no text measurer, so the arrow's label is resynced on the next
+            // change to the arrow.
             let measure = match release {
                 Some((event, measure)) => {
                     apply_point_drag_move(editor, &mut state, event, Some(&mut *measure));
