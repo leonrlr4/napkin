@@ -33,6 +33,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::batch::add::{LabelSpec, bind_label};
+use crate::binding;
 use crate::bound_text;
 use crate::collision;
 use crate::color::is_transparent;
@@ -735,6 +736,8 @@ pub(super) fn commit_text(
         Some(id)
     };
 
+    follow_grown_container(editor, &before, surviving_id.as_deref(), &editing, measure);
+
     editor.selection = match surviving_id {
         None => Selection::new(),
         Some(id) => {
@@ -754,6 +757,46 @@ pub(super) fn commit_text(
     };
 
     editor.finish_edit(&before, &selection_before)
+}
+
+/// A label can grow its container (`redrawTextBoundingBox`, or the minimum size a new label
+/// asks for); the arrows bound to the container follow it (`textWysiwyg`'s
+/// `updateBoundElements` after a submit). `before` is the scene the edit started from.
+fn follow_grown_container(
+    editor: &mut Editor<impl Env>,
+    before: &SceneFile,
+    surviving_id: Option<&str>,
+    editing: &TextEditing,
+    measure: &mut dyn TextMeasure,
+) {
+    let container_id = surviving_id
+        .and_then(|id| editor.file.elements.iter().find(|e| e.id() == Some(id)))
+        .and_then(Element::container_id)
+        .or(editing.container_id.as_deref())
+        .map(str::to_owned);
+    let Some(container_id) = container_id else {
+        return;
+    };
+    let Some(container) = live_position(&editor.file.elements, &container_id) else {
+        return;
+    };
+    let placement_before = before
+        .elements
+        .iter()
+        .find(|e| e.id() == Some(container_id.as_str()))
+        .and_then(Element::placement);
+    if placement_before == editor.file.elements[container].placement() {
+        return;
+    }
+    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+    binding::update_bound_elements(
+        &mut editor.geometry,
+        file,
+        container,
+        &HashSet::new(),
+        measure,
+        &mut editor.env,
+    );
 }
 
 #[cfg(test)]

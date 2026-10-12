@@ -552,35 +552,19 @@ pub fn move_linear_point(
     shift: bool,
     env: &mut impl Env,
 ) {
-    let (points, base, angle) = match start {
-        Element::Line(l) | Element::Arrow(l) => (&l.points, [l.base.x, l.base.y], l.base.angle),
-        _ => return,
-    };
-    if index >= points.len() {
+    let Some(new_local_point) = dragged_point_local(start, index, target, shift) else {
         return;
-    }
-    let (_, center) = element_absolute_coords(start).expect("index in range implies a point");
-
-    let new_local_point = if shift {
-        let pivot_index = if index == 0 { 1 } else { index - 1 };
-        match points.get(pivot_index) {
-            Some(&pivot) => {
-                let pivot_scene = to_scene(pivot, base, center, angle);
-                let locked_scene = lock_linear_angle(pivot_scene, target);
-                to_local(locked_scene, base, center, angle)
-            }
-            None => to_local(target, base, center, angle),
-        }
-    } else {
-        to_local(target, base, center, angle)
     };
-
+    let (Element::Line(l) | Element::Arrow(l)) = start else {
+        return;
+    };
     let offset = if index == 0 {
         new_local_point
     } else {
         [0.0, 0.0]
     };
-    let next_points: Vec<[f64; 2]> = points
+    let next_points: Vec<[f64; 2]> = l
+        .points
         .iter()
         .enumerate()
         .map(|(i, &p)| {
@@ -589,6 +573,38 @@ pub fn move_linear_point(
         })
         .collect();
     commit_points(start, element, next_points, offset, env);
+}
+
+/// Where point `index` of the line or arrow `element` lands, in `element`'s local frame, when
+/// it is dragged to the scene point `target`; with `shift` the angle to the neighbouring point
+/// (the next one for point 0, else the previous) is locked (`_getShiftLockedDelta`). `None`
+/// for anything but a line or arrow, or an out-of-range `index`.
+pub fn dragged_point_local(
+    element: &Element,
+    index: usize,
+    target: [f64; 2],
+    shift: bool,
+) -> Option<[f64; 2]> {
+    let (points, base, angle) = match element {
+        Element::Line(l) | Element::Arrow(l) => (&l.points, [l.base.x, l.base.y], l.base.angle),
+        _ => return None,
+    };
+    if index >= points.len() {
+        return None;
+    }
+    let (_, center) = element_absolute_coords(element)?;
+    if !shift {
+        return Some(to_local(target, base, center, angle));
+    }
+    let pivot_index = if index == 0 { 1 } else { index - 1 };
+    Some(match points.get(pivot_index) {
+        Some(&pivot) => {
+            let pivot_scene = to_scene(pivot, base, center, angle);
+            let locked_scene = lock_linear_angle(pivot_scene, target);
+            to_local(locked_scene, base, center, angle)
+        }
+        None => to_local(target, base, center, angle),
+    })
 }
 
 /// `LinearElementEditor.movePoints` + `_updatePoints` (non-elbow) for several points at once:

@@ -7,19 +7,20 @@
 pub(crate) mod add;
 mod validate;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
-use crate::binding::fixed_point_for;
+use crate::binding::{fixed_point_for, update_bound_elements};
 use crate::bound_text::{bound_text_position, handle_bind_text_resize, redraw_text_bounding_box};
+use crate::collision;
 use crate::edit::delete_selection;
 use crate::editor::ItemStyle;
-use crate::element::{Element, LinearEnd};
+use crate::element::{Element, LinearEnd, Placement};
 use crate::env::Env;
 use crate::file::SceneFile;
 use crate::fractional_index::sync_moved_indices;
-use crate::geometry::size_from_points;
+use crate::geometry::{GeometryCache, size_from_points};
 use crate::new_element::bump_version;
 use crate::selection::Selection;
 use crate::text::{TextMeasure, measure_text, normalize_text};
@@ -158,7 +159,40 @@ pub fn apply_batch(
         errors.sort_by_key(|e| e.op);
         return Err(errors);
     }
+    follow_moved_shapes(file, &mut next, &report.updated, measure, env);
     Ok((next, report))
+}
+
+/// Moves the arrows bound to every shape the batch moved or resized (`updateBoundElements`).
+/// An arrow the same batch also updated keeps what its own `update` set
+/// (`simultaneouslyUpdated`).
+fn follow_moved_shapes(
+    before: &SceneFile,
+    next: &mut SceneFile,
+    updated: &[String],
+    measure: &mut dyn TextMeasure,
+    env: &mut impl Env,
+) {
+    let simultaneous: HashSet<String> = updated.iter().cloned().collect();
+    let old_placements: HashMap<&str, Option<Placement>> = before
+        .elements
+        .iter()
+        .filter_map(|e| Some((e.id()?, e.placement())))
+        .collect();
+    let mut geometry = GeometryCache::default();
+    for index in 0..next.elements.len() {
+        let element = &next.elements[index];
+        let Some(id) = element.id() else { continue };
+        if element.is_deleted()
+            || !collision::is_bindable_including_locked(element)
+            || old_placements
+                .get(id)
+                .is_none_or(|old| *old == element.placement())
+        {
+            continue;
+        }
+        update_bound_elements(&mut geometry, next, index, &simultaneous, measure, env);
+    }
 }
 
 /// `id` resolved against `created` (batch-local `add` aliases) first, then against `next`'s
@@ -280,36 +314,6 @@ fn refresh_fixed_point(
     }
 }
 
-/// For every live arrow in `container_index`'s `boundElements`, refreshes whichever end(s) are
-/// bound to it: a shape's move or resize keeps its bound arrows' `fixedPoint`s current, even
-/// though napkin does not make the arrow itself follow the shape.
-fn refresh_bound_arrow_fixed_points(
-    next: &mut SceneFile,
-    container_index: usize,
-    env: &mut impl Env,
-) {
-    let container_id = next.elements[container_index]
-        .id()
-        .expect("has an id")
-        .to_owned();
-    let arrow_ids: Vec<String> = next.elements[container_index]
-        .bound_elements()
-        .into_iter()
-        .filter(|&(_, kind)| kind == "arrow")
-        .map(|(id, _)| id.to_owned())
-        .collect();
-    for arrow_id in arrow_ids {
-        let Some(arrow_index) = find_alive_by_id(&next.elements, &arrow_id) else {
-            continue;
-        };
-        for end in [LinearEnd::Start, LinearEnd::End] {
-            if next.elements[arrow_index].binding_target(end) == Some(container_id.as_str()) {
-                refresh_fixed_point(next, arrow_index, end, container_index, env);
-            }
-        }
-    }
-}
-
 /// Translates the arrow at `arrow_index`'s own bound label (if it is alive) by `(dx, dy)`,
 /// matching the arrow's move (M4a's drag behavior, not a recomputed position: napkin stores an
 /// arrow label's position rather than deriving it from the arrow's path).
@@ -427,8 +431,8 @@ impl StyleSet {
 }
 
 /// Dispatches one `update` op's already-resolved `set` to the handler for `next.elements[index]`'s
-/// kind (the table in AI spec §4.3), which also refreshes bound arrows' `fixedPoint`s when a
-/// move or resize changes their geometry.
+/// kind (the table in AI spec §4.3); [`follow_moved_shapes`] then moves the arrows bound to
+/// whatever changed its position or size.
 fn apply_update(
     next: &mut SceneFile,
     pos: usize,
@@ -570,10 +574,6 @@ fn apply_generic_update(
         (None, None) => {}
     }
 
-    if next.elements[index].placement() != container_before.placement() {
-        refresh_bound_arrow_fixed_points(next, index, env);
-    }
-
     if next.elements[index] != container_before {
         bump_if_not_bumped(&mut next.elements[index], container_before.version(), env);
     }
@@ -638,11 +638,6 @@ fn apply_bound_text_update(
 
     if next.elements[index] != before {
         bump_if_not_bumped(&mut next.elements[index], before.version(), env);
-    }
-    if let Some((container_index, container_before)) = &container_before
-        && next.elements[*container_index] != *container_before
-    {
-        refresh_bound_arrow_fixed_points(next, *container_index, env);
     }
     Ok(())
 }
@@ -915,9 +910,6 @@ fn apply_image_update(
             base.opacity = o;
         }
     }
-    if next.elements[index].placement() != before.placement() {
-        refresh_bound_arrow_fixed_points(next, index, env);
-    }
     if next.elements[index] != before {
         bump_if_not_bumped(&mut next.elements[index], before.version(), env);
     }
@@ -1186,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_a_container_recenters_its_label_and_refreshes_arrow_bindings() {
+    fn moving_a_container_recenters_its_label_and_moves_the_bound_arrow() {
         let (next, report) = apply(
             &scene(),
             json!({"ops": [
@@ -1199,11 +1191,17 @@ mod tests {
         // The label is remeasured on a resize: "box" is 36 wide (the fixture's 48 is stale),
         // centered on the wider rectangle's x = 100.
         assert_eq!((label.x, label.y), (82.0, 117.5));
-        // The arrow stayed where it was; its start's fixedPoint now describes (105, 30)
-        // relative to the moved, wider rectangle.
+        // The arrow's start follows the rectangle (it sat at (105, 30), against the old right
+        // edge; the rectangle now ends at x = 200 and spans y 100 to 160) and keeps its
+        // fixedPoint; the far end stays put.
         let binding = get(&next, "a").to_value()["startBinding"].clone();
-        assert_eq!(binding["fixedPoint"], json!([0.525, -1.1666666666666667]));
+        assert_eq!(binding["fixedPoint"], json!([1.05, 0.5001]));
         assert_eq!(binding["mode"], json!("orbit"));
+        let arrow = get(&next, "a").placement().unwrap();
+        assert!(arrow.x > 200.0 && arrow.y > 90.0, "{arrow:?}");
+        let end = crate::binding::linear_end_point(get(&next, "a"), crate::element::LinearEnd::End)
+            .unwrap();
+        assert_eq!(end, [195.0, 30.0]);
     }
 
     #[test]

@@ -233,7 +233,7 @@ pub fn global_fixed_point(fixed_point: [f64; 2], target: &Element) -> Option<[f6
 
 /// `LinearElementEditor.createPointAt` without grid snapping: the local point of `arrow` that
 /// sits at scene point `global`. `None` for an arrow whose geometry cannot be read (no points).
-fn create_point_at(
+pub fn create_point_at(
     geometry: &mut GeometryCache,
     arrow: &Element,
     global: [f64; 2],
@@ -246,7 +246,7 @@ fn create_point_at(
 
 /// `LinearElementEditor.getPointGlobalCoordinates`: the scene position of `arrow`'s local
 /// `point`. `None` when the arrow's geometry cannot be read.
-fn local_to_global(
+pub fn local_to_global(
     geometry: &mut GeometryCache,
     arrow: &Element,
     point: [f64; 2],
@@ -635,19 +635,15 @@ fn live_bindable_position(elements: &[Element], id: &str) -> Option<usize> {
     })
 }
 
-/// `getSnapOutlineMidPoint`: the side midpoint of `target` within the binding distance of
-/// `point` (and outside the shape), if any.
-pub fn snap_outline_mid_point(
-    geometry: &mut GeometryCache,
-    point: [f64; 2],
-    target: &Element,
-    zoom: f64,
-) -> Option<[f64; 2]> {
+/// The four side midpoints of `target` (`getSnapOutlineMidPoint`'s candidates, also the dots
+/// the binding hint draws): right, bottom, left, top, rotated with the shape; a diamond's are
+/// the middles of its corner curves.
+pub fn side_midpoints(geometry: &mut GeometryCache, target: &Element) -> Option<Vec<[f64; 2]>> {
     let placement = target.placement()?;
     let center = element_center(geometry, target)?;
     let rotate = |p: [f64; 2]| collision::rotate_unless_zero(p, center, placement.angle);
     let (x, y, w, h) = (placement.x, placement.y, placement.width, placement.height);
-    let side_midpoints: Vec<[f64; 2]> = if let Element::Diamond(diamond) = target {
+    Some(if let Element::Diamond(diamond) = target {
         let (_, corners) = collision::deconstruct_diamond(placement, &diamond.base.roundness);
         corners
             .iter()
@@ -660,7 +656,18 @@ pub fn snap_outline_mid_point(
             rotate([x, y + h / 2.0]),
             rotate([x + w / 2.0, y]),
         ]
-    };
+    })
+}
+
+/// `getSnapOutlineMidPoint`: the side midpoint of `target` within the binding distance of
+/// `point` (and outside the shape), if any.
+pub fn snap_outline_mid_point(
+    geometry: &mut GeometryCache,
+    point: [f64; 2],
+    target: &Element,
+    zoom: f64,
+) -> Option<[f64; 2]> {
+    let side_midpoints = side_midpoints(geometry, target)?;
     let limit = max_binding_distance(zoom) + collision::stroke_width(target) / 2.0;
     side_midpoints.into_iter().find(|midpoint| {
         rough::js::hypot(point[0] - midpoint[0], point[1] - midpoint[1]) <= limit

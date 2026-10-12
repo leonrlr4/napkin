@@ -24,9 +24,10 @@ use std::sync::Arc;
 
 use serde_json::{Map, json};
 
+use crate::binding::{self, BindingInput, LinearDragState, SuggestedBinding};
 use crate::collision;
 use crate::edit;
-use crate::element::{Element, StrokeOptions};
+use crate::element::{Element, LinearEnd, StrokeOptions};
 use crate::env::Env;
 use crate::file::SceneFile;
 use crate::geometry;
@@ -73,6 +74,10 @@ pub(super) struct LinearState {
     /// The zoom of the latest event seen, for the release-distance and (via
     /// [`MultiPointState`]) commit-zone and loop checks a `Command` carries no zoom of its own.
     zoom: f64,
+    /// The latest event seen, for a finish that has no release event of its own.
+    last: PointerEvent,
+    /// What the binding strategy reads of the gesture so far.
+    drag: LinearDragState,
 }
 
 pub(super) struct MultiPointState {
@@ -85,6 +90,9 @@ pub(super) struct MultiPointState {
     /// following the pointer.
     confirmed: Option<usize>,
     zoom: f64,
+    /// The latest event seen, for a finish that has no event of its own.
+    last: PointerEvent,
+    drag: LinearDragState,
 }
 
 pub(super) struct FreedrawState {
@@ -145,9 +153,10 @@ pub(super) fn pointer_move(editor: &mut Editor<impl Env>, event: PointerEvent) {
             Gesture::Shape(state)
         }
         Gesture::Linear(mut state) => {
-            apply_linear_drag_move(editor, &state, event);
+            apply_linear_drag_move(editor, &mut state, event);
             state.moved = true;
             state.zoom = event.zoom;
+            state.last = event;
             Gesture::Linear(state)
         }
         Gesture::MultiPoint(state) => multi_point_move(editor, state, event),
@@ -187,8 +196,8 @@ pub(super) fn finish_gesture(editor: &mut Editor<impl Env>, event: Option<Pointe
     match std::mem::replace(&mut editor.create_gesture, Gesture::None) {
         Gesture::None => {}
         Gesture::Shape(state) => finish_shape(editor, state),
-        Gesture::Linear(state) => finish_linear_drag(editor, state),
-        Gesture::MultiPoint(state) => finish_multi_point(editor, state),
+        Gesture::Linear(state) => finish_linear_drag(editor, state, event),
+        Gesture::MultiPoint(state) => finish_multi_point(editor, state, None),
         Gesture::Freedraw(state) => {
             let at = event.map_or(state.last, |e| e.at);
             finish_freedraw(editor, state, at);
@@ -207,26 +216,23 @@ pub(super) fn escape(editor: &mut Editor<impl Env>) -> Option<bool> {
         Gesture::Shape(ShapeState {
             start,
             selection_before,
-            position,
             ..
         })
         | Gesture::Linear(LinearState {
             start,
             selection_before,
-            position,
             ..
         })
         | Gesture::Freedraw(FreedrawState {
             start,
             selection_before,
-            position,
             ..
         }) => {
-            discard(editor, &start, &selection_before, position);
+            discard(editor, &start, &selection_before);
             Some(true)
         }
         Gesture::MultiPoint(state) => {
-            finish_multi_point(editor, state);
+            finish_multi_point(editor, state, None);
             Some(true)
         }
     }
@@ -237,7 +243,7 @@ pub(super) fn escape(editor: &mut Editor<impl Env>) -> Option<bool> {
 pub(super) fn finalize_command(editor: &mut Editor<impl Env>) -> bool {
     match std::mem::replace(&mut editor.create_gesture, Gesture::None) {
         Gesture::MultiPoint(state) => {
-            finish_multi_point(editor, state);
+            finish_multi_point(editor, state, None);
             true
         }
         other => {
@@ -340,21 +346,188 @@ fn start_linear(editor: &mut Editor<impl Env>, event: PointerEvent) {
             &mut editor.env,
         )
     };
+    let binds = is_binding_arrow(&element);
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     let position = edit::append_element(file, element, &mut editor.env);
+    let drag = LinearDragState {
+        new_arrow: true,
+        origin: Some(event.at),
+        ..LinearDragState::default()
+    };
+    editor.binding_hint = None;
+    if binds {
+        // The initial binding: the start point lands on whatever shape is under the press.
+        binding::finalize_binding(
+            &mut editor.geometry,
+            file,
+            position,
+            &[(0, [0.0, 0.0])],
+            binding_input(event),
+            &drag,
+            true,
+            &mut editor.env,
+        );
+        if !event.modifiers.ctrl {
+            // `getHoveredElementForBinding` with its default tolerance of 0: only a press on
+            // the shape itself shows the hint.
+            let suggestion = collision::hovered_element_for_binding(
+                &mut editor.geometry,
+                &editor.file.elements,
+                event.at,
+                0.0,
+            )
+            .map(|target| SuggestedBinding {
+                target,
+                mid_point: None,
+            });
+            editor.set_binding_hint(suggestion, event.at, event.modifiers.shift);
+        }
+    }
     editor.create_gesture = Gesture::Linear(LinearState {
         start,
         selection_before,
         position,
         moved: false,
         zoom: event.zoom,
+        last: event,
+        drag,
     });
+}
+
+/// `BindingInput` for one event: Ctrl pauses binding (`isBindingEnabled`), Shift locks the
+/// angle of the dragged point.
+pub(super) fn binding_input(event: PointerEvent) -> BindingInput {
+    BindingInput {
+        pointer: event.at,
+        zoom: event.zoom,
+        angle_locked: event.modifiers.shift,
+        enabled: !event.modifiers.ctrl,
+    }
+}
+
+/// An arrow that binds: not an elbow arrow, and not a line.
+pub(super) fn is_binding_arrow(element: &Element) -> bool {
+    matches!(element, Element::Arrow(l) if l.elbowed != Some(true))
+}
+
+/// Where the arrow `id` sits in the scene now; dragging an arrow can move it above a shape.
+fn position_of(file: &SceneFile, id: &str) -> usize {
+    file.elements
+        .iter()
+        .position(|e| e.id() == Some(id))
+        .expect("the arrow being drawn stays in the scene")
+}
+
+/// Drags point `index` of the arrow at `*position` to the scene point `event.at` (Shift locking
+/// its angle), binding or unbinding it on the way, and keeps the hint and `*position` current.
+pub(super) fn drag_arrow_point(
+    editor: &mut Editor<impl Env>,
+    position: &mut usize,
+    index: usize,
+    target: [f64; 2],
+    drag: &mut LinearDragState,
+    event: PointerEvent,
+) {
+    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+    let id = file.elements[*position]
+        .id()
+        .expect("an arrow has an id")
+        .to_owned();
+    let Some(local) = edit::dragged_point_local(
+        &file.elements[*position],
+        index,
+        target,
+        event.modifiers.shift,
+    ) else {
+        return;
+    };
+    let Element::Arrow(l) = &file.elements[*position] else {
+        return;
+    };
+    let current = l.points[index];
+    let suggestion = binding::drag_points(
+        &mut editor.geometry,
+        file,
+        *position,
+        &[index],
+        [local[0] - current[0], local[1] - current[1]],
+        binding_input(event),
+        drag,
+        &mut editor.env,
+    );
+    *position = position_of(file, &id);
+    editor.set_binding_hint(suggestion, event.at, event.modifiers.shift);
+}
+
+/// `bindOrUnbindBindingElement` for the arrow's last point at the end of a gesture
+/// (`actionFinalize`): with `at_point` false the point is where `event` put the pointer (the
+/// release or click that ends the arrow); with `at_point` true it is the point as it already
+/// sits (an arrow ended from the keyboard).
+fn bind_last_point(
+    editor: &mut Editor<impl Env>,
+    position: usize,
+    drag: &LinearDragState,
+    event: PointerEvent,
+    at_point: bool,
+) {
+    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+    let Element::Arrow(l) = &file.elements[position] else {
+        return;
+    };
+    if l.elbowed == Some(true) || l.points.len() < 2 {
+        return;
+    }
+    let last = l.points.len() - 1;
+    let mut input = binding_input(event);
+    let local = if at_point {
+        input.angle_locked = false;
+        let point = l.points[last];
+        let Some(global) =
+            binding::local_to_global(&mut editor.geometry, &file.elements[position], point)
+        else {
+            return;
+        };
+        input.pointer = global;
+        point
+    } else if event.modifiers.shift {
+        l.points[last]
+    } else {
+        match binding::create_point_at(&mut editor.geometry, &file.elements[position], event.at) {
+            Some(point) => point,
+            None => return,
+        }
+    };
+    binding::finalize_binding(
+        &mut editor.geometry,
+        file,
+        position,
+        &[(last, local)],
+        input,
+        drag,
+        false,
+        &mut editor.env,
+    );
 }
 
 /// Moves point 1 (the only uncommitted point of a fresh two-point line or arrow) to the
 /// pointer, Shift locking its angle around point 0 (`edit::move_linear_point`'s own pivot
-/// choice for a non-zero index).
-fn apply_linear_drag_move(editor: &mut Editor<impl Env>, state: &LinearState, event: PointerEvent) {
+/// choice for a non-zero index). An arrow binds its end on the way (see [`drag_arrow_point`]).
+fn apply_linear_drag_move(
+    editor: &mut Editor<impl Env>,
+    state: &mut LinearState,
+    event: PointerEvent,
+) {
+    if is_binding_arrow(&editor.file.elements[state.position]) {
+        drag_arrow_point(
+            editor,
+            &mut state.position,
+            1,
+            event.at,
+            &mut state.drag,
+            event,
+        );
+        return;
+    }
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     let before = file.elements[state.position].clone();
     edit::move_linear_point(
@@ -380,7 +553,14 @@ fn linear_points(element: &Element) -> Vec<[f64; 2]> {
 /// Releasing a fresh two-point line or arrow: too little movement (no move at all, or the
 /// release less than `MINIMUM_ARROW_SIZE` screen pixels from the press) hands off to
 /// [`Gesture::MultiPoint`] instead of finishing.
-fn finish_linear_drag(editor: &mut Editor<impl Env>, state: LinearState) {
+fn finish_linear_drag(
+    editor: &mut Editor<impl Env>,
+    mut state: LinearState,
+    event: Option<PointerEvent>,
+) {
+    if let Some(event) = event {
+        state.last = event;
+    }
     let points = linear_points(&editor.file.elements[state.position]);
     let follow = points[1];
     let distance = rough::js::hypot(follow[0], follow[1]) * state.zoom;
@@ -391,9 +571,13 @@ fn finish_linear_drag(editor: &mut Editor<impl Env>, state: LinearState) {
             position: state.position,
             confirmed: None,
             zoom: state.zoom,
+            last: state.last,
+            drag: state.drag,
         });
         return;
     }
+    bind_last_point(editor, state.position, &state.drag, state.last, false);
+    editor.binding_hint = None;
     finalize_linear_or_freedraw(
         editor,
         state.start,
@@ -410,6 +594,7 @@ fn multi_point_pointer_down(
     event: PointerEvent,
 ) -> Gesture {
     state.zoom = event.zoom;
+    state.last = event;
     let element = &editor.file.elements[state.position];
     let points = linear_points(element);
     let is_line = matches!(element, Element::Line(_));
@@ -422,7 +607,7 @@ fn multi_point_pointer_down(
         // Confirm the point about to close the loop first, so the finish below (which drops
         // any point past the last confirmed one) keeps it instead.
         state.confirmed = Some(points.len() - 1);
-        finish_multi_point(editor, state);
+        finish_multi_point(editor, state, None);
         return Gesture::None;
     }
 
@@ -433,7 +618,27 @@ fn multi_point_pointer_down(
         ) < collision::LINE_CONFIRM_THRESHOLD
     });
     if in_commit_zone {
-        finish_multi_point(editor, state);
+        finish_multi_point(editor, state, None);
+        return Gesture::None;
+    }
+
+    if is_binding_arrow(element)
+        && binding::multi_point_click_finishes(
+            &mut editor.geometry,
+            &editor.file.elements,
+            state.position,
+            event.at,
+            event.zoom,
+            !event.modifiers.ctrl,
+            None,
+            &state.drag,
+        )
+    {
+        // A click that lands the arrow on a shape ends it there, with the point that was
+        // following the pointer kept.
+        state.confirmed = Some(points.len() - 1);
+        state.last = event;
+        finish_multi_point(editor, state, Some(event));
         return Gesture::None;
     }
 
@@ -446,6 +651,7 @@ fn multi_point_move(
     event: PointerEvent,
 ) -> Gesture {
     state.zoom = event.zoom;
+    state.last = event;
     let position = state.position;
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     let placement = file.elements[position]
@@ -465,6 +671,16 @@ fn multi_point_move(
         }
     } else if points.len() > 2 && near_confirmed {
         pop_linear_point(&mut file.elements[position], &mut editor.env);
+    } else if is_binding_arrow(&file.elements[position]) {
+        let last_index = points.len() - 1;
+        drag_arrow_point(
+            editor,
+            &mut state.position,
+            last_index,
+            event.at,
+            &mut state.drag,
+            event,
+        );
     } else {
         let before = file.elements[position].clone();
         let last_index = points.len() - 1;
@@ -486,19 +702,28 @@ fn confirm_multi_point(
     event: PointerEvent,
 ) -> Gesture {
     state.zoom = event.zoom;
+    state.last = event;
     let points_len = linear_points(&editor.file.elements[state.position]).len();
     state.confirmed = Some(points_len - 1);
     Gesture::MultiPoint(state)
 }
 
-/// Drops every point past the last confirmed one, then hands off to the completion shared with
-/// a direct two-point drag and a freedraw stroke.
-fn finish_multi_point(editor: &mut Editor<impl Env>, state: MultiPointState) {
+/// Drops every point past the last confirmed one, binds the arrow's end, then hands off to the
+/// completion shared with a direct two-point drag and a freedraw stroke. `release` is the click
+/// that ended the arrow on a shape; without one, an arrow that lost its trailing point and
+/// still has an end binding is rebound at its new last point (`actionFinalize`).
+fn finish_multi_point(
+    editor: &mut Editor<impl Env>,
+    state: MultiPointState,
+    release: Option<PointerEvent>,
+) {
     let position = state.position;
+    let truncated;
     {
         let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
         let before = file.elements[position].clone();
         let keep = state.confirmed.map_or(1, |i| i + 1);
+        truncated = linear_points(&file.elements[position]).len() > keep;
         if let Element::Line(l) | Element::Arrow(l) = &mut file.elements[position] {
             l.points.truncate(keep);
             let [width, height] = geometry::size_from_points(&l.points);
@@ -509,6 +734,18 @@ fn finish_multi_point(editor: &mut Editor<impl Env>, state: MultiPointState) {
             bump_version(&mut file.elements[position], &mut editor.env);
         }
     }
+    if let Some(event) = release {
+        bind_last_point(editor, position, &state.drag, event, false);
+    } else if truncated
+        && is_binding_arrow(&editor.file.elements[position])
+        && editor.file.elements[position]
+            .binding_target(LinearEnd::End)
+            .is_some()
+        && linear_points(&editor.file.elements[position]).len() > 1
+    {
+        bind_last_point(editor, position, &state.drag, state.last, true);
+    }
+    editor.binding_hint = None;
     finalize_linear_or_freedraw(
         editor,
         state.start,
@@ -654,7 +891,8 @@ fn finalize_linear_or_freedraw(
 
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     if invisible {
-        file.elements.remove(position);
+        let removed = file.elements.remove(position);
+        release_from_targets(file, &removed, &mut editor.env);
     } else if !keep_tool && let Some(id) = file.elements[position].id().map(str::to_owned) {
         editor.selection = Selection::from_ids([id]);
     }
@@ -666,15 +904,24 @@ fn finalize_linear_or_freedraw(
 
 /// Removes the element a shape, initial linear drag or freedraw stroke had added, leaving the
 /// scene exactly as it was before the gesture started (so `finish_edit` records nothing).
-fn discard(
-    editor: &mut Editor<impl Env>,
-    start: &Arc<SceneFile>,
-    selection_before: &Selection,
-    position: usize,
-) {
-    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-    file.elements.remove(position);
+fn discard(editor: &mut Editor<impl Env>, start: &Arc<SceneFile>, selection_before: &Selection) {
+    // The gesture may also have bound the new arrow to a shape, so the whole scene goes back.
+    editor.file = Arc::clone(start);
+    editor.binding_hint = None;
     editor.finish_edit(start, selection_before);
+}
+
+/// Drops `removed` (an element taken out of the scene) from the `boundElements` of every
+/// element that lists it.
+fn release_from_targets(file: &mut SceneFile, removed: &Element, env: &mut impl Env) {
+    let Some(id) = removed.id() else { return };
+    for element in &mut file.elements {
+        let before = element.clone();
+        element.remove_bound_element(id);
+        if *element != before {
+            bump_version(element, env);
+        }
+    }
 }
 
 fn push_linear_point(element: &mut Element, point: [f64; 2], env: &mut impl Env) {
@@ -780,4 +1027,24 @@ fn drag_new_shape_geometry(
     }
 
     (new_x, new_y, width, height)
+}
+
+/// The arrow tool's hover hint (App.tsx's pointer-move handler): with no gesture in progress,
+/// the shape under the pointer that an arrow started here would bind to. Any other tool, and
+/// Ctrl, show none.
+pub(super) fn update_hover_hint(editor: &mut Editor<impl Env>, event: PointerEvent) {
+    if !matches!(editor.create_gesture, Gesture::None) {
+        return;
+    }
+    if editor.tool != Tool::Arrow || event.modifiers.ctrl {
+        editor.binding_hint = None;
+        return;
+    }
+    let suggestion = binding::hover_suggestion(
+        &mut editor.geometry,
+        &editor.file.elements,
+        event.at,
+        event.zoom,
+    );
+    editor.set_binding_hint(suggestion, event.at, event.modifiers.shift);
 }

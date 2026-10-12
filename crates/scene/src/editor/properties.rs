@@ -41,11 +41,12 @@
 //! embeddable, stickynote and image, but not ellipse: an ellipse has no sharp/round corners to
 //! toggle. Of napkin's kinds that leaves rectangle, diamond and line.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use serde_json::Map;
 
+use crate::binding;
 use crate::bound_text;
 use crate::color::is_transparent;
 use crate::element::{Element, ElementBase, Roundness};
@@ -547,8 +548,46 @@ pub(super) fn set_property<E: Env>(
     let selection_before = editor.selection.clone();
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
 
-    for position in targets {
+    for &position in &targets {
         apply_property(file, position, &property, measure, &mut editor.env);
+    }
+
+    // These change a shape's outline or a container's size, so the arrows bound to it follow
+    // (`updateBoundElements` in `actionProperties`/`actionStyles`).
+    if matches!(
+        property,
+        Property::StrokeWidth(_)
+            | Property::Edges(_)
+            | Property::FontFamily(_)
+            | Property::FontSize(_)
+    ) {
+        let mut followed: Vec<String> = Vec::new();
+        for position in targets {
+            let element = &file.elements[position];
+            let Some(id) = element.container_id().or_else(|| element.id()) else {
+                continue;
+            };
+            if !followed.iter().any(|f| f == id) {
+                followed.push(id.to_owned());
+            }
+        }
+        for id in followed {
+            let Some(position) = file
+                .elements
+                .iter()
+                .position(|e| !e.is_deleted() && e.id() == Some(id.as_str()))
+            else {
+                continue;
+            };
+            binding::update_bound_elements(
+                &mut editor.geometry,
+                file,
+                position,
+                &HashSet::new(),
+                measure,
+                &mut editor.env,
+            );
+        }
     }
 
     editor.finish_edit(&before, &selection_before)

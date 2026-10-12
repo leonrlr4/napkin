@@ -1168,6 +1168,71 @@ pub fn is_bindable_including_locked(element: &Element) -> bool {
     }
 }
 
+/// The outline of a bindable shape as a closed polyline in scene coordinates, rotated with the
+/// shape: straight sides contribute their ends, rounded corners eight chords each, an ellipse
+/// 64 points. `None` for an element without a placement or that is not a rectangle, diamond,
+/// ellipse, image or text.
+pub fn outline_polyline(geometry: &mut GeometryCache, element: &Element) -> Option<Vec<[f64; 2]>> {
+    const CORNER_CHORDS: usize = 8;
+    const ELLIPSE_POINTS: usize = 64;
+    let placement = element.placement()?;
+    let (_, center) = geometry.absolute_coords(element)?;
+
+    fn push_curve(points: &mut Vec<[f64; 2]>, curve: CurveSeg) {
+        for step in 0..=CORNER_CHORDS {
+            points.push(crate::curve::bezier_equation(
+                curve,
+                step as f64 / CORNER_CHORDS as f64,
+            ));
+        }
+    }
+
+    let mut points: Vec<[f64; 2]> = Vec::new();
+    match element {
+        Element::Ellipse(_) => {
+            let rx = placement.width / 2.0;
+            let ry = placement.height / 2.0;
+            let (cx, cy) = (placement.x + rx, placement.y + ry);
+            for step in 0..ELLIPSE_POINTS {
+                let t = step as f64 / ELLIPSE_POINTS as f64 * std::f64::consts::TAU;
+                points.push([cx + rx * t.cos(), cy + ry * t.sin()]);
+            }
+        }
+        Element::Diamond(diamond) => {
+            let (sides, corners) = deconstruct_diamond(placement, &diamond.base.roundness);
+            // Corners run right, bottom, left, top; side `i` leads from corner `i` to `i + 1`.
+            for i in 0..4 {
+                push_curve(&mut points, corners[i]);
+                points.extend(sides[i]);
+            }
+        }
+        Element::Rectangle(_) | Element::Image(_) | Element::Text(_) => {
+            let radius = rectanguloid_radius(element, placement.width.min(placement.height));
+            let (sides, corners) = deconstruct_rectanguloid(placement, radius);
+            let [top, right, bottom, left] = sides;
+            let [top_left, top_right, bottom_right, bottom_left] = corners;
+            points.extend(top);
+            push_curve(&mut points, top_right);
+            points.extend(right);
+            push_curve(&mut points, bottom_right);
+            points.extend([bottom[1], bottom[0]]);
+            push_curve(&mut points, bottom_left);
+            points.extend(left);
+            push_curve(&mut points, top_left);
+        }
+        _ => return None,
+    }
+    if let Some(&first) = points.first() {
+        points.push(first);
+    }
+    Some(
+        points
+            .into_iter()
+            .map(|p| rotate_unless_zero(p, center, placement.angle))
+            .collect(),
+    )
+}
+
 /// `bindingBorderTest` for a shape (not a frame): whether `point` is inside the shape (no
 /// crossing between the shape's center and the point) or within `tolerance` of its outline.
 fn binding_border_test(
