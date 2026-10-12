@@ -476,6 +476,9 @@ pub fn update_bound_elements(
 
     let mut any_changed = false;
     for arrow_id in bound_ids {
+        if simultaneous.contains(&arrow_id) {
+            continue;
+        }
         let Some(arrow) = file
             .elements
             .iter()
@@ -486,7 +489,7 @@ pub fn update_bound_elements(
         let Element::Arrow(l) = &file.elements[arrow] else {
             continue;
         };
-        if l.elbowed == Some(true) || simultaneous.contains(&arrow_id) {
+        if l.elbowed == Some(true) {
             continue;
         }
         let (start, end) = (
@@ -1084,10 +1087,10 @@ fn release_old_target(
 /// of `handlePointDragging`/`handlePointerMove`: moves `indices` of the arrow at `arrow` by
 /// `delta` (local units, already shift-locked by the caller), rebinding or unbinding the
 /// dragged end (and dropping the arrow from the previous target's `boundElements`, which
-/// Excalidraw leaves stale), and moving bound non-dragged ends with `update_bound_point`. A line just moves its points.
-/// When one end is dragged the arrow moves above the shape under it, so its position in
-/// `file.elements` can change: look it up by id afterwards. Arrow labels are the caller's to
-/// resync (`bound_text::sync_arrow_label`).
+/// Excalidraw leaves stale), and moving bound non-dragged ends with `update_bound_point`. A
+/// line just moves its points. When one end is dragged the arrow moves above the shape under
+/// it, so its position in `file.elements` can change: look it up by id afterwards. Arrow
+/// labels are the caller's to resync (`bound_text::sync_arrow_label`).
 #[expect(
     clippy::too_many_arguments,
     reason = "one gesture step: the scene, the arrow, the dragged points, and three kinds of input"
