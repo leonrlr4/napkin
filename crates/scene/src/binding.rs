@@ -1568,9 +1568,10 @@ pub fn multi_point_click_finishes(
 }
 
 /// `repairBinding` for every typed non-elbow arrow, run by `edit::repair_on_load`: a binding
-/// with `mode` gets its `fixedPoint` normalized; a legacy one (no `mode`) whose target exists
-/// becomes `{elementId, mode, fixedPoint}`; one that cannot be repaired, or whose target is
-/// missing, becomes `null`.
+/// with `mode` gets its `fixedPoint` normalized; a legacy one (no `mode`) whose target can be
+/// bound becomes `{elementId, mode, fixedPoint}`; one whose target exists but cannot be bound
+/// is kept as written; one that cannot be repaired, or whose target is missing, becomes
+/// `null`.
 pub fn repair_bindings(geometry: &mut GeometryCache, file: &mut SceneFile, env: &mut impl Env) {
     for position in 0..file.elements.len() {
         let Element::Arrow(l) = &file.elements[position] else {
@@ -1580,59 +1581,43 @@ pub fn repair_bindings(geometry: &mut GeometryCache, file: &mut SceneFile, env: 
             continue;
         }
         // Both ends repair against the arrow as loaded, so compute before writing either.
-        let repaired: Vec<(LinearEnd, Value, Option<Value>)> = [LinearEnd::Start, LinearEnd::End]
+        let repaired: Vec<(LinearEnd, Option<Value>)> = [LinearEnd::Start, LinearEnd::End]
             .into_iter()
             .filter_map(|end| {
                 let existing = file.elements[position].binding_value(end)?.clone();
                 let repaired = repair_binding(geometry, file, position, end, &existing);
-                (repaired.as_ref() != Some(&existing)).then_some((end, existing, repaired))
+                let unchanged = repaired
+                    .as_ref()
+                    .is_some_and(|r| same_json_numbers(r, &existing));
+                (!unchanged).then_some((end, repaired))
             })
             .collect();
         if repaired.is_empty() {
             continue;
         }
-        let mut dropped: Vec<String> = Vec::new();
-        for (end, existing, repaired) in repaired {
+        for (end, repaired) in repaired {
             match repaired {
                 Some(binding) => file.elements[position].set_binding(end, binding),
-                None => {
-                    file.elements[position].clear_binding(end);
-                    dropped.extend(
-                        existing
-                            .get("elementId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                    );
-                }
+                None => file.elements[position].clear_binding(end),
             }
         }
         bump_version(&mut file.elements[position], env);
-        for target_id in dropped {
-            // A Raw element cannot be edited, so its record stays; so does the record of a
-            // target the arrow still binds with its other end.
-            let still_bound = [LinearEnd::Start, LinearEnd::End]
-                .into_iter()
-                .any(|end| file.elements[position].binding_target(end) == Some(target_id.as_str()));
-            let Some(target) = file
-                .elements
-                .iter()
-                .position(|e| e.id() == Some(target_id.as_str()))
-            else {
-                continue;
-            };
-            if still_bound
-                || matches!(file.elements[target], Element::Raw(_))
-                || collision::is_bindable_including_locked(&file.elements[target])
-            {
-                continue;
-            }
-            let arrow_id = file.elements[position].id().unwrap_or_default().to_owned();
-            let before = file.elements[target].clone();
-            file.elements[target].remove_bound_element(&arrow_id);
-            if file.elements[target] != before {
-                bump_version(&mut file.elements[target], env);
-            }
+    }
+}
+
+/// JSON equality that compares numbers by value, so `0` and `0.0` match.
+fn same_json_numbers(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_json_numbers(a, b))
         }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, a)| b.get(k).is_some_and(|b| same_json_numbers(a, b)))
+        }
+        _ => a == b,
     }
 }
 
@@ -1676,12 +1661,16 @@ fn repair_binding(
         }));
     }
 
-    // Binding schema v1: recompute the fixed point from where the end sits now.
+    // Binding schema v1: recompute the fixed point from where the end sits now. A target that
+    // exists but cannot be bound to (a Raw element, a label) keeps the binding as written,
+    // which also keeps the target's `boundElements` record of it.
     let target = file
         .elements
         .iter()
-        .position(|e| e.id() == Some(element_id))
-        .filter(|&at| collision::is_bindable_including_locked(&file.elements[at]))?;
+        .position(|e| e.id() == Some(element_id))?;
+    if !collision::is_bindable_including_locked(&file.elements[target]) {
+        return Some(binding.clone());
+    }
     let arrow = &file.elements[position];
     let end_index = match end {
         LinearEnd::Start => 0,
@@ -2121,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_drops_the_record_of_a_non_bindable_target_it_unbinds() {
+    fn repair_keeps_a_legacy_binding_to_a_target_that_is_not_bindable() {
         let mut file = sample::file(vec![
             sample::with(
                 sample::text("t", [200.0, 0.0, 40.0, 20.0], "hi", Some("c")),
@@ -2133,9 +2122,49 @@ mod tests {
                 json!({"endBinding": {"elementId": "t", "focus": 0, "gap": 6}}),
             ),
         ]);
+        let before = file.clone();
         repair_bindings(&mut GeometryCache::default(), &mut file, &mut FixedEnv);
-        assert_eq!(file.elements[2].to_value()["endBinding"], Value::Null);
-        assert!(file.elements[0].bound_elements().is_empty());
+        assert_eq!(file, before);
+    }
+
+    #[test]
+    fn repair_keeps_a_legacy_binding_to_a_raw_target() {
+        let mut file = sample::file(vec![
+            sample::with(
+                sample::generic("frame", "f", [200.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+                json!({"endBinding": {"elementId": "f", "focus": 0, "gap": 6}}),
+            ),
+        ]);
+        assert!(matches!(file.elements[0], Element::Raw(_)));
+        let before = file.clone();
+        repair_bindings(&mut GeometryCache::default(), &mut file, &mut FixedEnv);
+        assert_eq!(file, before);
+        assert_eq!(
+            file.elements[1].to_value()["endBinding"],
+            json!({"elementId": "f", "focus": 0, "gap": 6})
+        );
+        assert_eq!(file.elements[0].bound_elements(), [("a", "arrow")]);
+    }
+
+    #[test]
+    fn repair_leaves_an_integer_fixed_point_alone() {
+        let mut file = sample::file(vec![
+            sample::with(
+                sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+                json!({"endBinding": {"elementId": "r", "mode": "orbit", "fixedPoint": [0, 0.4]}}),
+            ),
+        ]);
+        let before = file.clone();
+        repair_bindings(&mut GeometryCache::default(), &mut file, &mut FixedEnv);
+        assert_eq!(file, before);
     }
 
     #[test]
