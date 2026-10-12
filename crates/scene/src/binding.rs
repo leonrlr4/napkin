@@ -324,6 +324,10 @@ pub fn update_bound_point(
     let BindingState::Fixed(binding) = read_binding(arrow, end) else {
         return None;
     };
+    // An arrow with no points has nothing to move.
+    if l.points.is_empty() {
+        return None;
+    }
     if (target.id() != Some(binding.element_id.as_str()) && l.points.len() > 2)
         || l.points.last() == Some(&[0.0, 0.0])
     {
@@ -1033,12 +1037,47 @@ fn new_binding(
     Some(json!({"elementId": target.id()?, "mode": mode.as_str(), "fixedPoint": fixed_point}))
 }
 
+/// After an end of the arrow at `arrow` stopped binding `old_target` (cleared or rebound),
+/// removes the arrow from that element's `boundElements`, unless an end of the arrow still binds
+/// it. Excalidraw leaves the stale record behind until the shape moves; napkin keeps both sides
+/// of a binding consistent (spec §5.8). Bumps the element only if it changed.
+fn release_old_target(
+    file: &mut SceneFile,
+    arrow: usize,
+    old_target: Option<&str>,
+    env: &mut impl Env,
+) {
+    let Some(old_target) = old_target else {
+        return;
+    };
+    let still_bound = [LinearEnd::Start, LinearEnd::End]
+        .into_iter()
+        .any(|end| file.elements[arrow].binding_target(end) == Some(old_target));
+    let Some(arrow_id) = file.elements[arrow].id().map(str::to_owned) else {
+        return;
+    };
+    if still_bound {
+        return;
+    }
+    let Some(target) = file
+        .elements
+        .iter()
+        .position(|e| e.id() == Some(old_target))
+    else {
+        return;
+    };
+    let before = file.elements[target].clone();
+    file.elements[target].remove_bound_element(&arrow_id);
+    if file.elements[target] != before {
+        bump_version(&mut file.elements[target], env);
+    }
+}
+
 /// `pointDraggingUpdates` + `movePoints` + the `altFocusPoint`/`suggestedBinding` bookkeeping
 /// of `handlePointDragging`/`handlePointerMove`: moves `indices` of the arrow at `arrow` by
 /// `delta` (local units, already shift-locked by the caller), rebinding or unbinding the
-/// dragged end on the arrow only (the previous target's `boundElements` entry stays until
-/// something removes it, as in Excalidraw; `update_bound_elements` ignores a stale record),
-/// and moving bound non-dragged ends with `update_bound_point`. A line just moves its points.
+/// dragged end (and dropping the arrow from the previous target's `boundElements`, which
+/// Excalidraw leaves stale), and moving bound non-dragged ends with `update_bound_point`. A line just moves its points.
 /// When one end is dragged the arrow moves above the shape under it, so its position in
 /// `file.elements` can change: look it up by id afterwards. Arrow labels are the caller's to
 /// resync (`bound_text::sync_arrow_label`).
@@ -1266,6 +1305,7 @@ pub fn drag_points(
         .zip(&binding_updates)
     {
         let before = file.elements[arrow].clone();
+        let old_target = before.binding_target(which).map(str::to_owned);
         match update {
             Some(Some(binding)) => file.elements[arrow].set_binding(which, binding.clone()),
             Some(None) => file.elements[arrow].clear_binding(which),
@@ -1273,6 +1313,9 @@ pub fn drag_points(
         }
         if file.elements[arrow] != before {
             bump_version(&mut file.elements[arrow], env);
+        }
+        if update.is_some() {
+            release_old_target(file, arrow, old_target.as_deref(), env);
         }
     }
     move_points(&mut file.elements[arrow], &positions, false, env);
@@ -1541,13 +1584,48 @@ pub fn repair_bindings(geometry: &mut GeometryCache, file: &mut SceneFile, env: 
         if repaired.is_empty() {
             continue;
         }
-        for (end, _, repaired) in repaired {
+        let mut dropped: Vec<String> = Vec::new();
+        for (end, existing, repaired) in repaired {
             match repaired {
                 Some(binding) => file.elements[position].set_binding(end, binding),
-                None => file.elements[position].clear_binding(end),
+                None => {
+                    file.elements[position].clear_binding(end);
+                    dropped.extend(
+                        existing
+                            .get("elementId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
             }
         }
         bump_version(&mut file.elements[position], env);
+        for target_id in dropped {
+            // A Raw element cannot be edited, so its record stays; so does the record of a
+            // target the arrow still binds with its other end.
+            let still_bound = [LinearEnd::Start, LinearEnd::End]
+                .into_iter()
+                .any(|end| file.elements[position].binding_target(end) == Some(target_id.as_str()));
+            let Some(target) = file
+                .elements
+                .iter()
+                .position(|e| e.id() == Some(target_id.as_str()))
+            else {
+                continue;
+            };
+            if still_bound
+                || matches!(file.elements[target], Element::Raw(_))
+                || collision::is_bindable_including_locked(&file.elements[target])
+            {
+                continue;
+            }
+            let arrow_id = file.elements[position].id().unwrap_or_default().to_owned();
+            let before = file.elements[target].clone();
+            file.elements[target].remove_bound_element(&arrow_id);
+            if file.elements[target] != before {
+                bump_version(&mut file.elements[target], env);
+            }
+        }
     }
 }
 
@@ -1956,10 +2034,101 @@ mod tests {
             &mut FixedEnv,
         );
         assert_eq!(file.elements[1].binding_target(LinearEnd::End), None);
-        // The drag already cleared the arrow's side, so `unbindBindingElement` at the end of
-        // the gesture finds nothing to unbind and the shape keeps its stale entry, as in
-        // Excalidraw (`updateBoundElements` skips a record the arrow no longer backs).
-        assert_eq!(file.elements[0].bound_elements(), vec![("a", "arrow")]);
+        assert!(file.elements[0].bound_elements().is_empty());
+    }
+
+    #[test]
+    fn rebinding_an_end_moves_the_record_from_the_old_shape_to_the_new_one() {
+        let mut file = sample::file(vec![
+            sample::with(
+                sample::generic("rectangle", "a_shape", [200.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "w", "type": "arrow"}]}),
+            ),
+            sample::generic("rectangle", "b_shape", [200.0, 300.0, 100.0, 100.0]),
+            sample::with(
+                sample::linear("arrow", "w", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+                json!({"endBinding": {"elementId": "a_shape", "mode": "orbit", "fixedPoint": [-0.06, 0.5001]}}),
+            ),
+        ]);
+        let mut geometry = GeometryCache::default();
+        let mut state = LinearDragState::default();
+        // End point at (194, 50) -> (250, 294): 6 above b_shape's top edge.
+        let input = drop_input([250.0, 294.0]);
+        drag_points(
+            &mut geometry,
+            &mut file,
+            2,
+            &[1],
+            [56.0, 244.0],
+            input,
+            &mut state,
+            &mut FixedEnv,
+        );
+        finalize_binding(
+            &mut geometry,
+            &mut file,
+            2,
+            &[(1, [250.0, 244.0])],
+            input,
+            &state,
+            false,
+            &mut FixedEnv,
+        );
+        let arrow = file
+            .elements
+            .iter()
+            .position(|e| e.id() == Some("w"))
+            .unwrap();
+        assert_eq!(
+            file.elements[arrow].binding_target(LinearEnd::End),
+            Some("b_shape")
+        );
+        assert!(file.elements[0].bound_elements().is_empty());
+        assert_eq!(file.elements[1].bound_elements(), vec![("w", "arrow")]);
+    }
+
+    #[test]
+    fn update_bound_point_on_an_arrow_without_points_is_none() {
+        let target =
+            Element::from_value(sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 100.0]));
+        for mode in ["orbit", "inside"] {
+            let arrow = Element::from_value(sample::with(
+                sample::linear("arrow", "a", [0.0, 0.0], &[]),
+                json!({"endBinding": {"elementId": "r", "mode": mode, "fixedPoint": [1.06, 0.5001]}}),
+            ));
+            for end in [LinearEnd::Start, LinearEnd::End] {
+                assert_eq!(
+                    update_bound_point(
+                        &mut GeometryCache::default(),
+                        &[],
+                        &arrow,
+                        end,
+                        &target,
+                        false
+                    ),
+                    None,
+                    "{mode} {end:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repair_drops_the_record_of_a_non_bindable_target_it_unbinds() {
+        let mut file = sample::file(vec![
+            sample::with(
+                sample::text("t", [200.0, 0.0, 40.0, 20.0], "hi", Some("c")),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::generic("rectangle", "c", [100.0, 0.0, 200.0, 100.0]),
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+                json!({"endBinding": {"elementId": "t", "focus": 0, "gap": 6}}),
+            ),
+        ]);
+        repair_bindings(&mut GeometryCache::default(), &mut file, &mut FixedEnv);
+        assert_eq!(file.elements[2].to_value()["endBinding"], Value::Null);
+        assert!(file.elements[0].bound_elements().is_empty());
     }
 
     #[test]

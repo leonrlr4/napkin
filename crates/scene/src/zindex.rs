@@ -1,8 +1,8 @@
 //! Moving selected elements one layer up or down, ported from `packages/element/src/zindex.ts`
 //! (`getIndicesToMove`, `toContiguousGroups`, `getTargetIndex`,
 //! `getTargetIndexAccountingForBinding`, `shiftElementsByOne`, `moveOneLeft`, `moveOneRight`,
-//! `moveArrowAboveBindable`) at the pinned commit. `moveAllLeft`/`moveAllRight` (`Ctrl+Shift+[`/`]`, `shiftElementsToEnd`) are
-//! not ported: napkin only binds `Ctrl+[`/`Ctrl+]`.
+//! `moveArrowAboveBindable`) at the pinned commit. `moveAllLeft`/`moveAllRight`
+//! (`Ctrl+Shift+[`/`]`, `shiftElementsToEnd`) are not ported: napkin only binds `Ctrl+[`/`Ctrl+]`.
 //!
 //! napkin has no "editing group" state (no equivalent of Excalidraw double-clicking into a
 //! group), so every place the JS reads `appState.editingGroupId` is ported with that value

@@ -379,6 +379,12 @@ function settleArrowLabels(elements) {
     text.x = position.x;
     text.y = position.y;
   }
+  // handleBindTextResize stamps Date.now() and a random versionNonce; the elements are case
+  // inputs, so keep them reproducible (the defaults every case element starts with).
+  for (const el of live) {
+    el.updated = 1;
+    el.versionNonce = 0;
+  }
   return live;
 }
 
@@ -660,6 +666,10 @@ function arrowBindingResult(elements, gesture) {
     throw new Error(`unknown gesture ${gesture.kind}`);
   }
 
+  const bindsBack = (arrowId, shapeId) => {
+    const arrow = scene.getElementsIncludingDeleted().find((e) => e.id === arrowId);
+    return arrow?.type === "arrow" && (arrow.startBinding?.elementId === shapeId || arrow.endBinding?.elementId === shapeId);
+  };
   const out = scene.getElementsIncludingDeleted().map((el) => ({
     id: el.id,
     x: el.x,
@@ -673,7 +683,12 @@ function arrowBindingResult(elements, gesture) {
           endBinding: el.endBinding ? { elementId: el.endBinding.elementId, mode: el.endBinding.mode, fixedPoint: [...el.endBinding.fixedPoint] } : null,
         }
       : {}),
-    boundElements: (el.boundElements ?? []).map((b) => b.id),
+    // Excalidraw leaves an arrow in the old target's boundElements after the end is dragged
+    // away or rebound; napkin removes it (spec §5.8). Both sides drop the entries whose arrow
+    // does not bind back, so the comparison covers everything else.
+    boundElements: (el.boundElements ?? [])
+      .filter((b) => b.type !== "arrow" || bindsBack(b.id, el.id))
+      .map((b) => b.id),
   }));
   return { elements: out, suggestedBinding: gesture.kind === "clickCreate" ? null : suggested };
 }

@@ -1196,9 +1196,22 @@ fn arrow_binding_output(gesture: &ArrowGesture, suggested: Option<&str>) -> Valu
                     });
                 }
             }
+            // Excalidraw leaves an arrow in the old target's `boundElements` after the end is
+            // dragged away or rebound; napkin removes it (spec §5.8). Both sides drop the
+            // entries whose arrow does not bind back, so the comparison covers everything else.
+            let binds_back = |arrow_id: &str| {
+                gesture.file.elements.iter().any(|a| {
+                    a.id() == Some(arrow_id)
+                        && a.kind() == "arrow"
+                        && [LinearEnd::Start, LinearEnd::End]
+                            .into_iter()
+                            .any(|end| a.binding_target(end) == e.id())
+                })
+            };
             out["boundElements"] = json!(
                 e.bound_elements()
                     .into_iter()
+                    .filter(|&(id, kind)| kind != "arrow" || binds_back(id))
                     .map(|(id, _)| id)
                     .collect::<Vec<_>>()
             );
