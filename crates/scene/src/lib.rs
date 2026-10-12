@@ -7,6 +7,7 @@ pub mod bound_text;
 pub mod clipboard;
 pub mod collision;
 pub mod color;
+pub mod curve;
 pub mod duplicate;
 pub mod edit;
 pub mod editor;

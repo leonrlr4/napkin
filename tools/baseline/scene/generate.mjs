@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, encode, runCase, writeGroup } from "../lib/harness.mjs";
-import { boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
+import { boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, intersectCases, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -33,6 +33,7 @@ const lib = await bundleExcalidraw(
   export { generateKeyBetween, generateNKeysBetween } from "@excalidraw/fractional-indexing";
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
   export { duplicateElements } from "@excalidraw/element/duplicate";
+  export { intersectElementWithLineSegment, getHoveredElementForBinding, hitElementItself } from "@excalidraw/element/collision";
   `,
 );
 
@@ -332,6 +333,37 @@ writeGroup(
         pointer[0], pointer[1], center[0], center[1],
       );
       return transformOutput(live);
+    }),
+  })),
+);
+
+// hitElementItself memoizes on (id, version, versionNonce, point); a unique nonce per case keeps
+// one case's answer from being served to another.
+let hitNonce = 0;
+writeGroup(
+  outDir,
+  "intersect",
+  source,
+  intersectCases.map(([name, elements, call, args]) => ({
+    name,
+    call,
+    args: [elements, ...args],
+    ...runCase(name, () => {
+      const live = structuredClone(elements);
+      for (const el of live) el.versionNonce = (hitNonce += 1);
+      const scene = new lib.Scene(live);
+      const map = scene.getNonDeletedElementsMap();
+      const points = (ps) => ps.map((p) => [p[0], p[1]]);
+      if (call === "intersectElementWithLineSegment") {
+        const [id, segment, offset] = args;
+        return points(lib.intersectElementWithLineSegment(map.get(id), map, segment, offset));
+      }
+      if (call === "getHoveredElementForBinding") {
+        const [point, tolerance] = args;
+        return lib.getHoveredElementForBinding(point, scene.getNonDeletedElements(), map, tolerance)?.id ?? null;
+      }
+      const [id, point, threshold, override] = args;
+      return lib.hitElementItself({ point, element: map.get(id), threshold, elementsMap: map, overrideShouldTestInside: override });
     }),
   })),
 );

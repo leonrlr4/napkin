@@ -769,3 +769,59 @@ fn transform() {
         )
     });
 }
+
+#[test]
+fn intersect() {
+    check_group(&dir(), "intersect", |case| {
+        let elements: Vec<Element> = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .cloned()
+            .map(Element::from_value)
+            .collect();
+        let point = |v: &Value| [num(&v[0]), num(&v[1])];
+        let mut geometry = scene::geometry::GeometryCache::default();
+        match case.call.as_str() {
+            "intersectElementWithLineSegment" => {
+                let id = case.args[1].as_str().expect("id");
+                let element = elements
+                    .iter()
+                    .find(|e| e.id() == Some(id))
+                    .expect("element id");
+                let segment = [point(&case.args[2][0]), point(&case.args[2][1])];
+                let hits = scene::collision::intersect_element_with_line_segment(
+                    &mut geometry,
+                    element,
+                    segment,
+                    num(&case.args[3]),
+                );
+                json!(hits)
+            }
+            "getHoveredElementForBinding" => {
+                let hit = scene::collision::hovered_element_for_binding(
+                    &mut geometry,
+                    &elements,
+                    point(&case.args[1]),
+                    num(&case.args[2]),
+                );
+                json!(hit.map(|index| elements[index].id()))
+            }
+            "hitElementItself" => {
+                let id = case.args[1].as_str().expect("id");
+                let element = elements
+                    .iter()
+                    .find(|e| e.id() == Some(id))
+                    .expect("element id");
+                json!(scene::collision::hit_element_itself_with(
+                    &mut geometry,
+                    element,
+                    point(&case.args[2]),
+                    num(&case.args[3]),
+                    case.args[4].as_bool().expect("override flag"),
+                ))
+            }
+            other => panic!("unknown call {other}"),
+        }
+    });
+}

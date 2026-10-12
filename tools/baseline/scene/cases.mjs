@@ -665,3 +665,106 @@ transformCases.push(
   ["rotateBoundArrowAlone", boundArrowScene(), ["w"], "rotation", [130, 90], [132, 20], NONE],
   ["rotateArrowWithItsStartTarget", boundArrowScene(), ["s", "w"], "rotation", [130, 90], [132, 20], NONE],
 );
+
+/**
+ * [name, elements, call, args] for the intersect group. `call` is one of:
+ *  - "intersectElementWithLineSegment": args `[id, [[x1, y1], [x2, y2]], offset]`; output is the
+ *    array of crossing points, in the order JS returns them.
+ *  - "getHoveredElementForBinding": args `[[x, y], tolerance]` over all `elements`; output is the
+ *    id of the element to bind to, or null.
+ *  - "hitElementItself": args `[id, [x, y], threshold, overrideShouldTestInside]`; output is a boolean.
+ */
+const ROUND = { type: 3 };
+const box = (type, overrides = {}) => element(type, { id: "a", x: 100, y: 100, width: 200, height: 100, ...overrides });
+const outlineShapes = [
+  ["rect", box("rectangle")],
+  ["roundRect", box("rectangle", { roundness: ROUND })],
+  ["rotatedRect", box("rectangle", { angle: 0.6 })],
+  ["rotatedRoundRect", box("rectangle", { angle: 0.6, roundness: ROUND })],
+  ["diamond", box("diamond")],
+  ["roundDiamond", box("diamond", { roundness: ROUND })],
+  ["rotatedRoundDiamond", box("diamond", { angle: 0.6, roundness: ROUND })],
+  ["ellipse", box("ellipse")],
+  ["rotatedEllipse", box("ellipse", { angle: 0.6 })],
+  ["text", plainText("a", 100, 100, "hello world", { width: 200, height: 100 })],
+  ["image", pic({ width: 200, height: 100 })],
+];
+const crossings = [
+  ["horizontal", [[40, 130], [360, 130]]],
+  ["diagonal", [[60, 70], [340, 200]]],
+  ["vertical", [[220, 60], [220, 240]]],
+];
+
+export const intersectCases = [];
+for (const [label, shape] of outlineShapes) {
+  for (const offset of [0, 6]) {
+    for (const [direction, segment] of crossings) {
+      intersectCases.push([`${label}/${direction}/offset${offset}`, [shape], "intersectElementWithLineSegment", ["a", segment, offset]]);
+    }
+  }
+  intersectCases.push([`${label}/ends inside`, [shape], "intersectElementWithLineSegment", ["a", [[150, 140], [250, 160]], 0]]);
+  intersectCases.push([`${label}/far away`, [shape], "intersectElementWithLineSegment", ["a", [[0, 0], [50, 40]], 6]]);
+  intersectCases.push([`${label}/beside the outline`, [shape], "intersectElementWithLineSegment", ["a", [[100, 100], [140, 100]], 0]]);
+}
+// A segment that cuts the corner of a rounded shape crosses the curve, not a side.
+for (const offset of [0, 6]) {
+  intersectCases.push([`roundRect/corner/offset${offset}`, [box("rectangle", { roundness: ROUND })], "intersectElementWithLineSegment", ["a", [[70, 70], [130, 130]], offset]]);
+  intersectCases.push([`rotatedRoundRect/corner/offset${offset}`, [box("rectangle", { angle: 0.6, roundness: ROUND })], "intersectElementWithLineSegment", ["a", [[70, 150], [160, 150]], offset]]);
+  intersectCases.push([`roundDiamond/corner/offset${offset}`, [box("diamond", { roundness: ROUND })], "intersectElementWithLineSegment", ["a", [[290, 150], [340, 150]], offset]]);
+}
+// Open and closed lines and freedraw strokes go through the collision shape.
+const wave = linear("line", [[0, 0], [60, 40], [120, 10], [200, 60]], { id: "a", x: 100, y: 100, roundness: ROUND });
+const waveSharp = linear("line", [[0, 0], [60, 40], [120, 10], [200, 60]], { id: "a", x: 100, y: 100 });
+for (const [label, shape] of [["roundLine", wave], ["sharpLine", waveSharp], ["rotatedLine", { ...waveSharp, angle: 0.5 }]]) {
+  intersectCases.push([`${label}/horizontal`, [shape], "intersectElementWithLineSegment", ["a", [[80, 120], [320, 120]], 0]]);
+  intersectCases.push([`${label}/vertical`, [shape], "intersectElementWithLineSegment", ["a", [[150, 60], [150, 220]], 0]]);
+}
+
+const filled = "#ffc9c9";
+const pointInside = [200, 150];
+export const hoverCases = [
+  ["nestedTransparentPicksSmaller", [box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300 }), box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["nestedTransparentSmallerBehind", [box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 }), box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300 })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["filledFrontStopsTheSearch", [box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300 }), box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80, backgroundColor: filled })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["filledBigFrontTransparentSmallBehind", [box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 }), box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300, backgroundColor: filled })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["filledBehindTransparentFront", [box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300, backgroundColor: filled }), box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["equalSizesPickBehind", [box("rectangle", { id: "back" }), box("rectangle", { id: "front" })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["outside10Tolerance15", [box("rectangle")], "getHoveredElementForBinding", [[200, 90], 15]],
+  ["outside10Tolerance5", [box("rectangle")], "getHoveredElementForBinding", [[200, 90], 5]],
+  ["insideTolerance5", [box("rectangle")], "getHoveredElementForBinding", [pointInside, 5]],
+  ["farAway", [box("rectangle")], "getHoveredElementForBinding", [[600, 600], 15]],
+  ["lockedIsSkipped", [box("rectangle", { locked: true })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["lockedFrontFallsThrough", [box("rectangle", { id: "back" }), box("rectangle", { id: "front", locked: true, backgroundColor: filled })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["boundTextIsSkipped", [plainText("t", 100, 100, "hello world", { containerId: "c", width: 200, height: 100 })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["containerWithLabel", labeledAt("rectangle", [100, 100, 200, 100], "hello"), "getHoveredElementForBinding", [pointInside, 15]],
+  ["freeText", [plainText("t", 100, 100, "hello world", { width: 200, height: 100 })], "getHoveredElementForBinding", [[150, 90], 15]],
+  ["lineIsNotATarget", [linear("line", [[0, 0], [200, 0]], { id: "l", x: 100, y: 150 })], "getHoveredElementForBinding", [[200, 150], 15]],
+  ["ellipseInside", [box("ellipse")], "getHoveredElementForBinding", [pointInside, 15]],
+  ["ellipseCornerOfBounds", [box("ellipse")], "getHoveredElementForBinding", [[105, 105], 5]],
+  ["diamondInside", [box("diamond")], "getHoveredElementForBinding", [pointInside, 15]],
+  ["diamondNearEdge", [box("diamond")], "getHoveredElementForBinding", [[160, 112], 15]],
+  ["imageNearEdge", [pic({ width: 200, height: 100 })], "getHoveredElementForBinding", [[310, 150], 15]],
+  ["rotatedRectNearEdge", [box("rectangle", { angle: 0.6 })], "getHoveredElementForBinding", [[200, 90], 15]],
+  ["rotatedRoundRectInside", [box("rectangle", { angle: 0.6, roundness: ROUND })], "getHoveredElementForBinding", [[230, 140], 15]],
+];
+
+const hitShape = (type, overrides = {}) => box(type, overrides);
+export const hitCases = [
+  ["transparentRectInside/override", [hitShape("rectangle")], "hitElementItself", ["a", [200, 150], 8, true]],
+  ["transparentRectInside/plain", [hitShape("rectangle")], "hitElementItself", ["a", [201, 151], 8, false]],
+  ["transparentRectOutline/override", [hitShape("rectangle")], "hitElementItself", ["a", [200, 103], 8, true]],
+  ["transparentRectOutline/plain", [hitShape("rectangle")], "hitElementItself", ["a", [201, 103], 8, false]],
+  ["filledRectInside/plain", [hitShape("rectangle", { backgroundColor: filled })], "hitElementItself", ["a", [202, 151], 8, false]],
+  ["filledRectInside/override", [hitShape("rectangle", { backgroundColor: filled })], "hitElementItself", ["a", [203, 151], 8, true]],
+  ["transparentEllipseInside/override", [hitShape("ellipse")], "hitElementItself", ["a", [204, 150], 8, true]],
+  ["transparentEllipseInside/plain", [hitShape("ellipse")], "hitElementItself", ["a", [205, 150], 8, false]],
+  ["transparentDiamondInside/override", [hitShape("diamond")], "hitElementItself", ["a", [206, 150], 8, true]],
+  ["transparentDiamondInside/plain", [hitShape("diamond")], "hitElementItself", ["a", [207, 150], 8, false]],
+  ["rotatedRectInside/override", [hitShape("rectangle", { angle: 0.6 })], "hitElementItself", ["a", [208, 150], 8, true]],
+  ["rotatedRectInside/plain", [hitShape("rectangle", { angle: 0.6 })], "hitElementItself", ["a", [209, 150], 8, false]],
+  ["outside/override", [hitShape("rectangle")], "hitElementItself", ["a", [200, 60], 8, true]],
+  ["imageInside/plain", [pic({ width: 200, height: 100 })], "hitElementItself", ["a", [210, 150], 8, false]],
+  ["textInside/plain", [plainText("a", 100, 100, "hello world", { width: 200, height: 100 })], "hitElementItself", ["a", [211, 150], 8, false]],
+];
+
+intersectCases.push(...hoverCases, ...hitCases);
