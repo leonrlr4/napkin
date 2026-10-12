@@ -889,12 +889,15 @@ fn finalize_linear_or_freedraw(
         invisible
     };
 
-    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     if invisible {
-        let removed = file.elements.remove(position);
-        release_from_targets(file, &removed, &mut editor.env);
-    } else if !keep_tool && let Some(id) = file.elements[position].id().map(str::to_owned) {
-        editor.selection = Selection::from_ids([id]);
+        // The gesture may also have bound the arrow to a shape, so the whole scene goes back.
+        editor.file = Arc::clone(&start);
+        editor.binding_hint = None;
+    } else if !keep_tool {
+        let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+        if let Some(id) = file.elements[position].id().map(str::to_owned) {
+            editor.selection = Selection::from_ids([id]);
+        }
     }
     if !keep_tool {
         editor.tool = Tool::Selection;
@@ -909,19 +912,6 @@ fn discard(editor: &mut Editor<impl Env>, start: &Arc<SceneFile>, selection_befo
     editor.file = Arc::clone(start);
     editor.binding_hint = None;
     editor.finish_edit(start, selection_before);
-}
-
-/// Drops `removed` (an element taken out of the scene) from the `boundElements` of every
-/// element that lists it.
-fn release_from_targets(file: &mut SceneFile, removed: &Element, env: &mut impl Env) {
-    let Some(id) = removed.id() else { return };
-    for element in &mut file.elements {
-        let before = element.clone();
-        element.remove_bound_element(id);
-        if *element != before {
-            bump_version(element, env);
-        }
-    }
 }
 
 fn push_linear_point(element: &mut Element, point: [f64; 2], env: &mut impl Env) {

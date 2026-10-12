@@ -362,3 +362,19 @@ fn pressing_and_releasing_on_a_bound_arrow_end_changes_nothing() {
     assert_eq!(editor.file().as_ref(), &before);
     assert!(!editor.command(Command::Undo));
 }
+
+#[test]
+fn escaping_an_arrow_started_on_a_shape_without_moving_leaves_the_shape_untouched() {
+    let mut editor = editor(vec![sample::generic(
+        "rectangle",
+        "r",
+        [200.0, 0.0, 100.0, 100.0],
+    )]);
+    let before = editor.file().as_ref().clone();
+    editor.set_tool(Tool::Arrow);
+    editor.pointer_down(at(250.0, 50.0), &mut CharWidthMeasure);
+    editor.pointer_up(at(250.0, 50.0), &mut CharWidthMeasure);
+    editor.command(Command::Escape);
+    assert_eq!(editor.file().as_ref(), &before);
+    assert!(!editor.command(Command::Undo));
+}
