@@ -760,8 +760,8 @@ pub(super) fn commit_text(
 }
 
 /// A label can grow its container (`redrawTextBoundingBox`, or the minimum size a new label
-/// asks for); the arrows bound to the container follow it (`textWysiwyg`'s
-/// `updateBoundElements` after a submit). `before` is the scene the edit started from.
+/// asks for), and a standalone text can change size or position itself; the arrows bound to
+/// either follow it (`textWysiwyg`'s `updateBoundElements` after a submit). `before` is the scene the edit started from.
 fn follow_grown_container(
     editor: &mut Editor<impl Env>,
     before: &SceneFile,
@@ -773,6 +773,7 @@ fn follow_grown_container(
         .and_then(|id| editor.file.elements.iter().find(|e| e.id() == Some(id)))
         .and_then(Element::container_id)
         .or(editing.container_id.as_deref())
+        .or(surviving_id)
         .map(str::to_owned);
     let Some(container_id) = container_id else {
         return;

@@ -316,3 +316,28 @@ fn changing_a_bound_shapes_stroke_width_keeps_the_arrow_on_its_outline() {
         end_before
     );
 }
+
+#[test]
+fn editing_a_standalone_text_drags_the_arrow_bound_to_it() {
+    // Text "t" at (200, 0), 24 wide; the arrow ends 6 right of its right edge.
+    let mut editor = editor(vec![
+        sample::with(
+            sample::text("t", [200.0, 0.0, 24.0, 25.0], "t", None),
+            json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+        ),
+        sample::with(
+            sample::linear("arrow", "a", [500.0, 12.0], &[[0.0, 0.0], [-270.0, 0.0]]),
+            json!({"endBinding": {"elementId": "t", "mode": "orbit",
+                                  "fixedPoint": [1.2501, 0.5001]}}),
+        ),
+    ]);
+    let before = editor.file().as_ref().clone();
+    assert!(editor.double_click(at(210.0, 23.0), &mut CharWidthMeasure));
+    assert!(editor.commit_text("hello world", &mut CharWidthMeasure));
+    let p = element(&editor, "t").placement().unwrap();
+    assert!(p.width > 24.0, "{p:?}");
+    let end = linear_end_point(element(&editor, "a"), LinearEnd::End).unwrap();
+    assert!(end[0] > p.x + p.width, "{end:?} vs {p:?}");
+    assert!(editor.command(Command::Undo));
+    assert_eq!(editor.file().as_ref(), &before);
+}
