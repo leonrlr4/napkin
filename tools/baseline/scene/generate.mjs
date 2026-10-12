@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { EXCALIDRAW_COMMIT, bundleExcalidraw } from "../lib/excalidraw.mjs";
 import { REPO_ROOT, assertVersions, encode, runCase, writeGroup } from "../lib/harness.mjs";
-import { arrowLabelCases, boundFollowCases, boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, intersectCases, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
+import { arrowBindingCases, arrowLabelCases, boundFollowCases, boundTextCases, colors, duplicateCases, fractionalKeys, fractionalRanges, freedrawOutlineExtras, indexScenarios, intersectCases, newElementCalls, renderContexts, shapeElements, skeletonBatches, textWrapCases, transformCases, zindexCases } from "./cases.mjs";
 
 // Versions from Excalidraw's yarn.lock at the pinned commit.
 assertVersions({
@@ -35,7 +35,8 @@ const lib = await bundleExcalidraw(
   export { convertToExcalidrawElements } from "@excalidraw/element/transform";
   export { duplicateElements } from "@excalidraw/element/duplicate";
   export { LinearElementEditor } from "@excalidraw/element/linearElementEditor";
-  export { intersectElementWithLineSegment, getHoveredElementForBinding, hitElementItself } from "@excalidraw/element/collision";
+  export { intersectElementWithLineSegment, getHoveredElementForBinding, hitElementItself, isPointInElement } from "@excalidraw/element/collision";
+  export { bindOrUnbindBindingElement, getBindingStrategyForDraggingBindingElementEndpoints } from "@excalidraw/element/binding";
   `,
 );
 
@@ -464,6 +465,228 @@ writeGroup(
       const [id, point, threshold, override] = args;
       return lib.hitElementItself({ point, element: map.get(id), threshold, elementsMap: map, overrideShouldTestInside: override });
     }),
+  })),
+);
+
+
+// --- arrow_binding ---------------------------------------------------------------------------
+
+/** Pointer events with the flags the binding code reads. */
+const pointerEvent = (shift, ctrl) => ({ shiftKey: !!shift, altKey: false, ctrlKey: !!ctrl, metaKey: false });
+const LINE_CONFIRM_THRESHOLD = 8;
+const hypot = (x, y) => Math.hypot(x, y);
+
+/**
+ * Replays one `arrowBindingCases` gesture against the real Excalidraw code and returns every
+ * element in scene order plus the last suggested binding target. The `app` stub carries what
+ * `handlePointDragging`/`handlePointerMove`/`bindOrUnbindBindingElement` read: `state`,
+ * `scene`, `getEffectiveGridSize`. Follows App.tsx's pointer-down/move/up handlers and
+ * actionFinalize's first branch (the one pointer-up runs); `appState.selectedLinearElement`
+ * updates are applied the way `setState` would.
+ */
+function arrowBindingResult(elements, gesture) {
+  const live = structuredClone(elements);
+  for (const el of live) el.versionNonce = (hitNonce += 1);
+  const scene = new lib.Scene(live);
+  const ctrl = !!gesture.ctrl;
+  const state = {
+    zoom: { value: gesture.zoom ?? 1 },
+    isBindingEnabled: !ctrl,
+    isMidpointSnappingEnabled: true,
+    gridModeEnabled: false,
+    gridSize: 20,
+    bindMode: "orbit",
+    selectedLinearElement: null,
+    newElement: null,
+    suggestedBinding: null,
+  };
+  const app = { state, scene, getEffectiveGridSize: () => null };
+  const map = () => scene.getNonDeletedElementsMap();
+  let suggested = null;
+  const track = (ret) => {
+    if (!ret) return;
+    state.selectedLinearElement = ret.selectedLinearElement;
+    state.suggestedBinding = ret.suggestedBinding;
+    suggested = ret.suggestedBinding?.element.id ?? null;
+  };
+
+  /** actionFinalize's first branch (pointer-up on a linear element). */
+  const finalize = (arrow, [x, y, shift]) => {
+    const editor = state.selectedLinearElement;
+    if (editor.segmentMidPointHoveredCoords) return;
+    const newArrow = !!state.newElement;
+    const indices = newArrow || !editor.selectedPointsIndices ? [arrow.points.length - 1] : editor.selectedPointsIndices;
+    const angleLocked = !!shift;
+    const dragged = new Map(
+      indices.map((index) => [
+        index,
+        {
+          point: angleLocked
+            ? arrow.points[index]
+            : lib.LinearElementEditor.createPointAt(arrow, map(), x - editor.pointerOffset.x, y - editor.pointerOffset.y, null),
+        },
+      ]),
+    );
+    lib.bindOrUnbindBindingElement(arrow, dragged, x, y, scene, state, {
+      newArrow, altKey: false, angleLocked, gridSize: null,
+    });
+  };
+
+  /** App.tsx's pointer-down with the arrow tool: the new arrow, its initial binding, the editor. */
+  const pointerDownCreate = ([ox, oy]) => {
+    if (ctrl) state.isBindingEnabled = false;
+    const arrow = lib.newArrowElement({
+      type: "arrow", id: "new", seed: 1, x: ox, y: oy,
+      startArrowhead: null, endArrowhead: "arrow",
+      roundness: { type: 2 }, elbowed: false, fixedSegments: null,
+    });
+    scene.mutateElement(arrow, { points: [[0, 0], [0, 0]] });
+    scene.insertElement(arrow);
+    lib.bindOrUnbindBindingElement(
+      arrow,
+      new Map([[0, { point: [0, 0], isDragging: false }]]),
+      ox, oy, scene, state,
+      { newArrow: true, altKey: false, initialBinding: true, angleLocked: false },
+    );
+    const editor = new lib.LinearElementEditor(arrow, map());
+    state.newElement = arrow;
+    state.bindMode = "orbit";
+    state.selectedLinearElement = {
+      ...editor,
+      selectedPointsIndices: [arrow.points.length - 1],
+      initialState: { ...editor.initialState, arrowStartIsInside: false, lastClickedPoint: arrow.points.length - 1, origin: [ox, oy] },
+    };
+    return arrow;
+  };
+
+  const drag = (arrow, [x, y, shift]) => {
+    track(lib.LinearElementEditor.handlePointDragging(pointerEvent(shift, ctrl), app, x, y, state.selectedLinearElement));
+  };
+
+  if (gesture.kind === "create") {
+    const arrow = pointerDownCreate(gesture.origin);
+    for (const move of gesture.moves) drag(arrow, move);
+    finalize(arrow, gesture.up ?? gesture.moves.at(-1));
+  } else if (gesture.kind === "dragPoint") {
+    if (ctrl) state.isBindingEnabled = false;
+    const arrow = scene.getNonDeletedElementsMap().get(gesture.id);
+    const editor = new lib.LinearElementEditor(arrow, map());
+    const at = lib.LinearElementEditor.getPointGlobalCoordinates(arrow, arrow.points[gesture.index], map());
+    const grab = gesture.grab ?? at;
+    state.selectedLinearElement = {
+      ...editor,
+      selectedPointsIndices: [gesture.index],
+      pointerOffset: { x: grab[0] - at[0], y: grab[1] - at[1] },
+      initialState: {
+        ...editor.initialState,
+        lastClickedPoint: gesture.index,
+        origin: [...grab],
+        arrowOtherEndpointInitialBinding: gesture.index === 0 ? arrow.endBinding : arrow.startBinding,
+      },
+    };
+    for (const move of gesture.moves) drag(arrow, move);
+    finalize(arrow, gesture.up ?? gesture.moves.at(-1));
+  } else if (gesture.kind === "clickCreate") {
+    const arrow = pointerDownCreate(gesture.origin);
+    // Pointer-up without a drag: the arrow waits for more points. `lastCommittedPoint` is still
+    // unset then, and a point object stays "the last committed point" until a pointer move
+    // replaces the points (movePoints builds new ones).
+    let lastCommitted = null;
+    let committedIsLast = false;
+    let finished = false;
+    suggested = null;
+    for (const [kind, x, y] of gesture.events) {
+      if (finished) throw new Error("events after the arrow was finished");
+      const [rx, ry] = [arrow.x, arrow.y];
+      const { points } = arrow;
+      const local = [x - rx, y - ry];
+      if (kind === "move") {
+        if (committedIsLast) {
+          if (hypot(local[0] - points.at(-1)[0], local[1] - points.at(-1)[1]) >= LINE_CONFIRM_THRESHOLD) {
+            state.selectedLinearElement = {
+              ...state.selectedLinearElement,
+              selectedPointsIndices: [points.length],
+              initialState: { ...state.selectedLinearElement.initialState, lastClickedPoint: points.length },
+            };
+            scene.mutateElement(arrow, { points: [...points, local] }, { informMutation: false, isDragging: false });
+            committedIsLast = false;
+          }
+        } else if (points.length > 2 && lastCommitted && hypot(local[0] - lastCommitted[0], local[1] - lastCommitted[1]) < LINE_CONFIRM_THRESHOLD) {
+          scene.mutateElement(arrow, { points: points.slice(0, -1) }, { informMutation: false, isDragging: false });
+          const newLast = arrow.points.length - 1;
+          state.selectedLinearElement = {
+            ...state.selectedLinearElement,
+            selectedPointsIndices: [...new Set(state.selectedLinearElement.selectedPointsIndices.map((i) => Math.min(i, newLast)))],
+            initialState: { ...state.selectedLinearElement.initialState, lastClickedPoint: newLast },
+          };
+          lastCommitted = arrow.points[newLast];
+          committedIsLast = true;
+        } else {
+          const ret = lib.LinearElementEditor.handlePointerMove(pointerEvent(false, ctrl), app, x, y, state.selectedLinearElement);
+          if (ret) {
+            state.selectedLinearElement = ret.selectedLinearElement;
+            state.suggestedBinding = ret.suggestedBinding;
+          }
+          committedIsLast = false;
+        }
+      } else {
+        // Pointer-down on a multi-point arrow (App.tsx handleLinearElementOnPointerDown).
+        const { start, end } = state.isBindingEnabled
+          ? lib.getBindingStrategyForDraggingBindingElementEndpoints(
+              arrow,
+              new Map([[points.length - 1, { point: points.at(-1), isDragging: false }]]),
+              x, y, map(), scene.getNonDeletedElements(), state,
+              { newArrow: Boolean(state.newElement), zoom: state.zoom },
+            )
+          : { end: { mode: undefined } };
+        const endOutsideSameElement =
+          start?.mode != null && end.mode != null && start.element.id === end.element.id &&
+          !lib.isPointInElement(end.focusPoint, end.element, map());
+        const boundOutsideFromElsewhere = end.mode === "orbit" && arrow.startBinding?.elementId !== end.element?.id;
+        const inCommitZone =
+          lastCommitted && hypot(local[0] - lastCommitted[0], local[1] - lastCommitted[1]) < LINE_CONFIRM_THRESHOLD;
+        if (boundOutsideFromElsewhere || endOutsideSameElement || (points.length > 1 && inCommitZone)) {
+          finalize(arrow, [x, y, false]);
+          finished = true;
+        } else {
+          // Pointer-up commits the point that followed the pointer.
+          lastCommitted = points.at(-1);
+          committedIsLast = true;
+        }
+      }
+    }
+    if (!finished) throw new Error("the click-create gesture never finished");
+  } else {
+    throw new Error(`unknown gesture ${gesture.kind}`);
+  }
+
+  const out = scene.getElementsIncludingDeleted().map((el) => ({
+    id: el.id,
+    x: el.x,
+    y: el.y,
+    width: el.width,
+    height: el.height,
+    ...(el.points ? { points: el.points.map((p) => [p[0], p[1]]) } : {}),
+    ...(el.type === "arrow"
+      ? {
+          startBinding: el.startBinding ? { elementId: el.startBinding.elementId, mode: el.startBinding.mode, fixedPoint: [...el.startBinding.fixedPoint] } : null,
+          endBinding: el.endBinding ? { elementId: el.endBinding.elementId, mode: el.endBinding.mode, fixedPoint: [...el.endBinding.fixedPoint] } : null,
+        }
+      : {}),
+    boundElements: (el.boundElements ?? []).map((b) => b.id),
+  }));
+  return { elements: out, suggestedBinding: gesture.kind === "clickCreate" ? null : suggested };
+}
+
+writeGroup(
+  outDir,
+  "arrow_binding",
+  source,
+  arrowBindingCases.map(([name, elements, gesture]) => ({
+    name,
+    call: "arrowBindingGesture",
+    args: [elements, gesture],
+    ...runCase(name, () => arrowBindingResult(elements, gesture), { exactDespiteRandom: true }),
   })),
 );
 

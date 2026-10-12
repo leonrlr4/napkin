@@ -1,7 +1,7 @@
 //! Moving selected elements one layer up or down, ported from `packages/element/src/zindex.ts`
 //! (`getIndicesToMove`, `toContiguousGroups`, `getTargetIndex`,
-//! `getTargetIndexAccountingForBinding`, `shiftElementsByOne`, `moveOneLeft`, `moveOneRight`) at
-//! the pinned commit. `moveAllLeft`/`moveAllRight` (`Ctrl+Shift+[`/`]`, `shiftElementsToEnd`) are
+//! `getTargetIndexAccountingForBinding`, `shiftElementsByOne`, `moveOneLeft`, `moveOneRight`,
+//! `moveArrowAboveBindable`) at the pinned commit. `moveAllLeft`/`moveAllRight` (`Ctrl+Shift+[`/`]`, `shiftElementsToEnd`) are
 //! not ported: napkin only binds `Ctrl+[`/`Ctrl+]`.
 //!
 //! napkin has no "editing group" state (no equivalent of Excalidraw double-clicking into a
@@ -19,8 +19,11 @@ use std::collections::HashSet;
 
 use crate::element::Element;
 use crate::env::Env;
-use crate::fractional_index::sync_moved_indices;
+use crate::file::SceneFile;
+use crate::fractional_index::{sync_invalid_indices, sync_moved_indices};
+use crate::geometry::GeometryCache;
 use crate::selection::Selection;
+use crate::{bound_text, collision};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -383,4 +386,125 @@ pub fn move_one(
     sync_moved_indices(&mut working, &moved_ids, env);
 
     (working.as_slice() != elements).then_some(working)
+}
+
+/// `moveArrowAboveBindable`: when the bindable element under `point` (tolerance 0) sits above
+/// `arrow`, or its label does, moves the arrow directly above whichever of the two comes first
+/// in the order and resyncs indices (`replaceAllElements`' `syncInvalidIndices`). Returns the
+/// arrow's position afterwards.
+pub fn move_arrow_above_bindable(
+    geometry: &mut GeometryCache,
+    file: &mut SceneFile,
+    arrow: usize,
+    point: [f64; 2],
+    env: &mut impl Env,
+) -> usize {
+    let Some(hovered) =
+        collision::hovered_element_for_binding(geometry, &file.elements, point, 0.0)
+    else {
+        return arrow;
+    };
+    let mut bindable_ids: Vec<String> = Vec::new();
+    bindable_ids.extend(file.elements[hovered].id().map(str::to_owned));
+    if let Some(label) = bound_text::live_bound_text(file, hovered) {
+        bindable_ids.extend(file.elements[label].id().map(str::to_owned));
+    }
+    let Some(bindable) = file.elements.iter().position(|e| {
+        e.id()
+            .is_some_and(|id| bindable_ids.iter().any(|b| b == id))
+    }) else {
+        return arrow;
+    };
+    if arrow >= bindable {
+        return arrow;
+    }
+    let moved = file.elements.remove(arrow);
+    file.elements.insert(bindable, moved);
+    sync_invalid_indices(&mut file.elements, env);
+    bindable
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::geometry::GeometryCache;
+    use crate::sample;
+
+    struct FixedEnv;
+
+    impl Env for FixedEnv {
+        fn fill_random(&mut self, bytes: &mut [u8]) {
+            bytes.fill(0);
+        }
+
+        fn now_ms(&mut self) -> f64 {
+            1.0
+        }
+    }
+
+    fn ids(file: &crate::SceneFile) -> Vec<&str> {
+        file.elements.iter().filter_map(Element::id).collect()
+    }
+
+    #[test]
+    fn an_arrow_below_the_shape_under_its_end_moves_just_above_it() {
+        let mut file = crate::sample::file(vec![
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [200.0, 0.0]]),
+            sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+            sample::generic("rectangle", "other", [500.0, 0.0, 10.0, 10.0]),
+        ]);
+        let position = move_arrow_above_bindable(
+            &mut GeometryCache::default(),
+            &mut file,
+            0,
+            [210.0, 50.0],
+            &mut FixedEnv,
+        );
+        assert_eq!(position, 1);
+        assert_eq!(ids(&file), ["r", "a", "other"]);
+        let indices: Vec<_> = file.elements.iter().filter_map(Element::index).collect();
+        assert!(indices.windows(2).all(|w| w[0] < w[1]), "{indices:?}");
+    }
+
+    #[test]
+    fn an_arrow_already_above_or_over_nothing_stays_put() {
+        let mut file = crate::sample::file(vec![
+            sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [200.0, 0.0]]),
+        ]);
+        let mut geometry = GeometryCache::default();
+        assert_eq!(
+            move_arrow_above_bindable(&mut geometry, &mut file, 1, [210.0, 50.0], &mut FixedEnv),
+            1
+        );
+        assert_eq!(
+            move_arrow_above_bindable(&mut geometry, &mut file, 1, [900.0, 900.0], &mut FixedEnv),
+            1
+        );
+        assert_eq!(ids(&file), ["r", "a"]);
+    }
+
+    #[test]
+    fn the_arrow_goes_above_a_shape_whose_label_sits_higher() {
+        // The label is the first of {shape, label} found in the array here.
+        let mut file = crate::sample::file(vec![
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [200.0, 0.0]]),
+            sample::with(
+                sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "t", "type": "text"}]}),
+            ),
+            sample::text("t", [220.0, 40.0, 40.0, 20.0], "hi", Some("r")),
+        ]);
+        let position = move_arrow_above_bindable(
+            &mut GeometryCache::default(),
+            &mut file,
+            0,
+            [210.0, 50.0],
+            &mut FixedEnv,
+        );
+        assert_eq!(position, 1);
+        assert_eq!(ids(&file), ["r", "a", "t"]);
+    }
 }

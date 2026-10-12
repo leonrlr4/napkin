@@ -258,7 +258,7 @@ fn refresh_fixed_point(
     env: &mut impl Env,
 ) {
     let target = next.elements[target_index].clone();
-    let Some(fixed_point) = fixed_point_for(&next.elements[arrow_index], end, &target) else {
+    let Some(fixed_point) = fixed_point_for(&next.elements[arrow_index], end, &target, None) else {
         return;
     };
     let target_id = target.id().expect("bindable target has an id").to_owned();

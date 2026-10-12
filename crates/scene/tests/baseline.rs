@@ -997,3 +997,369 @@ fn intersect() {
         }
     });
 }
+
+/// One `arrow_binding` gesture replayed through the scene API: the same event sequence the
+/// generator drives through Excalidraw's `handlePointDragging`/`handlePointerMove`/
+/// `actionFinalize`, with `delta = pointer - offset - current point` computed the way
+/// `LinearElementEditor.createPointAt` does for an unrotated arrow.
+struct ArrowGesture {
+    file: scene::SceneFile,
+    geometry: scene::geometry::GeometryCache,
+    env: FixedEnv,
+    state: scene::binding::LinearDragState,
+    enabled: bool,
+    zoom: f64,
+    arrow_id: String,
+    /// The point being dragged.
+    index: usize,
+    suggested: Option<String>,
+}
+
+impl ArrowGesture {
+    fn arrow(&self) -> usize {
+        self.file
+            .elements
+            .iter()
+            .position(|e| e.id() == Some(self.arrow_id.as_str()))
+            .expect("arrow")
+    }
+
+    fn input(&self, pointer: [f64; 2], angle_locked: bool) -> scene::binding::BindingInput {
+        scene::binding::BindingInput {
+            pointer,
+            zoom: self.zoom,
+            angle_locked,
+            enabled: self.enabled,
+        }
+    }
+
+    /// A drag step to `pointer` (`Shift` locks the angle around the neighbouring point).
+    fn drag(&mut self, pointer: [f64; 2], shift: bool) {
+        let arrow = self.arrow();
+        let Element::Arrow(l) = &self.file.elements[arrow] else {
+            panic!("an arrow")
+        };
+        assert_eq!(l.base.angle, 0.0, "the replay assumes an unrotated arrow");
+        let origin = [l.base.x, l.base.y];
+        let current = l.points[self.index];
+        let target = if shift {
+            let pivot = l.points[if self.index == 0 { 1 } else { self.index - 1 }];
+            let locked = scene::edit::lock_linear_angle(
+                [origin[0] + pivot[0], origin[1] + pivot[1]],
+                pointer,
+            );
+            [locked[0] - origin[0], locked[1] - origin[1]]
+        } else {
+            let offset = self.state.pointer_offset;
+            [
+                pointer[0] - offset[0] - origin[0],
+                pointer[1] - offset[1] - origin[1],
+            ]
+        };
+        let delta = [target[0] - current[0], target[1] - current[1]];
+        let input = self.input(pointer, shift);
+        let suggestion = scene::binding::drag_points(
+            &mut self.geometry,
+            &mut self.file,
+            arrow,
+            &[self.index],
+            delta,
+            input,
+            &mut self.state,
+            &mut self.env,
+        );
+        self.suggested = suggestion.map(|s| {
+            self.file.elements[s.target]
+                .id()
+                .expect("target id")
+                .to_owned()
+        });
+    }
+
+    /// `actionFinalize`'s first branch: the pointer-up at `up`.
+    fn finalize(&mut self, up: [f64; 2], shift: bool) {
+        let arrow = self.arrow();
+        let Element::Arrow(l) = &self.file.elements[arrow] else {
+            panic!("an arrow")
+        };
+        let last = l.points.len() - 1;
+        if self.index != 0 && self.index != last {
+            // A dragged middle point leaves `segmentMidPointHoveredCoords` set, which skips the
+            // binding step.
+            return;
+        }
+        let local = if shift {
+            l.points[self.index]
+        } else {
+            let offset = self.state.pointer_offset;
+            [up[0] - offset[0] - l.base.x, up[1] - offset[1] - l.base.y]
+        };
+        let input = self.input(up, shift);
+        scene::binding::finalize_binding(
+            &mut self.geometry,
+            &mut self.file,
+            arrow,
+            &[(self.index, local)],
+            input,
+            &self.state,
+            false,
+            &mut self.env,
+        );
+    }
+
+    /// App.tsx's pointer-down with the arrow tool.
+    fn press_arrow_tool(&mut self, origin: [f64; 2]) {
+        let props = ElementProps {
+            x: origin[0],
+            y: origin[1],
+            roundness: Some(Roundness {
+                kind: 2.0,
+                value: scene::json::Slot::Missing,
+                extra: Default::default(),
+            }),
+            ..ElementProps::default()
+        };
+        let mut arrow = new_arrow_element(
+            props,
+            vec![[0.0, 0.0], [0.0, 0.0]],
+            None,
+            Some("arrow".into()),
+            &mut self.env,
+        );
+        if let Element::Arrow(l) = &mut arrow {
+            l.base.id = self.arrow_id.clone();
+        }
+        let position = scene::edit::append_element(&mut self.file, arrow, &mut self.env);
+        let input = self.input(origin, false);
+        scene::binding::finalize_binding(
+            &mut self.geometry,
+            &mut self.file,
+            position,
+            &[(0, [0.0, 0.0])],
+            input,
+            &scene::binding::LinearDragState::default(),
+            true,
+            &mut self.env,
+        );
+        self.state = scene::binding::LinearDragState {
+            new_arrow: true,
+            origin: Some(origin),
+            ..Default::default()
+        };
+        self.index = 1;
+    }
+
+    /// `mutateElement(arrow, {points})`: size follows the points.
+    fn set_points(&mut self, points: Vec<[f64; 2]>) {
+        let arrow = self.arrow();
+        if let Element::Arrow(l) = &mut self.file.elements[arrow] {
+            let [width, height] = scene::geometry::size_from_points(&points);
+            l.points = points;
+            l.base.width = width;
+            l.base.height = height;
+        }
+        scene::new_element::bump_version(&mut self.file.elements[arrow], &mut self.env);
+    }
+}
+
+fn arrow_binding_point(value: &Value) -> ([f64; 2], bool) {
+    (
+        [num(&value[0]), num(&value[1])],
+        value.get(2).and_then(Value::as_bool).unwrap_or(false),
+    )
+}
+
+fn arrow_binding_output(gesture: &ArrowGesture, suggested: Option<&str>) -> Value {
+    let elements: Vec<Value> = gesture
+        .file
+        .elements
+        .iter()
+        .map(|e| {
+            let p = e.placement().expect("placement");
+            let mut out = json!({
+                "id": e.id(), "x": p.x, "y": p.y, "width": p.width, "height": p.height
+            });
+            if let Element::Line(l) | Element::Arrow(l) = e {
+                out["points"] = json!(l.points);
+            }
+            if e.kind() == "arrow" {
+                for (key, end) in [
+                    ("startBinding", LinearEnd::Start),
+                    ("endBinding", LinearEnd::End),
+                ] {
+                    out[key] = e.binding_value(end).map_or(Value::Null, |binding| {
+                        json!({
+                            "elementId": binding["elementId"],
+                            "mode": binding["mode"],
+                            "fixedPoint": binding["fixedPoint"],
+                        })
+                    });
+                }
+            }
+            out["boundElements"] = json!(
+                e.bound_elements()
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>()
+            );
+            out
+        })
+        .collect();
+    json!({"elements": elements, "suggestedBinding": suggested})
+}
+
+#[test]
+fn arrow_binding() {
+    check_group(&dir(), "arrow_binding", |case| {
+        let mut file = scene::SceneFile::new();
+        file.elements = case.args[0]
+            .as_array()
+            .expect("elements")
+            .iter()
+            .map(element_from)
+            .collect();
+        let spec = &case.args[1];
+        let kind = spec["kind"].as_str().expect("gesture kind");
+        let mut gesture = ArrowGesture {
+            file,
+            geometry: scene::geometry::GeometryCache::default(),
+            env: FixedEnv,
+            state: Default::default(),
+            enabled: !spec["ctrl"].as_bool().unwrap_or(false),
+            zoom: spec["zoom"].as_f64().unwrap_or(1.0),
+            arrow_id: "new".into(),
+            index: 0,
+            suggested: None,
+        };
+        let moves = |key: &str| -> Vec<([f64; 2], bool)> {
+            spec[key]
+                .as_array()
+                .expect("moves")
+                .iter()
+                .map(arrow_binding_point)
+                .collect()
+        };
+
+        match kind {
+            "create" => {
+                let origin = arrow_binding_point(&spec["origin"]).0;
+                gesture.press_arrow_tool(origin);
+                let moves = moves("moves");
+                for &(point, shift) in &moves {
+                    gesture.drag(point, shift);
+                }
+                let up = spec
+                    .get("up")
+                    .map_or_else(|| *moves.last().expect("a move"), arrow_binding_point);
+                gesture.finalize(up.0, up.1);
+            }
+            "dragPoint" => {
+                gesture.arrow_id = spec["id"].as_str().expect("arrow id").to_owned();
+                let index = spec["index"].as_u64().expect("point index") as usize;
+                let arrow = gesture.arrow();
+                let Element::Arrow(l) = &gesture.file.elements[arrow] else {
+                    panic!("an arrow")
+                };
+                let at = [l.base.x + l.points[index][0], l.base.y + l.points[index][1]];
+                let grab = spec.get("grab").map_or(at, |g| arrow_binding_point(g).0);
+                let other = gesture.file.elements[arrow].binding_value(if index == 0 {
+                    LinearEnd::End
+                } else {
+                    LinearEnd::Start
+                });
+                gesture.state = scene::binding::LinearDragState {
+                    new_arrow: false,
+                    origin: Some(grab),
+                    other_end_started_inside: other
+                        .is_some_and(|binding| binding["mode"].as_str() == Some("inside")),
+                    pointer_offset: [grab[0] - at[0], grab[1] - at[1]],
+                    ..Default::default()
+                };
+                gesture.index = index;
+                let moves = moves("moves");
+                for &(point, shift) in &moves {
+                    gesture.drag(point, shift);
+                }
+                let up = spec
+                    .get("up")
+                    .map_or_else(|| *moves.last().expect("a move"), arrow_binding_point);
+                gesture.finalize(up.0, up.1);
+            }
+            "clickCreate" => {
+                let origin = arrow_binding_point(&spec["origin"]).0;
+                gesture.press_arrow_tool(origin);
+                // `lastCommittedPoint` (unset until a click commits the following point) and
+                // whether it is still the arrow's last point object.
+                let mut committed: Option<[f64; 2]> = None;
+                let mut committed_is_last = false;
+                let mut finished = false;
+                for event in spec["events"].as_array().expect("events") {
+                    assert!(!finished, "events after the arrow was finished");
+                    let kind = event[0].as_str().expect("event kind");
+                    let at = [num(&event[1]), num(&event[2])];
+                    let arrow = gesture.arrow();
+                    let Element::Arrow(l) = &gesture.file.elements[arrow] else {
+                        panic!("an arrow")
+                    };
+                    let origin = [l.base.x, l.base.y];
+                    let points = l.points.clone();
+                    let local = [at[0] - origin[0], at[1] - origin[1]];
+                    let distance =
+                        |a: [f64; 2], b: [f64; 2]| rough::js::hypot(a[0] - b[0], a[1] - b[1]);
+                    let last = *points.last().expect("points");
+                    if kind == "move" {
+                        if committed_is_last {
+                            if distance(local, last) >= scene::collision::LINE_CONFIRM_THRESHOLD {
+                                let mut next = points.clone();
+                                next.push(local);
+                                gesture.set_points(next);
+                                committed_is_last = false;
+                            }
+                        } else if points.len() > 2
+                            && committed.is_some_and(|c| {
+                                distance(local, c) < scene::collision::LINE_CONFIRM_THRESHOLD
+                            })
+                        {
+                            let mut next = points.clone();
+                            next.pop();
+                            let new_last = *next.last().expect("points");
+                            gesture.set_points(next);
+                            committed = Some(new_last);
+                            committed_is_last = true;
+                        } else {
+                            gesture.index = points.len() - 1;
+                            gesture.drag(at, false);
+                            committed_is_last = false;
+                        }
+                    } else {
+                        let finishes = scene::binding::multi_point_click_finishes(
+                            &mut gesture.geometry,
+                            &gesture.file.elements,
+                            arrow,
+                            at,
+                            gesture.zoom,
+                            gesture.enabled,
+                            committed,
+                            &gesture.state,
+                        );
+                        if finishes {
+                            gesture.index = points.len() - 1;
+                            gesture.finalize(at, false);
+                            finished = true;
+                        } else {
+                            committed = Some(last);
+                            committed_is_last = true;
+                        }
+                    }
+                }
+                assert!(finished, "the click-create gesture never finished");
+                // `handlePointerMove` can skip its state update, so the generator reports no
+                // suggestion for these gestures.
+                gesture.suggested = None;
+            }
+            other => panic!("unknown gesture {other}"),
+        }
+        let suggested = gesture.suggested.clone();
+        arrow_binding_output(&gesture, suggested.as_deref())
+    });
+}

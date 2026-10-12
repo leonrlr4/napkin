@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::binding::update_bound_elements;
+use crate::binding::{repair_bindings, update_bound_elements};
 use crate::element::{Element, LinearEnd};
 use crate::env::{Env, random_id};
 use crate::file::SceneFile;
@@ -698,9 +698,10 @@ pub fn append_element(file: &mut SceneFile, element: Element, env: &mut impl Env
     position
 }
 
-/// The repairs `restoreElements` always applies, regardless of `repairBindings`: an element
-/// sharing an `id` with one already seen gets a fresh nanoid (the first occurrence keeps its
-/// id), then every element's `index` is fixed up by `syncInvalidIndices`.
+/// The repairs `restoreElements` applies: an element sharing an `id` with one already seen
+/// gets a fresh nanoid (the first occurrence keeps its id), every element's `index` is fixed
+/// up by `syncInvalidIndices`, then every arrow's bindings go through `repairBinding`
+/// ([`repair_bindings`]).
 pub fn repair_on_load(file: &mut SceneFile, env: &mut impl Env) {
     let mut seen: HashSet<String> = HashSet::new();
     for element in &mut file.elements {
@@ -722,6 +723,7 @@ pub fn repair_on_load(file: &mut SceneFile, env: &mut impl Env) {
         }
     }
     fractional_index::sync_invalid_indices(&mut file.elements, env);
+    repair_bindings(&mut GeometryCache::default(), file, env);
 }
 
 #[cfg(test)]
@@ -1135,6 +1137,36 @@ mod tests {
         assert_eq!(ids[2], "y");
         let indices: Vec<&str> = file.elements.iter().map(|e| e.index().unwrap()).collect();
         assert!(indices.windows(2).all(|w| w[0] < w[1]), "{indices:?}");
+    }
+
+    #[test]
+    fn load_converts_legacy_arrow_bindings_so_the_arrow_follows_its_target() {
+        let mut file = sample::file(vec![
+            sample::with(
+                rect("r", [200.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+                json!({"endBinding": {"elementId": "r", "focus": 0, "gap": 6}}),
+            ),
+        ]);
+        repair_on_load(&mut file, &mut TestEnv(0));
+        let binding = file.elements[1]
+            .binding_value(LinearEnd::End)
+            .expect("kept");
+        assert_eq!(binding["mode"], "orbit");
+
+        file.elements[0].set_position(300.0, 0.0);
+        let changed = update_bound_elements(
+            &mut GeometryCache::default(),
+            &mut file,
+            0,
+            &HashSet::new(),
+            &mut CharWidthMeasure,
+            &mut TestEnv(0),
+        );
+        assert!(changed);
     }
 
     #[test]
