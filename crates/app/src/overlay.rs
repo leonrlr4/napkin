@@ -12,6 +12,7 @@ use crate::theme::Theme;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlayColors {
     pub accent: egui::Color32,
+    pub foreground: egui::Color32,
     pub selection: egui::Color32,
     pub handle_fill: egui::Color32,
 }
@@ -20,6 +21,7 @@ impl OverlayColors {
     pub fn from_theme(theme: &Theme) -> OverlayColors {
         OverlayColors {
             accent: theme.accent,
+            foreground: theme.foreground,
             selection: theme.selection,
             handle_fill: theme.background,
         }
@@ -54,6 +56,30 @@ pub fn shapes(
 ) -> Vec<egui::Shape> {
     let mut shapes = Vec::new();
     let stroke = egui::Stroke::new(1.0, colors.accent);
+
+    // Under the selection chrome, as the pinned commit renders the binding hint before the selection.
+    if let Some(hint) = &overlay.binding_highlight {
+        let points = hint
+            .outline
+            .iter()
+            .map(|&p| to_screen(camera, origin, p))
+            .collect();
+        shapes.push(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new((hint.stroke_width * camera.zoom) as f32, colors.accent),
+        ));
+        for &(point, highlighted) in &hint.midpoints {
+            shapes.push(egui::Shape::circle_filled(
+                to_screen(camera, origin, point),
+                (hint.midpoint_radius * camera.zoom) as f32,
+                if highlighted {
+                    colors.accent
+                } else {
+                    with_alpha(colors.foreground, 128)
+                },
+            ));
+        }
+    }
 
     for outline in &overlay.outlines {
         let points = outline
@@ -130,6 +156,7 @@ mod tests {
     fn colors() -> OverlayColors {
         OverlayColors {
             accent: egui::Color32::BLUE,
+            foreground: egui::Color32::GRAY,
             selection: egui::Color32::LIGHT_BLUE,
             handle_fill: egui::Color32::WHITE,
         }
@@ -198,5 +225,45 @@ mod tests {
         assert_eq!(circle.center, egui::pos2(18.0, 28.0));
         assert_eq!(circle.radius, 8.0);
         assert_eq!(circle.stroke, egui::Stroke::new(1.0, colors().accent));
+    }
+
+    #[test]
+    fn the_binding_hint_is_an_accent_outline_with_dots_on_the_side_midpoints() {
+        use scene::editor::BindingHighlight;
+        let overlay = Overlay {
+            binding_highlight: Some(BindingHighlight {
+                outline: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+                stroke_width: 1.5,
+                midpoints: vec![([5.0, 0.0], true), ([10.0, 5.0], false)],
+                midpoint_radius: 2.0,
+            }),
+            ..Overlay::default()
+        };
+        let camera = Camera {
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            zoom: 2.0,
+        };
+        let shapes = shapes(&overlay, &camera, egui::pos2(10.0, 20.0), colors());
+        let [
+            egui::Shape::Path(outline),
+            egui::Shape::Circle(lit),
+            egui::Shape::Circle(dim),
+        ] = shapes.as_slice()
+        else {
+            panic!("{shapes:?}");
+        };
+        assert!(outline.closed);
+        assert_eq!(outline.points.len(), 4);
+        assert_eq!(
+            outline.stroke,
+            egui::epaint::PathStroke::new(3.0, colors().accent)
+        );
+        assert_eq!(lit.center, egui::pos2(20.0, 20.0));
+        assert_eq!(lit.radius, 4.0);
+        assert_eq!(lit.fill, colors().accent);
+        assert_eq!(dim.center, egui::pos2(30.0, 30.0));
+        assert_eq!(dim.radius, 4.0);
+        assert_eq!(dim.fill, with_alpha(egui::Color32::GRAY, 128));
     }
 }

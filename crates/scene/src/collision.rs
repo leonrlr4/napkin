@@ -6,14 +6,16 @@
 //! The outline tests (`distance_to_element`, and `linear_collision_shape` for line/arrow/
 //! freedraw) port the cited functions directly: rectanguloid and diamond corners stay exact
 //! cubic Beziers, and ellipse distance keeps the three-iteration Newton-ish approximation
-//! `ellipseDistanceFromPoint` uses. The "is this point inside the shape" tests
-//! (`is_point_in_element`) do not port `isPointInElement`'s ray-cast-and-count-intersections
-//! approach; instead they use an equivalent analytic containment test in the element's own
-//! unrotated frame (a closed-form inside/outside check for rectanguloid, diamond and
-//! ellipse, and an even-odd ray cast against a 16-segment polyline approximation of the
-//! cubic collision shape for a closed line/freedraw). This avoids porting
-//! `curveIntersectLineSegment`'s Newton solver, which only `isPointInElement` and the
-//! (out of scope for point hit testing) binding code need.
+//! `ellipseDistanceFromPoint` uses. The "is this point inside the shape" test
+//! (`is_point_in_element`) ports `isPointInElement`'s ray-cast-and-count-intersections for
+//! rectangle, text, image, diamond and ellipse, so a point exactly on the outline falls on the
+//! same side as in JS; a closed line/freedraw uses an even-odd ray cast against a 16-segment
+//! polyline approximation of the cubic collision shape.
+//!
+//! Binding uses the intersection side directly: `intersect_element_with_line_segment` ports
+//! `intersectElementWithLineSegment` (including the outline grown by an offset, and
+//! `crate::curve::curve_intersect_line_segment`'s Newton solver for rounded corners and
+//! curves), and `hovered_element_for_binding` ports `getHoveredElementForBinding`.
 
 use std::sync::Arc;
 
@@ -292,9 +294,9 @@ fn rectanguloid_radius(element: &Element, min_dim: f64) -> f64 {
     if r == 0.0 { 0.01 } else { r }
 }
 
-/// `deconstructRectanguloidElement` with `offset` fixed at 0: the only other caller in
-/// Excalidraw is binding, which this task does not port. Returns the 4 straight sides and
-/// the 4 rounded-corner curves, in the element's own unrotated coordinate frame.
+/// `deconstructRectanguloidElement` with `offset` 0 (`offset_outline` grows it). Returns the
+/// 4 straight sides and the 4 rounded-corner curves, in the element's own unrotated
+/// coordinate frame.
 fn deconstruct_rectanguloid(placement: Placement, radius: f64) -> ([LineSeg; 4], [CurveSeg; 4]) {
     let (x, y, w, h) = (placement.x, placement.y, placement.width, placement.height);
     let r = radius;
@@ -413,7 +415,7 @@ fn diamond_radius(dim: f64, roundness: &Slot<Roundness>) -> f64 {
 
 /// `getDiamondBaseCorners` plus `deconstructDiamondElement`'s `offset`-less branch: the 4
 /// sides and 4 corner curves of a diamond, in the element's own unrotated coordinate frame.
-fn deconstruct_diamond(
+pub(crate) fn deconstruct_diamond(
     placement: Placement,
     roundness: &Slot<Roundness>,
 ) -> ([LineSeg; 4], [CurveSeg; 4]) {
@@ -493,50 +495,6 @@ fn distance_to_diamond(geometry: &mut GeometryCache, element: &Element, point: [
     min
 }
 
-/// `isPointInElement`'s equivalent for a diamond: a plain (unrounded) point-in-quadrilateral
-/// test against the 4 diamond vertices, via the sign of the cross product against each edge
-/// (a convex quadrilateral, so a consistent sign on every edge means "inside"). Corner
-/// rounding is not modelled here: it only changes the classification for points within
-/// [`diamond_radius`] of a vertex, an area the outline test (`distance_to_element`, which
-/// does use the exact rounded corners) already covers via `hit_element_itself`'s
-/// `inside || outline`.
-fn is_point_in_diamond(placement: Placement, local: [f64; 2]) -> bool {
-    let [
-        top_x,
-        top_y,
-        right_x,
-        right_y,
-        bottom_x,
-        bottom_y,
-        left_x,
-        left_y,
-    ] = crate::shape::diamond_points(placement.width, placement.height);
-    let lx = local[0] - placement.x;
-    let ly = local[1] - placement.y;
-    let verts = [
-        [top_x, top_y],
-        [right_x, right_y],
-        [bottom_x, bottom_y],
-        [left_x, left_y],
-    ];
-
-    let mut sign = 0.0;
-    for i in 0..4 {
-        let a = verts[i];
-        let b = verts[(i + 1) % 4];
-        let cross = (b[0] - a[0]) * (ly - a[1]) - (b[1] - a[1]) * (lx - a[0]);
-        if cross == 0.0 {
-            continue;
-        }
-        if sign == 0.0 {
-            sign = cross.signum();
-        } else if cross.signum() != sign {
-            return false;
-        }
-    }
-    true
-}
-
 // ---------------------------------------------------------------------------
 // Ellipse
 // ---------------------------------------------------------------------------
@@ -607,20 +565,6 @@ fn distance_to_ellipse(geometry: &mut GeometryCache, element: &Element, point: [
     let local = to_local_frame(point, center, placement);
     let translated = [local[0] - center[0], local[1] - center[1]];
     ellipse_distance_from_point(translated, placement.width / 2.0, placement.height / 2.0)
-}
-
-/// `ellipseIncludesPoint`.
-fn is_point_in_ellipse(placement: Placement, local: [f64; 2]) -> bool {
-    let hw = placement.width / 2.0;
-    let hh = placement.height / 2.0;
-    if hw == 0.0 || hh == 0.0 {
-        return false;
-    }
-    let cx = placement.x + hw;
-    let cy = placement.y + hh;
-    let nx = (local[0] - cx) / hw;
-    let ny = (local[1] - cy) / hh;
-    nx * nx + ny * ny <= 1.0
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +759,11 @@ fn is_point_in_linear(geometry: &mut GeometryCache, element: &Element, point: [f
     point_in_polygon_parity(point, &edges)
 }
 
-/// Whether `point` lies inside the element's closed outline (`isPointInElement`).
+/// Whether `point` lies inside the element's closed outline (`isPointInElement`). A line,
+/// arrow or freedraw is tested analytically; the shapes bindings aim at (rectangle, text,
+/// image, diamond, ellipse) are tested the way JS does, by counting where a ray from `point`
+/// crosses the outline ([`is_point_in_shape_by_ray`]), so a point exactly on the outline can
+/// land on either side, as it does there.
 pub fn is_point_in_element(
     geometry: &mut GeometryCache,
     element: &Element,
@@ -825,28 +773,61 @@ pub fn is_point_in_element(
         Element::Line(_) | Element::Arrow(_) | Element::Freedraw(_) => {
             is_point_in_linear(geometry, element, point)
         }
-        Element::Diamond(_) => {
-            let Some((_, center)) = geometry.absolute_coords(element) else {
-                return false;
-            };
-            let Some(placement) = element.placement() else {
-                return false;
-            };
-            is_point_in_diamond(placement, to_local_frame(point, center, placement))
-        }
-        Element::Ellipse(_) => {
-            let Some((_, center)) = geometry.absolute_coords(element) else {
-                return false;
-            };
-            let Some(placement) = element.placement() else {
-                return false;
-            };
-            is_point_in_ellipse(placement, to_local_frame(point, center, placement))
-        }
-        Element::Rectangle(_) | Element::Text(_) | Element::Image(_) | Element::Raw(_) => {
-            is_point_in_rectanguloid(geometry, element, point)
+        Element::Diamond(_)
+        | Element::Ellipse(_)
+        | Element::Rectangle(_)
+        | Element::Text(_)
+        | Element::Image(_) => is_point_in_shape_by_ray(geometry, element, point),
+        Element::Raw(_) => is_point_in_rectanguloid(geometry, element, point),
+    }
+}
+
+/// `isPointInElement` for a closed shape: within the rotated bounds, and an odd number of
+/// distinct crossings between the outline and the segment from `point` to the point twice the
+/// larger side away from the bounds center, on the far side of `point`.
+fn is_point_in_shape_by_ray(
+    geometry: &mut GeometryCache,
+    element: &Element,
+    point: [f64; 2],
+) -> bool {
+    let (Some([x1, y1, x2, y2]), Some(placement)) = (geometry.bounds(element), element.placement())
+    else {
+        return false;
+    };
+    if !(point[0] <= x1.max(x2)
+        && point[0] >= x1.min(x2)
+        && point[1] <= y1.max(y2)
+        && point[1] >= y1.min(y2))
+    {
+        return false;
+    }
+
+    let center = [(x1 + x2) / 2.0, (y1 + y2) / 2.0];
+    // `vectorFromPoint(point, center, 0.1)`: a point nearer than 0.1 to the center points down.
+    let offset = [point[0] - center[0], point[1] - center[1]];
+    let direction = if offset[0] * offset[0] + offset[1] * offset[1] < 0.1 * 0.1 {
+        [0.0, 1.0]
+    } else {
+        let magnitude = (offset[0] * offset[0] + offset[1] * offset[1]).sqrt();
+        [offset[0] / magnitude, offset[1] / magnitude]
+    };
+    let reach = placement.width.max(placement.height) * 2.0;
+    let far = [
+        center[0] + direction[0] * reach,
+        center[1] + direction[1] * reach,
+    ];
+
+    let mut distinct: Vec<[f64; 2]> = Vec::new();
+    for hit in intersect_element_with_line_segment(geometry, element, [point, far], 0.0) {
+        // `pointsEqual`'s default tolerance, `PRECISION`.
+        if !distinct
+            .iter()
+            .any(|q| (q[0] - hit[0]).abs() < 10e-5 && (q[1] - hit[1]).abs() < 10e-5)
+        {
+            distinct.push(hit);
         }
     }
+    distinct.len() % 2 == 1
 }
 
 /// `distanceToElement`.
@@ -884,6 +865,19 @@ pub fn hit_element_itself(
     point: [f64; 2],
     threshold: f64,
 ) -> bool {
+    hit_element_itself_with(geometry, element, point, threshold, false)
+}
+
+/// [`hit_element_itself`] with `overrideShouldTestInside` exposed: `test_inside` forces the
+/// "inside the shape or on its outline" test even for a shape [`should_test_inside`] would
+/// only test on its outline.
+pub fn hit_element_itself_with(
+    geometry: &mut GeometryCache,
+    element: &Element,
+    point: [f64; 2],
+    threshold: f64,
+    test_inside: bool,
+) -> bool {
     let Some((unrotated, center)) = geometry.absolute_coords(element) else {
         return false;
     };
@@ -905,12 +899,402 @@ pub fn hit_element_itself(
         return false;
     }
 
-    if should_test_inside(element) {
+    if test_inside || should_test_inside(element) {
         is_point_in_element(geometry, element, point)
             || distance_to_element(geometry, element, point) <= threshold
     } else {
         distance_to_element(geometry, element, point) <= threshold
     }
+}
+
+// ---------------------------------------------------------------------------
+// Segment/outline intersection and binding targets
+// ---------------------------------------------------------------------------
+
+/// `pointRotateRads`, including its early return of the same point for a zero angle (which
+/// differs from the rotation formula by rounding in the last bit).
+pub(crate) fn rotate_unless_zero(point: [f64; 2], center: [f64; 2], angle: f64) -> [f64; 2] {
+    if angle == 0.0 {
+        point
+    } else {
+        crate::geometry::rotate_point(point, center, angle)
+    }
+}
+
+/// `doBoundsIntersect`: whether two boxes overlap, edges touching not counting.
+fn do_bounds_intersect(a: [f64; 4], b: [f64; 4]) -> bool {
+    a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
+}
+
+/// `lineSegmentIntersectionPoints`: where the lines through `l` and `s` cross, when that
+/// point lies on both segments (within `PRECISION`, `10e-5`).
+pub(crate) fn line_segment_intersection_points(l: LineSeg, s: LineSeg) -> Option<[f64; 2]> {
+    const PRECISION: f64 = 10e-5;
+    let a1 = l[1][1] - l[0][1];
+    let b1 = l[0][0] - l[1][0];
+    let a2 = s[1][1] - s[0][1];
+    let b2 = s[0][0] - s[1][0];
+    let d = a1 * b2 - a2 * b1;
+    if d == 0.0 {
+        return None;
+    }
+    let c1 = a1 * l[0][0] + b1 * l[0][1];
+    let c2 = a2 * s[0][0] + b2 * s[0][1];
+    let candidate = [(c1 * b2 - c2 * b1) / d, (a1 * c2 - a2 * c1) / d];
+
+    let on = |seg: LineSeg| distance_to_line_segment(candidate, seg) < PRECISION;
+    (on(s) && on(l)).then_some(candidate)
+}
+
+/// `ellipseSegmentInterceptPoints`: the 0, 1 or 2 points where `s` crosses the ellipse with
+/// the given center and half axes, in the order JS lists them.
+fn ellipse_segment_intercept_points(
+    center: [f64; 2],
+    rx: f64,
+    ry: f64,
+    s: LineSeg,
+) -> Vec<[f64; 2]> {
+    let dir = [s[1][0] - s[0][0], s[1][1] - s[0][1]];
+    let diff = [s[0][0] - center[0], s[0][1] - center[1]];
+    let m_dir = [dir[0] / (rx * rx), dir[1] / (ry * ry)];
+    let m_diff = [diff[0] / (rx * rx), diff[1] / (ry * ry)];
+
+    let a = dir[0] * m_dir[0] + dir[1] * m_dir[1];
+    let b = dir[0] * m_diff[0] + dir[1] * m_diff[1];
+    let c = diff[0] * m_diff[0] + diff[1] * m_diff[1] - 1.0;
+    let d = b * b - a * c;
+
+    let at = |t: f64| {
+        [
+            s[0][0] + (s[1][0] - s[0][0]) * t,
+            s[0][1] + (s[1][1] - s[0][1]) * t,
+        ]
+    };
+    let mut hits = Vec::new();
+    if d > 0.0 {
+        let t_a = (-b - d.sqrt()) / a;
+        let t_b = (-b + d.sqrt()) / a;
+        if (0.0..=1.0).contains(&t_a) {
+            hits.push(at(t_a));
+        }
+        if (0.0..=1.0).contains(&t_b) {
+            hits.push(at(t_b));
+        }
+    } else if d == 0.0 {
+        let t = -b / a;
+        if (0.0..=1.0).contains(&t) {
+            hits.push(at(t));
+        }
+    }
+    hits
+}
+
+/// The sides and corner curves of a rectanguloid or diamond whose four rounded corners are
+/// `base_corners`, with the outline grown by `offset` when it is positive: each corner is
+/// replaced by the Catmull-Rom cubics through its curve moved `offset` along the normal, and
+/// the sides join consecutive corners (`deconstructRectanguloidElement` and
+/// `deconstructDiamondElement`).
+fn offset_outline(base_corners: [CurveSeg; 4], offset: f64) -> (Vec<LineSeg>, Vec<CurveSeg>) {
+    let corners: Vec<Vec<CurveSeg>> = base_corners
+        .iter()
+        .map(|&corner| {
+            if offset > 0.0 {
+                crate::curve::curve_catmull_rom_cubic_approx(&crate::curve::curve_offset_points(
+                    corner, offset,
+                ))
+            } else {
+                vec![corner]
+            }
+        })
+        .collect();
+
+    let sides = (0..4)
+        .map(|i| {
+            let from = corners[i].last().expect("a corner has at least one curve")[3];
+            let to = corners[(i + 1) % 4][0][0];
+            [from, to]
+        })
+        .collect();
+    (sides, corners.into_iter().flatten().collect())
+}
+
+/// `lineIntersections` and `curveIntersections`: crossings of `sides` and `corners` (in the
+/// element's unrotated frame) with `segment`, each rotated by `angle` about `center`.
+fn outline_intersections(
+    sides: &[LineSeg],
+    corners: &[CurveSeg],
+    segment: LineSeg,
+    center: [f64; 2],
+    angle: f64,
+) -> Vec<[f64; 2]> {
+    let mut hits = Vec::new();
+    for &side in sides {
+        if let Some(p) = line_segment_intersection_points(side, segment) {
+            hits.push(rotate_unless_zero(p, center, angle));
+        }
+    }
+    let segment_bounds = [
+        segment[0][0].min(segment[1][0]),
+        segment[0][1].min(segment[1][1]),
+        segment[0][0].max(segment[1][0]),
+        segment[0][1].max(segment[1][1]),
+    ];
+    for &corner in corners {
+        let curve_bounds =
+            crate::geometry::cubic_bezier_bounds(corner[0], corner[1], corner[2], corner[3]);
+        if !do_bounds_intersect(curve_bounds, segment_bounds) {
+            continue;
+        }
+        for p in crate::curve::curve_intersect_line_segment(corner, segment, 4) {
+            hits.push(rotate_unless_zero(p, center, angle));
+        }
+    }
+    hits
+}
+
+/// `intersectElementWithLineSegment(element, elementsMap, segment, offset)`: every point
+/// where `segment` crosses `element`'s outline grown by `offset`, in the order JS returns
+/// them (straight sides first, then curves).
+pub fn intersect_element_with_line_segment(
+    geometry: &mut GeometryCache,
+    element: &Element,
+    segment: [[f64; 2]; 2],
+    offset: f64,
+) -> Vec<[f64; 2]> {
+    // Cheap reject against the (rotated) bounds first, as JS does.
+    let intersector_bounds = [
+        (segment[0][0] - offset).min(segment[1][0] - offset),
+        (segment[0][1] - offset).min(segment[1][1] - offset),
+        (segment[0][0] + offset).max(segment[1][0] + offset),
+        (segment[0][1] + offset).max(segment[1][1] + offset),
+    ];
+    let Some(element_bounds) = geometry.bounds(element) else {
+        return Vec::new();
+    };
+    if !do_bounds_intersect(intersector_bounds, element_bounds) {
+        return Vec::new();
+    }
+
+    match element {
+        Element::Line(_) | Element::Arrow(_) | Element::Freedraw(_) => {
+            intersect_linear(geometry, element, segment)
+        }
+        Element::Raw(_) if matches!(element.kind(), "line" | "arrow" | "freedraw") => Vec::new(),
+        _ => {
+            let (Some((_, center)), Some(placement)) =
+                (geometry.absolute_coords(element), element.placement())
+            else {
+                return Vec::new();
+            };
+            let angle = placement.angle;
+            let a = rotate_unless_zero(segment[0], center, -angle);
+            let b = rotate_unless_zero(segment[1], center, -angle);
+
+            match element {
+                Element::Ellipse(_) => ellipse_segment_intercept_points(
+                    center,
+                    placement.width / 2.0 + offset,
+                    placement.height / 2.0 + offset,
+                    [a, b],
+                )
+                .into_iter()
+                .map(|p| rotate_unless_zero(p, center, angle))
+                .collect(),
+                Element::Diamond(g) => {
+                    let (_, corners) = deconstruct_diamond(placement, &g.base.roundness);
+                    let (sides, corners) = offset_outline(corners, offset);
+                    outline_intersections(&sides, &corners, [a, b], center, angle)
+                }
+                _ => {
+                    let radius =
+                        rectanguloid_radius(element, placement.width.min(placement.height));
+                    let (_, corners) = deconstruct_rectanguloid(placement, radius);
+                    let (sides, corners) = offset_outline(corners, offset);
+                    outline_intersections(&sides, &corners, [a, b], center, angle)
+                }
+            }
+        }
+    }
+}
+
+/// `intersectLinearOrFreeDrawWithLineSegment`: the collision shape is already in scene
+/// coordinates, so the segment is used as given.
+fn intersect_linear(
+    geometry: &mut GeometryCache,
+    element: &Element,
+    segment: LineSeg,
+) -> Vec<[f64; 2]> {
+    let shape = geometry.linear_collision_shape(element);
+    let mut hits = Vec::new();
+    for piece in shape.iter() {
+        if let Segment::Line(l) = piece
+            && let Some(p) = line_segment_intersection_points(*l, segment)
+        {
+            hits.push(p);
+        }
+    }
+    let segment_bounds = [
+        segment[0][0].min(segment[1][0]),
+        segment[0][1].min(segment[1][1]),
+        segment[0][0].max(segment[1][0]),
+        segment[0][1].max(segment[1][1]),
+    ];
+    for piece in shape.iter() {
+        let Segment::Cubic(c) = piece else { continue };
+        let curve_bounds = crate::geometry::cubic_bezier_bounds(c[0], c[1], c[2], c[3]);
+        if !do_bounds_intersect(curve_bounds, segment_bounds) {
+            continue;
+        }
+        hits.extend(crate::curve::curve_intersect_line_segment(*c, segment, 10));
+    }
+    hits
+}
+
+/// `isBindableElement(element, false)`: an unlocked rectangle, diamond, ellipse, image, or a
+/// text that is not a container's label. A `Raw` element is never a target.
+pub fn is_bindable(element: &Element) -> bool {
+    !element.is_locked() && is_bindable_including_locked(element)
+}
+
+/// `isBindableElement(element)` (its `includeLocked` default): [`is_bindable`] without the
+/// `locked` check, which is what `updateBoundElements` applies to a changed element.
+pub fn is_bindable_including_locked(element: &Element) -> bool {
+    match element {
+        Element::Rectangle(_) | Element::Diamond(_) | Element::Ellipse(_) | Element::Image(_) => {
+            true
+        }
+        Element::Text(_) => element.container_id().is_none(),
+        _ => false,
+    }
+}
+
+/// The outline of a bindable shape as a closed polyline in scene coordinates, rotated with the
+/// shape: straight sides contribute their ends, rounded corners eight chords each, an ellipse
+/// 64 points. `None` for an element without a placement or that is not a rectangle, diamond,
+/// ellipse, image or text.
+pub fn outline_polyline(geometry: &mut GeometryCache, element: &Element) -> Option<Vec<[f64; 2]>> {
+    const CORNER_CHORDS: usize = 8;
+    const ELLIPSE_POINTS: usize = 64;
+    let placement = element.placement()?;
+    let (_, center) = geometry.absolute_coords(element)?;
+
+    fn push_curve(points: &mut Vec<[f64; 2]>, curve: CurveSeg) {
+        for step in 0..=CORNER_CHORDS {
+            points.push(crate::curve::bezier_equation(
+                curve,
+                step as f64 / CORNER_CHORDS as f64,
+            ));
+        }
+    }
+
+    let mut points: Vec<[f64; 2]> = Vec::new();
+    match element {
+        Element::Ellipse(_) => {
+            let rx = placement.width / 2.0;
+            let ry = placement.height / 2.0;
+            let (cx, cy) = (placement.x + rx, placement.y + ry);
+            for step in 0..ELLIPSE_POINTS {
+                let t = step as f64 / ELLIPSE_POINTS as f64 * std::f64::consts::TAU;
+                points.push([cx + rx * t.cos(), cy + ry * t.sin()]);
+            }
+        }
+        Element::Diamond(diamond) => {
+            let (sides, corners) = deconstruct_diamond(placement, &diamond.base.roundness);
+            // Corners run right, bottom, left, top; side `i` leads from corner `i` to `i + 1`.
+            for i in 0..4 {
+                push_curve(&mut points, corners[i]);
+                points.extend(sides[i]);
+            }
+        }
+        Element::Rectangle(_) | Element::Image(_) | Element::Text(_) => {
+            let radius = rectanguloid_radius(element, placement.width.min(placement.height));
+            let (sides, corners) = deconstruct_rectanguloid(placement, radius);
+            let [top, right, bottom, left] = sides;
+            let [top_left, top_right, bottom_right, bottom_left] = corners;
+            points.extend(top);
+            push_curve(&mut points, top_right);
+            points.extend(right);
+            push_curve(&mut points, bottom_right);
+            points.extend([bottom[1], bottom[0]]);
+            push_curve(&mut points, bottom_left);
+            points.extend(left);
+            push_curve(&mut points, top_left);
+        }
+        _ => return None,
+    }
+    if let Some(&first) = points.first() {
+        points.push(first);
+    }
+    Some(
+        points
+            .into_iter()
+            .map(|p| rotate_unless_zero(p, center, placement.angle))
+            .collect(),
+    )
+}
+
+/// `bindingBorderTest` for a shape (not a frame): whether `point` is inside the shape (no
+/// crossing between the shape's center and the point) or within `tolerance` of its outline.
+fn binding_border_test(
+    geometry: &mut GeometryCache,
+    element: &Element,
+    point: [f64; 2],
+    tolerance: f64,
+) -> bool {
+    // Cheap test first: the shape's rotated bounds against a box around the point.
+    let t = tolerance.max(1.0);
+    let probe = [point[0] - t, point[1] - t, point[0] + t, point[1] + t];
+    let Some(bounds) = geometry.bounds(element) else {
+        return false;
+    };
+    if !do_bounds_intersect(probe, bounds) {
+        return false;
+    }
+    let Some((_, center)) = geometry.absolute_coords(element) else {
+        return false;
+    };
+
+    let intersections =
+        intersect_element_with_line_segment(geometry, element, [center, point], 0.0);
+    let distance = distance_to_element(geometry, element, point);
+    intersections.is_empty() || distance <= tolerance
+}
+
+/// `getHoveredElementForBinding(point, elements, elementsMap, tolerance)`: position of the
+/// bindable element to bind to, front to back, stopping at the first one with a
+/// non-transparent background, then preferring the smallest diagonal (the furthest back
+/// among equals). Deleted elements are skipped.
+pub fn hovered_element_for_binding(
+    geometry: &mut GeometryCache,
+    elements: &[Element],
+    point: [f64; 2],
+    tolerance: f64,
+) -> Option<usize> {
+    let mut candidates: Vec<usize> = Vec::new();
+    for index in (0..elements.len()).rev() {
+        let element = &elements[index];
+        if element.is_deleted()
+            || !is_bindable(element)
+            || !binding_border_test(geometry, element, point, tolerance)
+        {
+            continue;
+        }
+        candidates.push(index);
+        if has_background(element.kind())
+            && !crate::color::is_transparent(background_color(element))
+        {
+            break;
+        }
+    }
+
+    let diagonal_sq = |index: usize| {
+        elements[index]
+            .placement()
+            .map_or(0.0, |p| p.width.powi(2) + p.height.powi(2))
+    };
+    // Largest first (a stable sort, like JS), so `pop` takes the smallest.
+    candidates.sort_by(|&a, &b| diagonal_sq(b).total_cmp(&diagonal_sq(a)));
+    candidates.pop()
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,10 +1449,8 @@ fn segment_distance_to_element(
 /// (`shouldTestInside`; both ends are tested here rather than only `eraserTest`'s single
 /// `lastPoint`, so a segment that starts inside a filled shape and immediately leaves it still
 /// counts), or its outline within `threshold` (`eraserTest`'s `lineSegmentsDistance` calls,
-/// generalized here to every element kind rather than only freedraw/arrow/open-line:
-/// `intersectElementWithLineSegment`, which JS uses for the rest, needs
-/// `curveIntersectLineSegment`'s Newton solver, already out of scope for this module - see its
-/// own doc comment).
+/// generalized here to every element kind rather than only freedraw/arrow/open-line, where JS
+/// uses `intersectElementWithLineSegment` for the rest).
 pub fn segment_hits_element(
     geometry: &mut GeometryCache,
     element: &Element,
@@ -1120,6 +1502,37 @@ mod tests {
 
     use super::*;
     use crate::sample;
+
+    #[test]
+    fn a_point_exactly_on_the_outline_is_not_inside_when_testing_with_no_threshold() {
+        // `isPointInElement` counts ray crossings, and a ray starting on the outline does not
+        // cross it an odd number of times; with threshold 0 the rounding in the distance to
+        // the side leaves it just off the outline too.
+        let element =
+            Element::from_value(sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 100.0]));
+        let mut geometry = GeometryCache::default();
+        assert!(!hit_element_itself_with(
+            &mut geometry,
+            &element,
+            [100.0, 50.01],
+            0.0,
+            true
+        ));
+        assert!(hit_element_itself_with(
+            &mut geometry,
+            &element,
+            [99.99999, 50.01],
+            0.0,
+            true
+        ));
+        assert!(hit_element_itself_with(
+            &mut geometry,
+            &element,
+            [100.0, 50.01],
+            0.001,
+            true
+        ));
+    }
 
     fn hit(element: &Element, point: [f64; 2], zoom: f64) -> bool {
         let mut geometry = GeometryCache::default();
@@ -1242,5 +1655,61 @@ mod tests {
         assert!(!hit(&rotated, [90.0, 10.0], 1.0));
         assert!(is_path_a_loop(&SQUARE, 1.0));
         assert!(!is_path_a_loop(&SQUARE[..3], 1.0));
+    }
+
+    #[test]
+    fn segment_meets_a_rectangle_grown_by_the_offset() {
+        let rect = Element::from_value(sample::generic("rectangle", "r", [0.0, 0.0, 100.0, 50.0]));
+        let hits = intersect_element_with_line_segment(
+            &mut GeometryCache::default(),
+            &rect,
+            [[-20.0, 25.0], [50.0, 25.0]],
+            5.0,
+        );
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            (hits[0][0] + 5.0).abs() < 1e-9 && (hits[0][1] - 25.0).abs() < 1e-9,
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn segment_through_an_ellipse_hits_both_sides() {
+        let ellipse = Element::from_value(sample::generic("ellipse", "e", [0.0, 0.0, 100.0, 50.0]));
+        let mut hits = intersect_element_with_line_segment(
+            &mut GeometryCache::default(),
+            &ellipse,
+            [[-10.0, 25.0], [110.0, 25.0]],
+            0.0,
+        );
+        hits.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        assert!(
+            (hits[0][0]).abs() < 1e-9 && (hits[1][0] - 100.0).abs() < 1e-9,
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn a_filled_shape_stops_the_search_behind_it() {
+        // A big transparent rectangle under a small filled one: the point is inside both, and
+        // the filled one is in front, so it wins without looking further back.
+        let elements = vec![
+            Element::from_value(sample::generic(
+                "rectangle",
+                "big",
+                [0.0, 0.0, 300.0, 300.0],
+            )),
+            Element::from_value(sample::with(
+                sample::generic("rectangle", "small", [100.0, 100.0, 50.0, 50.0]),
+                json!({"backgroundColor": "#ffc9c9"}),
+            )),
+        ];
+        let hit = hovered_element_for_binding(
+            &mut GeometryCache::default(),
+            &elements,
+            [120.0, 120.0],
+            15.0,
+        );
+        assert_eq!(hit, Some(1));
     }
 }

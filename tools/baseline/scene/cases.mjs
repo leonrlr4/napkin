@@ -649,6 +649,56 @@ export const transformCases = [
   ["resizeMultiImage_flipped_e_flipBack", [pic({ scale: [-1, 1] }), element("rectangle", { id: "b", x: 320, y: 100, width: 40, height: 40 })], ["a", "b"], "e", [60, 150], [0, 0], NONE],
 ];
 
+/**
+ * [name, elements] for the arrow_label group. `elements` is arrow `w` (bound text `t`) followed
+ * by its label; each case runs handleBindTextResize on the arrow and then reads
+ * `LinearElementEditor.getBoundTextElementPosition`.
+ * Output: `[{id: "w", height}, {id: "t", text, width, height, x, y}]`.
+ */
+function arrowLabelCase(name, points, arrowOverrides = {}, text = "hello", labelOverrides = {}) {
+  return [
+    name,
+    [
+      linear("arrow", points, {
+        id: "w", x: 50, y: 40, boundElements: [{ id: "t", type: "text" }], ...arrowOverrides,
+      }),
+      label({
+        id: "t", x: 7, y: 9, width: 10, height: 25, text, originalText: text, containerId: "w",
+        labelPosition: null, ...labelOverrides,
+      }),
+    ],
+  ];
+}
+
+const CURVED = { roundness: { type: 2 } };
+const LONG_LABEL = "the quick brown fox jumps over the lazy dog and keeps on running far away";
+
+export const arrowLabelCases = [
+  arrowLabelCase("twoPoints", [[0, 0], [300, 0]]),
+  arrowLabelCase("twoPointsDiagonal", [[0, 0], [300, 120]]),
+  arrowLabelCase("threePoints", [[0, 0], [150, 80], [300, 0]]),
+  arrowLabelCase("fourPoints", [[0, 0], [100, 60], [200, -40], [320, 20]]),
+  arrowLabelCase("twoPointsCurved", [[0, 0], [300, 0]], CURVED),
+  arrowLabelCase("threePointsCurved", [[0, 0], [150, 80], [300, 0]], CURVED),
+  arrowLabelCase("fourPointsCurved", [[0, 0], [100, 60], [200, -40], [320, 20]], CURVED),
+  arrowLabelCase("fivePointsCurved", [[0, 0], [60, 50], [140, -30], [220, 40], [300, 0]], CURVED),
+  arrowLabelCase("labelPositionStraight", [[0, 0], [300, 0]], {}, "hello", { labelPosition: 0.25 }),
+  arrowLabelCase("labelPositionStraightMultiSegment", [[0, 0], [150, 80], [300, 0]], {}, "hello", { labelPosition: 0.7 }),
+  arrowLabelCase("labelPositionCurved", [[0, 0], [150, 80], [300, 0]], CURVED, "hello", { labelPosition: 0.25 }),
+  arrowLabelCase("labelPositionCurvedFourPoints", [[0, 0], [100, 60], [200, -40], [320, 20]], CURVED, "hello", { labelPosition: 0.8 }),
+  arrowLabelCase("labelPositionZero", [[0, 0], [300, 0]], {}, "hello", { labelPosition: 0 }),
+  arrowLabelCase("labelPositionOne", [[0, 0], [150, 80], [300, 0]], CURVED, "hello", { labelPosition: 1 }),
+  arrowLabelCase("labelPositionOutOfRange", [[0, 0], [300, 0]], {}, "hello", { labelPosition: 3 }),
+  arrowLabelCase("longTextWraps", [[0, 0], [600, 0]], {}, LONG_LABEL),
+  arrowLabelCase("longTextOnAShortArrowUsesMinWidth", [[0, 0], [120, 0]], {}, LONG_LABEL),
+  arrowLabelCase("veryShortArrow", [[0, 0], [30, 0]], {}, "hello world"),
+  arrowLabelCase("tallTextGrowsTheArrow", [[0, 0], [300, 100]], {}, "a\nb\nc\nd\ne"),
+  arrowLabelCase("largeFontMinWidth", [[0, 0], [100, 0]], {}, LONG_LABEL, { fontSize: 36 }),
+  arrowLabelCase("rotatedTwoPoints", [[0, 0], [300, 0]], { angle: 0.5 }),
+  arrowLabelCase("rotatedThreePoints", [[0, 0], [150, 80], [300, 0]], { angle: 0.5 }),
+  arrowLabelCase("rotatedCurvedLabelPosition", [[0, 0], [150, 80], [300, 0]], { angle: 0.5, ...CURVED }, "hello", { labelPosition: 0.4 }),
+];
+
 /** Shapes `s` (left) and `u` (right) with arrow `w` bound from `s` to `u`. */
 function boundArrowScene() {
   const binding = (elementId) => ({ elementId, focus: 0, gap: 4 });
@@ -665,3 +715,627 @@ transformCases.push(
   ["rotateBoundArrowAlone", boundArrowScene(), ["w"], "rotation", [130, 90], [132, 20], NONE],
   ["rotateArrowWithItsStartTarget", boundArrowScene(), ["s", "w"], "rotation", [130, 90], [132, 20], NONE],
 );
+
+/**
+ * [name, elements, call, args] for the intersect group. `call` is one of:
+ *  - "intersectElementWithLineSegment": args `[id, [[x1, y1], [x2, y2]], offset]`; output is the
+ *    array of crossing points, in the order JS returns them.
+ *  - "getHoveredElementForBinding": args `[[x, y], tolerance]` over all `elements`; output is the
+ *    id of the element to bind to, or null.
+ *  - "hitElementItself": args `[id, [x, y], threshold, overrideShouldTestInside]`; output is a boolean.
+ */
+const ROUND = { type: 3 };
+const box = (type, overrides = {}) => element(type, { id: "a", x: 100, y: 100, width: 200, height: 100, ...overrides });
+const outlineShapes = [
+  ["rect", box("rectangle")],
+  ["roundRect", box("rectangle", { roundness: ROUND })],
+  ["rotatedRect", box("rectangle", { angle: 0.6 })],
+  ["rotatedRoundRect", box("rectangle", { angle: 0.6, roundness: ROUND })],
+  ["diamond", box("diamond")],
+  ["roundDiamond", box("diamond", { roundness: ROUND })],
+  ["rotatedRoundDiamond", box("diamond", { angle: 0.6, roundness: ROUND })],
+  ["ellipse", box("ellipse")],
+  ["rotatedEllipse", box("ellipse", { angle: 0.6 })],
+  ["text", plainText("a", 100, 100, "hello world", { width: 200, height: 100 })],
+  ["image", pic({ width: 200, height: 100 })],
+];
+const crossings = [
+  ["horizontal", [[40, 130], [360, 130]]],
+  ["diagonal", [[60, 70], [340, 200]]],
+  ["vertical", [[220, 60], [220, 240]]],
+];
+
+export const intersectCases = [];
+for (const [label, shape] of outlineShapes) {
+  for (const offset of [0, 6]) {
+    for (const [direction, segment] of crossings) {
+      intersectCases.push([`${label}/${direction}/offset${offset}`, [shape], "intersectElementWithLineSegment", ["a", segment, offset]]);
+    }
+  }
+  intersectCases.push([`${label}/ends inside`, [shape], "intersectElementWithLineSegment", ["a", [[150, 140], [250, 160]], 0]]);
+  intersectCases.push([`${label}/far away`, [shape], "intersectElementWithLineSegment", ["a", [[0, 0], [50, 40]], 6]]);
+  intersectCases.push([`${label}/beside the outline`, [shape], "intersectElementWithLineSegment", ["a", [[100, 100], [140, 100]], 0]]);
+}
+// A segment that cuts the corner of a rounded shape crosses the curve, not a side.
+for (const offset of [0, 6]) {
+  intersectCases.push([`roundRect/corner/offset${offset}`, [box("rectangle", { roundness: ROUND })], "intersectElementWithLineSegment", ["a", [[70, 70], [130, 130]], offset]]);
+  intersectCases.push([`rotatedRoundRect/corner/offset${offset}`, [box("rectangle", { angle: 0.6, roundness: ROUND })], "intersectElementWithLineSegment", ["a", [[70, 150], [160, 150]], offset]]);
+  intersectCases.push([`roundDiamond/corner/offset${offset}`, [box("diamond", { roundness: ROUND })], "intersectElementWithLineSegment", ["a", [[290, 150], [340, 150]], offset]]);
+}
+// Open and closed lines and freedraw strokes go through the collision shape.
+const wave = linear("line", [[0, 0], [60, 40], [120, 10], [200, 60]], { id: "a", x: 100, y: 100, roundness: ROUND });
+const waveSharp = linear("line", [[0, 0], [60, 40], [120, 10], [200, 60]], { id: "a", x: 100, y: 100 });
+for (const [label, shape] of [["roundLine", wave], ["sharpLine", waveSharp], ["rotatedLine", { ...waveSharp, angle: 0.5 }]]) {
+  intersectCases.push([`${label}/horizontal`, [shape], "intersectElementWithLineSegment", ["a", [[80, 120], [320, 120]], 0]]);
+  intersectCases.push([`${label}/vertical`, [shape], "intersectElementWithLineSegment", ["a", [[150, 60], [150, 220]], 0]]);
+}
+
+const filled = "#ffc9c9";
+const pointInside = [200, 150];
+export const hoverCases = [
+  ["nestedTransparentPicksSmaller", [box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300 }), box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["nestedTransparentSmallerBehind", [box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 }), box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300 })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["filledFrontStopsTheSearch", [box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300 }), box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80, backgroundColor: filled })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["filledBigFrontTransparentSmallBehind", [box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 }), box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300, backgroundColor: filled })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["filledBehindTransparentFront", [box("rectangle", { id: "big", x: 0, y: 0, width: 400, height: 300, backgroundColor: filled }), box("rectangle", { id: "small", x: 100, y: 100, width: 100, height: 80 })], "getHoveredElementForBinding", [[150, 140], 15]],
+  ["equalSizesPickBehind", [box("rectangle", { id: "back" }), box("rectangle", { id: "front" })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["outside10Tolerance15", [box("rectangle")], "getHoveredElementForBinding", [[200, 90], 15]],
+  ["outside10Tolerance5", [box("rectangle")], "getHoveredElementForBinding", [[200, 90], 5]],
+  ["insideTolerance5", [box("rectangle")], "getHoveredElementForBinding", [pointInside, 5]],
+  ["farAway", [box("rectangle")], "getHoveredElementForBinding", [[600, 600], 15]],
+  ["lockedIsSkipped", [box("rectangle", { locked: true })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["lockedFrontFallsThrough", [box("rectangle", { id: "back" }), box("rectangle", { id: "front", locked: true, backgroundColor: filled })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["boundTextIsSkipped", [plainText("t", 100, 100, "hello world", { containerId: "c", width: 200, height: 100 })], "getHoveredElementForBinding", [pointInside, 15]],
+  ["containerWithLabel", labeledAt("rectangle", [100, 100, 200, 100], "hello"), "getHoveredElementForBinding", [pointInside, 15]],
+  ["freeText", [plainText("t", 100, 100, "hello world", { width: 200, height: 100 })], "getHoveredElementForBinding", [[150, 90], 15]],
+  ["lineIsNotATarget", [linear("line", [[0, 0], [200, 0]], { id: "l", x: 100, y: 150 })], "getHoveredElementForBinding", [[200, 150], 15]],
+  ["ellipseInside", [box("ellipse")], "getHoveredElementForBinding", [pointInside, 15]],
+  ["ellipseCornerOfBounds", [box("ellipse")], "getHoveredElementForBinding", [[105, 105], 5]],
+  ["diamondInside", [box("diamond")], "getHoveredElementForBinding", [pointInside, 15]],
+  ["diamondNearEdge", [box("diamond")], "getHoveredElementForBinding", [[160, 112], 15]],
+  ["imageNearEdge", [pic({ width: 200, height: 100 })], "getHoveredElementForBinding", [[310, 150], 15]],
+  ["rotatedRectNearEdge", [box("rectangle", { angle: 0.6 })], "getHoveredElementForBinding", [[200, 90], 15]],
+  ["rotatedRoundRectInside", [box("rectangle", { angle: 0.6, roundness: ROUND })], "getHoveredElementForBinding", [[230, 140], 15]],
+];
+
+const hitShape = (type, overrides = {}) => box(type, overrides);
+export const hitCases = [
+  ["transparentRectInside/override", [hitShape("rectangle")], "hitElementItself", ["a", [200, 150], 8, true]],
+  ["transparentRectInside/plain", [hitShape("rectangle")], "hitElementItself", ["a", [201, 151], 8, false]],
+  ["transparentRectOutline/override", [hitShape("rectangle")], "hitElementItself", ["a", [200, 103], 8, true]],
+  ["transparentRectOutline/plain", [hitShape("rectangle")], "hitElementItself", ["a", [201, 103], 8, false]],
+  ["filledRectInside/plain", [hitShape("rectangle", { backgroundColor: filled })], "hitElementItself", ["a", [202, 151], 8, false]],
+  ["filledRectInside/override", [hitShape("rectangle", { backgroundColor: filled })], "hitElementItself", ["a", [203, 151], 8, true]],
+  ["transparentEllipseInside/override", [hitShape("ellipse")], "hitElementItself", ["a", [204, 150], 8, true]],
+  ["transparentEllipseInside/plain", [hitShape("ellipse")], "hitElementItself", ["a", [205, 150], 8, false]],
+  ["transparentDiamondInside/override", [hitShape("diamond")], "hitElementItself", ["a", [206, 150], 8, true]],
+  ["transparentDiamondInside/plain", [hitShape("diamond")], "hitElementItself", ["a", [207, 150], 8, false]],
+  ["rotatedRectInside/override", [hitShape("rectangle", { angle: 0.6 })], "hitElementItself", ["a", [208, 150], 8, true]],
+  ["rotatedRectInside/plain", [hitShape("rectangle", { angle: 0.6 })], "hitElementItself", ["a", [209, 150], 8, false]],
+  ["outside/override", [hitShape("rectangle")], "hitElementItself", ["a", [200, 60], 8, true]],
+  ["imageInside/plain", [pic({ width: 200, height: 100 })], "hitElementItself", ["a", [210, 150], 8, false]],
+  ["textInside/plain", [plainText("a", 100, 100, "hello world", { width: 200, height: 100 })], "hitElementItself", ["a", [211, 150], 8, false]],
+];
+
+intersectCases.push(...hoverCases, ...hitCases);
+
+/**
+ * [name, elements, ids, op] for the bound_follow group: bound arrows after a gesture on the
+ * selected `ids`. `op` is `{drag: [dx, dy]}` (`dragSelectedElements`) or
+ * `{transform: [handle, pointer, center, flags]}` (`transformElements`). Every binding is in the
+ * current `{elementId, mode, fixedPoint}` format. Arrows default to an arrowhead at the end
+ * only; `heads: "none"` and `heads: "start"` exercise the other `resolvedTarget` branches.
+ * Arrow labels start at their computed position (the generator settles them).
+ */
+const arrowRef = (id) => ({ id, type: "arrow" });
+const shapeAt = (type, id, [x, y, width, height], arrows = [], overrides = {}) =>
+  element(type, {
+    id, x, y, width, height, boundElements: arrows.map(arrowRef), ...overrides,
+  });
+const bindTo = (elementId, fixedPoint, mode = "orbit") => ({ elementId, mode, fixedPoint });
+const HEADS = {
+  end: { startArrowhead: null, endArrowhead: "arrow" },
+  none: { startArrowhead: null, endArrowhead: null },
+  start: { startArrowhead: "arrow", endArrowhead: null },
+  both: { startArrowhead: "arrow", endArrowhead: "arrow" },
+};
+function boundArrow(id, [x, y], points, start, end, { heads = "end", ...overrides } = {}) {
+  return linear("arrow", points, {
+    id, x, y, startBinding: start, endBinding: end, ...HEADS[heads], ...overrides,
+  });
+}
+function arrowLabel(arrowId, text = "hello") {
+  return label({
+    id: `${arrowId}-label`, x: 0, y: 0, width: 10, height: 25, text, originalText: text,
+    containerId: arrowId, labelPosition: null,
+  });
+}
+const withLabel = (arrow) => [
+  { ...arrow, boundElements: [{ id: `${arrow.id}-label`, type: "text" }] },
+  arrowLabel(arrow.id),
+];
+
+// `r1` (0..100) and `r2` (300..400) are 100x100 rectangles with stroke 2, so an arrow end
+// one binding gap (6) outside an edge is at x 106 (r1 right) or 294 (r2 left); the fixed
+// points are those positions as ratios of the shape.
+const R1_RIGHT = [1.06, 0.5001];
+const R2_LEFT = [-0.06, 0.5001];
+const r1At = (arrows, over) => shapeAt("rectangle", "r1", [0, 0, 100, 100], arrows, over);
+const r2At = (arrows, over) => shapeAt("rectangle", "r2", [300, 0, 100, 100], arrows, over);
+const oneEnd = (heads, r1Over) => [
+  r1At(["w"], r1Over),
+  boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), null, { heads }),
+];
+const twoEnds = (heads, over = {}) => [
+  r1At(["w"]),
+  r2At(["w"]),
+  boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT), { heads, ...over }),
+];
+const drag = (dx, dy) => ({ drag: [dx, dy] });
+const transform = (handle, pointer, center = [0, 0], flags = NONE) => ({ transform: [handle, pointer, center, flags] });
+
+export const boundFollowCases = [
+  ["dragStartTarget", oneEnd("end"), ["r1"], drag(40, 60)],
+  ["dragStartTargetFar", oneEnd("end"), ["r1"], drag(-200, 150)],
+  ["dragStartTargetNoArrowheads", oneEnd("none"), ["r1"], drag(40, 60)],
+  ["dragStartTargetStartArrowhead", oneEnd("start"), ["r1"], drag(40, 60)],
+  ["dragStartTargetBothArrowheads", oneEnd("both"), ["r1"], drag(40, 60)],
+  ["dragTargetWithBothEndsBound_first", twoEnds("end"), ["r1"], drag(40, 60)],
+  ["dragTargetWithBothEndsBound_second", twoEnds("end"), ["r2"], drag(0, 80)],
+  ["dragTargetWithBothEndsBound_noArrowheads", twoEnds("none"), ["r2"], drag(-30, 80)],
+  ["dragBothTargets", twoEnds("end"), ["r1", "r2"], drag(25, 70)],
+  ["dragTargetAndArrow", oneEnd("end"), ["r1", "w"], drag(40, 60)],
+  ["dragTargetAndArrowOtherEndStays", twoEnds("end"), ["r1", "w"], drag(40, 60)],
+  [
+    "dragSameTargetBothEnds_twoPoints",
+    [
+      r1At(["w"]),
+      boundArrow("w", [50, 50], [[0, 0], [0, -56]], bindTo("r1", [0.5001, 0.5001]), bindTo("r1", [0.5001, 0.0])),
+    ],
+    ["r1"], drag(200, 30),
+  ],
+  [
+    "dragSameTargetBothEnds_fourPoints",
+    [
+      r1At(["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [40, 0], [40, -90], [-56, -56]], bindTo("r1", R1_RIGHT), bindTo("r1", [0.5001, -0.06])),
+    ],
+    ["r1"], drag(200, 30),
+  ],
+  [
+    "dragThreePointStart",
+    [
+      r1At(["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [100, 60], [188, 0]], bindTo("r1", R1_RIGHT), null),
+    ],
+    ["r1"], drag(0, -40),
+  ],
+  [
+    "dragThreePointEnd",
+    [
+      r2At(["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [100, 60], [188, 0]], null, bindTo("r2", R2_LEFT)),
+    ],
+    ["r2"], drag(30, 50),
+  ],
+  [
+    "dragThreePointBothEnds",
+    [
+      r1At(["w"]),
+      r2At(["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [100, 60], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT)),
+    ],
+    ["r2"], drag(30, 50),
+  ],
+  [
+    "dragInsideStart",
+    [
+      r1At(["w"]),
+      boundArrow("w", [30, 40], [[0, 0], [264, 10]], bindTo("r1", [0.3, 0.4], "inside"), null),
+    ],
+    ["r1"], drag(50, 50),
+  ],
+  [
+    "dragInsideEnd",
+    [
+      r2At(["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [224, 40]], null, bindTo("r2", [0.2, 0.9], "inside")),
+    ],
+    ["r2"], drag(-60, 20),
+  ],
+  [
+    "dragInsideOneEndOrbitOther",
+    [
+      r1At(["w"]),
+      r2At(["w"]),
+      boundArrow("w", [50, 50], [[0, 0], [244, 0]], bindTo("r1", [0.5001, 0.5001], "inside"), bindTo("r2", R2_LEFT)),
+    ],
+    ["r1"], drag(20, 90),
+  ],
+  ["dragLabeledArrowTarget", [...twoEnds("end").slice(0, 2), ...withLabel(twoEnds("end")[2])], ["r2"], drag(0, 80)],
+  ["dragLabeledArrowTargetFar", [...twoEnds("end").slice(0, 2), ...withLabel(twoEnds("end")[2])], ["r1"], drag(-150, 200)],
+  [
+    "dragLabeledOneEnd",
+    (() => {
+      const [r1, w] = oneEnd("end");
+      return [r1, ...withLabel(w)];
+    })(),
+    ["r1"], drag(60, -30),
+  ],
+  [
+    "dragDiamondTarget",
+    [
+      shapeAt("diamond", "r1", [0, 0, 100, 100], ["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], drag(40, 60),
+  ],
+  [
+    "dragEllipseTarget",
+    [
+      shapeAt("ellipse", "r1", [0, 0, 100, 100], ["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], drag(40, 60),
+  ],
+  [
+    "dragRotatedRectangleTarget",
+    [
+      shapeAt("rectangle", "r1", [0, 0, 100, 100], ["w"], { angle: 0.6 }),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], drag(40, 60),
+  ],
+  [
+    "dragRotatedWideRectangleBothEnds",
+    [
+      shapeAt("rectangle", "r1", [0, 0, 160, 60], ["w"], { angle: 0.6 }),
+      r2At(["w"]),
+      boundArrow("w", [166, 30], [[0, 0], [128, 20]], bindTo("r1", [1.04, 0.5001]), bindTo("r2", R2_LEFT)),
+    ],
+    ["r1"], drag(30, 90),
+  ],
+  [
+    "dragTextTarget",
+    [
+      plainText("r1", 0, 0, "hello", { width: 100, height: 25, boundElements: [arrowRef("w")] }),
+      boundArrow("w", [106, 12.5], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], drag(40, 60),
+  ],
+  [
+    "dragLockedTarget",
+    oneEnd("end", { locked: true }),
+    ["r1"], drag(40, 60),
+  ],
+  [
+    "dragStaleBoundElementsEntry",
+    [
+      r1At(["w", "gone"]),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), null),
+    ],
+    ["r1"], drag(40, 60),
+  ],
+  [
+    "dragZeroSizeTarget",
+    [
+      shapeAt("rectangle", "r1", [50, 50, 0, 0], ["w"]),
+      boundArrow("w", [56, 50], [[0, 0], [238, 0]], bindTo("r1", [0.5001, 0.5001]), null),
+    ],
+    ["r1"], drag(40, 60),
+  ],
+  [
+    "dragOverlappingTargets_similar",
+    [
+      shapeAt("rectangle", "r1", [0, 0, 100, 100], ["w"]),
+      shapeAt("rectangle", "r2", [60, 20, 100, 100], ["w"]),
+      boundArrow("w", [50, 50], [[0, 0], [60, 20]], bindTo("r1", [0.5001, 0.5001]), bindTo("r2", [0.5001, 0.5001])),
+    ],
+    ["r2"], drag(10, 0),
+  ],
+  [
+    "dragOverlappingTargets_inner",
+    [
+      shapeAt("rectangle", "r1", [0, 0, 400, 400], ["w"]),
+      shapeAt("rectangle", "r2", [150, 150, 100, 100], ["w"]),
+      boundArrow("w", [200, 200], [[0, 0], [206, 0]], bindTo("r2", [0.5001, 0.5001]), bindTo("r1", [1.015, 0.5001])),
+    ],
+    ["r1"], drag(30, 20),
+  ],
+  [
+    "dragOverlappingTargets_innerMoved",
+    [
+      shapeAt("rectangle", "r1", [0, 0, 400, 400], ["w"]),
+      shapeAt("rectangle", "r2", [150, 150, 100, 100], ["w"]),
+      boundArrow("w", [200, 200], [[0, 0], [206, 0]], bindTo("r2", [0.5001, 0.5001]), bindTo("r1", [1.015, 0.5001])),
+    ],
+    ["r2"], drag(60, -40),
+  ],
+  [
+    "dragTargetsOverlapAfterMove",
+    twoEnds("end"),
+    ["r2"], drag(-250, 20),
+  ],
+  [
+    "dragMakesArrowTooShort",
+    [
+      r1At(["w"]),
+      shapeAt("rectangle", "r2", [130, 0, 100, 100], ["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [18, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT)),
+    ],
+    ["r2"], drag(-20, 0),
+  ],
+  [
+    "dragMakesArrowTooShort_noArrowheads",
+    [
+      r1At(["w"]),
+      shapeAt("rectangle", "r2", [130, 0, 100, 100], ["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [18, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT), { heads: "none" }),
+    ],
+    ["r2"], drag(-20, 0),
+  ],
+  [
+    "dragMakesFreeEndArrowTooShort",
+    oneEnd("end"),
+    ["r1"], drag(170, 0),
+  ],
+  [
+    "resizeBoundRectangle_se",
+    oneEnd("end"),
+    ["r1"], transform("se", [160, 140]),
+  ],
+  [
+    "resizeBoundRectangle_nw",
+    oneEnd("end"),
+    ["r1"], transform("nw", [-30, -20]),
+  ],
+  [
+    "resizeBoundRectangle_e_keepAspect",
+    twoEnds("end"),
+    ["r1"], transform("e", [150, 50], [0, 0], { ...NONE, keepAspect: true }),
+  ],
+  [
+    "resizeBoundRectangle_se_fromCenter",
+    twoEnds("end"),
+    ["r2"], transform("se", [430, 120], [0, 0], { ...NONE, fromCenter: true }),
+  ],
+  [
+    "resizeBoundRectangle_flip",
+    oneEnd("end"),
+    ["r1"], transform("se", [-40, -30]),
+  ],
+  [
+    "resizeBoundRotatedRectangle_se",
+    [
+      shapeAt("rectangle", "r1", [0, 0, 100, 100], ["w"], { angle: 0.6 }),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], transform("se", aroundCenter(element("rectangle", { x: 0, y: 0, width: 100, height: 100, angle: 0.6 }), [130, 125], 0.6)),
+  ],
+  [
+    "resizeBoundEllipse_e",
+    [
+      shapeAt("ellipse", "r1", [0, 0, 100, 100], ["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], transform("e", [160, 50]),
+  ],
+  [
+    "resizeBoundLabeledArrowTarget",
+    [...twoEnds("end").slice(0, 2), ...withLabel(twoEnds("end")[2])],
+    ["r1"], transform("se", [160, 140]),
+  ],
+  [
+    "resizeBoundText_se",
+    [
+      plainText("r1", 0, 0, "hello", { width: 100, height: 25, boundElements: [arrowRef("w")] }),
+      boundArrow("w", [106, 12.5], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], transform("se", [140, 40]),
+  ],
+  [
+    "resizeBoundText_e",
+    [
+      plainText("r1", 0, 0, "hello", { width: 100, height: 25, boundElements: [arrowRef("w")] }),
+      boundArrow("w", [106, 12.5], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], transform("e", [150, 12]),
+  ],
+  [
+    "resizeTwoShapes_e",
+    [
+      r1At(["w"]),
+      r2At([]),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), null),
+    ],
+    ["r1", "r2"], transform("e", [600, 50]),
+  ],
+  [
+    "resizeTwoBoundShapes_se",
+    twoEnds("end"),
+    ["r1", "r2"], transform("se", [500, 150]),
+  ],
+  [
+    "resizeShapesAndArrow_e",
+    twoEnds("end"),
+    ["r1", "r2", "w"], transform("e", [500, 50]),
+  ],
+  [
+    "rotateBoundRectangle",
+    oneEnd("end"),
+    ["r1"], transform("rotation", [150, 20], [50, 50]),
+  ],
+  [
+    "rotateBoundRectangleBothEnds",
+    twoEnds("end"),
+    ["r2"], transform("rotation", [450, 20], [350, 50]),
+  ],
+  [
+    "rotateBoundDiamond",
+    [
+      shapeAt("diamond", "r1", [0, 0, 100, 100], ["w"]),
+      boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", [1.06, 0.5001]), null),
+    ],
+    ["r1"], transform("rotation", [150, 20], [50, 50]),
+  ],
+  [
+    "rotateBoundInside",
+    [
+      r1At(["w"]),
+      boundArrow("w", [30, 40], [[0, 0], [264, 10]], bindTo("r1", [0.3, 0.4], "inside"), null),
+    ],
+    ["r1"], transform("rotation", [150, 20], [50, 50]),
+  ],
+  [
+    "rotateBoundLabeledArrowTarget",
+    [...twoEnds("end").slice(0, 2), ...withLabel(twoEnds("end")[2])],
+    ["r1"], transform("rotation", [150, 20], [50, 50]),
+  ],
+  [
+    "rotateTwoBoundShapes",
+    twoEnds("end"),
+    ["r1", "r2"], transform("rotation", [200, 160], [200, 50]),
+  ],
+  [
+    "rotateShapeAndArrow",
+    twoEnds("end"),
+    ["r1", "w"], transform("rotation", [200, 160], [200, 50]),
+  ],
+];
+
+/**
+ * [name, elements, gesture] for the arrow_binding group: one pointer gesture on an arrow, driven
+ * through `LinearElementEditor.handlePointDragging`/`handlePointerMove` and
+ * `bindOrUnbindBindingElement` the way App.tsx and actionFinalize do. Points are `[x, y]` scene
+ * positions, or `[x, y, true]` with Shift held. A gesture is one of
+ *   {kind: "create", origin, moves, up?}: the arrow tool pressed at `origin`, dragged through
+ *     `moves` and released at `up` (default: the last move);
+ *   {kind: "dragPoint", id, index, grab?, moves, up?}: point `index` of the arrow `id` pressed
+ *     at `grab` (default: the point itself) and dragged;
+ *   {kind: "clickCreate", origin, events}: click-to-add-point creation, `events` being
+ *     ["move", x, y] and ["click", x, y];
+ * each with optional `ctrl` (binding disabled) and `zoom`. Output: every element in scene
+ * order (`id`, `x`, `y`, `width`, `height`, `points`, whole `startBinding`/`endBinding`,
+ * `boundElements` ids) and the last `suggestedBinding` target id.
+ */
+const create = (origin, moves, extra = {}) => ({ kind: "create", origin, moves, ...extra });
+const dragPoint = (id, index, moves, extra = {}) => ({ kind: "dragPoint", id, index, moves, ...extra });
+const clickCreate = (origin, events, extra = {}) => ({ kind: "clickCreate", origin, events, ...extra });
+const r3At = (arrows, over) => shapeAt("rectangle", "r3", [300, 200, 100, 100], arrows, over);
+const s1 = () => [r1At([]), r2At([])];
+// `w` bound to r1's right edge and r2's left edge (the same fixed points `twoEnds` uses).
+const bothBound = (extra = [], heads = "end") => [
+  r1At(["w"]),
+  r2At(["w"]),
+  ...extra,
+  boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT), { heads }),
+];
+const startBound = (extra = []) => [
+  r1At(["w"]),
+  r2At([]),
+  ...extra,
+  boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), null),
+];
+
+export const arrowBindingCases = [
+  // --- creating an arrow by dragging -------------------------------------------------------
+  ["createFromEmptyToNothing", s1(), create([-200, 50], [[-150, 80], [-100, 120]])],
+  ["createOrbitLeftEdge", s1(), create([200, 50], [[250, 50], [292, 50]])],
+  ["createOrbitTopEdge", s1(), create([350, -100], [[350, -50], [350, -6]])],
+  ["createOrbitNearCorner", s1(), create([200, -100], [[250, -50], [296, -5]])],
+  ["createInsideTarget", s1(), create([200, 50], [[300, 50], [350, 50]])],
+  ["createInsideThenLeave", s1(), create([200, 50], [[350, 50], [250, 50], [150, 50]])],
+  ["createStartOrbitOnShape", s1(), create([106, 50], [[200, 50], [260, 120]])],
+  ["createStartInsideShape", s1(), create([50, 50], [[200, 50], [260, 120]])],
+  ["createShapeToShapeOrbit", s1(), create([106, 50], [[200, 50], [294, 50]])],
+  ["createShapeToShapeInside", s1(), create([50, 50], [[200, 50], [350, 50]])],
+  ["createBackToStartOrbit", s1(), create([106, 50], [[200, 50], [150, -50], [50, -8]])],
+  ["createBackToStartInside", s1(), create([106, 50], [[200, 50], [60, 60]])],
+  ["createStartInsideBackInside", s1(), create([30, 30], [[200, 50], [70, 70]])],
+  ["createAcrossTwoShapes", s1(), create([-60, 50], [[50, 50], [200, 50], [350, 50]])],
+  ["createShiftLockNearShape", s1(), create([200, 50], [[250, 60, true], [292, 70, true]])],
+  ["createShiftLockFromShape", s1(), create([106, 50], [[200, 60, true], [290, 120, true]])],
+  ["createShiftLockInsideTarget", s1(), create([200, 50], [[330, 75, true], [350, 60, true]])],
+  ["createZoomHalfFarEdge", s1(), create([200, 50], [[250, 50], [283, 50]], { zoom: 0.5 })],
+  ["createZoomOneTooFar", s1(), create([200, 50], [[250, 50], [283, 50]])],
+  ["createZoomTwo", s1(), create([200, 50], [[250, 50], [290, 50]], { zoom: 2 })],
+  ["createZoomHalfStartOnShape", s1(), create([114, 50], [[200, 50], [260, 120]], { zoom: 0.5 })],
+  ["createDiamondLeftVertex", [shapeAt("diamond", "d", [300, 0, 100, 100])], create([200, 50], [[250, 50], [292, 50]])],
+  ["createDiamondSide", [shapeAt("diamond", "d", [300, 0, 100, 100])], create([200, 0], [[250, 10], [320, 22]])],
+  ["createDiamondInside", [shapeAt("diamond", "d", [300, 0, 100, 100])], create([200, 50], [[300, 50], [340, 50]])],
+  ["createEllipseLeft", [shapeAt("ellipse", "e", [300, 0, 100, 100])], create([200, 50], [[250, 50], [293, 50]])],
+  ["createEllipseDiagonal", [shapeAt("ellipse", "e", [300, 0, 100, 100])], create([200, -100], [[250, -50], [312, 8]])],
+  ["createTextTarget", [plainText("t", 300, 0, "hello", { width: 100, height: 25 })], create([200, 12], [[250, 12], [292, 12]])],
+  ["createRotatedRect", [shapeAt("rectangle", "r", [300, 0, 100, 100], [], { angle: 0.5 })], create([200, 50], [[250, 40], [299, 22]])],
+  ["createRotatedRectInside", [shapeAt("rectangle", "r", [300, 0, 100, 100], [], { angle: 0.5 })], create([200, 50], [[320, 50], [350, 50]])],
+  ["createRotatedDiamond", [shapeAt("diamond", "d", [300, 0, 100, 100], [], { angle: 0.4 })], create([200, 50], [[250, 50], [300, 60]])],
+  ["createRoundedRect", [shapeAt("rectangle", "r", [300, 0, 100, 100], [], { roundness: { type: 3 } })], create([200, 0], [[250, -10], [298, -4]])],
+  ["createZeroSizeTarget", [shapeAt("rectangle", "z", [300, 50, 0, 0])], create([200, 50], [[250, 50], [296, 50]])],
+  ["createThinTarget", [shapeAt("rectangle", "z", [300, 0, 0.5, 100])], create([200, 50], [[250, 50], [294, 50]])],
+  ["createNestedPrefersSmaller", [shapeAt("rectangle", "big", [0, 0, 400, 300]), shapeAt("rectangle", "small", [100, 100, 100, 100])], create([-100, 150], [[0, 150], [150, 150]])],
+  ["createCtrlNearShape", s1(), create([200, 50], [[250, 50], [292, 50]], { ctrl: true })],
+  ["createCtrlStartOnShape", s1(), create([106, 50], [[200, 50], [260, 120]], { ctrl: true })],
+  ["createReleaseElsewhere", s1(), create([200, 50], [[250, 50], [292, 50]], { up: [250, -100] })],
+
+  // --- dragging an endpoint of an existing arrow --------------------------------------------
+  ["dragEndAway", bothBound(), dragPoint("w", 1, [[320, 150], [320, 200]])],
+  ["dragEndAwayFarthest", bothBound(), dragPoint("w", 1, [[320, 150], [350, 300], [450, 400]])],
+  ["dragEndToOtherShape", [...bothBound(), r3At([])], dragPoint("w", 1, [[320, 150], [330, 194]])],
+  ["dragEndGrabOffset", bothBound(), dragPoint("w", 1, [[310, 90], [320, 200]], { grab: [296, 52] })],
+  ["dragEndWithinOrbit", bothBound(), dragPoint("w", 1, [[296, 30], [293, 20]])],
+  ["dragEndIntoInside", bothBound(), dragPoint("w", 1, [[320, 50], [350, 50]])],
+  ["dragStartAway", bothBound(), dragPoint("w", 0, [[50, 120], [-100, 150]])],
+  ["dragStartToOtherShape", [...bothBound(), r3At([])], dragPoint("w", 0, [[200, 150], [294, 196]])],
+  ["dragEndOntoStartShapeOrbit", bothBound(), dragPoint("w", 1, [[200, -20], [50, -8]])],
+  ["dragEndOntoStartShapeInside", bothBound(), dragPoint("w", 1, [[200, -20], [50, 40]])],
+  ["dragStartOntoEndShape", bothBound(), dragPoint("w", 0, [[200, -20], [350, 50]])],
+  ["dragEndOneEndBound", startBound(), dragPoint("w", 1, [[280, 60], [294, 50]])],
+  ["dragEndOneEndBoundAway", startBound(), dragPoint("w", 1, [[250, 140], [200, 250]])],
+  ["dragFreeEndAltFocus", startBound(), dragPoint("w", 1, [[250, 140], [330, 250], [350, 50]])],
+  ["dragEndKeepsInsideStart", [r1At(["w"]), r2At([]), boundArrow("w", [30, 40], [[0, 0], [264, 10]], bindTo("r1", [0.3, 0.4], "inside"), null)], dragPoint("w", 1, [[300, 100], [250, 300]])],
+  ["dragEndBindsInsideKeepsStartOrbit", startBound(), dragPoint("w", 1, [[330, 60], [350, 50]])],
+  ["dragStartBoundInsideToEmpty", [r1At(["w"]), r2At(["w"]), boundArrow("w", [30, 40], [[0, 0], [264, 10]], bindTo("r1", [0.3, 0.4], "inside"), bindTo("r2", R2_LEFT))], dragPoint("w", 0, [[10, 150], [-100, 200]])],
+  ["dragOtherEndInsideBoundDragsEnd", [r1At(["w"]), r2At(["w"]), boundArrow("w", [30, 40], [[0, 0], [264, 10]], bindTo("r1", [0.3, 0.4], "inside"), bindTo("r2", R2_LEFT))], dragPoint("w", 1, [[310, 150], [330, 250]])],
+  ["dragShiftLockedBound", bothBound(), dragPoint("w", 1, [[310, 120, true], [330, 160, true]])],
+  ["dragNoArrowheads", bothBound([], "none"), dragPoint("w", 1, [[320, 150], [320, 200]])],
+  ["dragWithBothArrowheads", bothBound([], "both"), dragPoint("w", 0, [[50, 120], [-100, 150]])],
+  ["dragMiddlePointBothBound", [r1At(["w"]), r2At(["w"]), boundArrow("w", [106, 50], [[0, 0], [100, 60], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT))], dragPoint("w", 1, [[150, 100], [150, 140]])],
+  ["dragMiddlePointStartBound", [r1At(["w"]), r2At([]), boundArrow("w", [106, 50], [[0, 0], [100, 60], [188, 0]], bindTo("r1", R1_RIGHT), null)], dragPoint("w", 1, [[150, 100], [180, 180]])],
+  ["dragMiddlePointUnbound", [boundArrow("w", [0, 0], [[0, 0], [100, 60], [188, 0]], null, null)], dragPoint("w", 1, [[150, 100], [180, 180]])],
+  ["dragThreePointEndAway", [r1At(["w"]), r2At(["w"]), boundArrow("w", [106, 50], [[0, 0], [100, 60], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT))], dragPoint("w", 2, [[330, 200], [330, 250]])],
+  ["dragThreePointStartToOther", [r1At(["w"]), r2At(["w"]), r3At([]), boundArrow("w", [106, 50], [[0, 0], [100, 60], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", R2_LEFT))], dragPoint("w", 0, [[200, 200], [294, 196]])],
+  ["dragEndOfUnboundArrowToShape", [...s1(), boundArrow("w", [0, 0], [[0, 0], [100, 150]], null, null)], dragPoint("w", 1, [[200, 100], [292, 50]])],
+  ["dragStartOfUnboundArrowToShape", [...s1(), boundArrow("w", [0, 0], [[0, 0], [100, 150]], null, null)], dragPoint("w", 0, [[50, 50], [-20, 50]])],
+  ["dragCtrlEndAway", bothBound(), dragPoint("w", 1, [[320, 150], [320, 200]], { ctrl: true })],
+  ["dragCtrlEndOntoOtherShape", [...bothBound(), r3At([])], dragPoint("w", 1, [[320, 150], [330, 194]], { ctrl: true })],
+  ["dragZoomHalf", bothBound(), dragPoint("w", 1, [[320, 150], [320, 116]], { zoom: 0.5 })],
+  ["dragEndGrabOffsetToShape", [...bothBound(), r3At([])], dragPoint("w", 1, [[320, 150], [330, 196]], { grab: [296, 52] })],
+  ["dragRotatedTargetEnd", [r1At(["w"]), shapeAt("rectangle", "r2", [300, 0, 100, 100], ["w"], { angle: 0.5 }), boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", [-0.06, 0.5001]))], dragPoint("w", 1, [[320, 100], [299, 22]])],
+  ["dragDiamondTargetEnd", [r1At(["w"]), shapeAt("diamond", "r2", [300, 0, 100, 100], ["w"]), boundArrow("w", [106, 50], [[0, 0], [188, 0]], bindTo("r1", R1_RIGHT), bindTo("r2", [-0.06, 0.5001]))], dragPoint("w", 1, [[320, 100], [292, 45]])],
+
+  // --- z-order: the arrow rises above the shape under the dragged end ---------------------
+  ["zArrowBelowShapeDragEnd", [boundArrow("w", [0, 50], [[0, 0], [100, 0]], null, null), r1At([]), r2At([])], dragPoint("w", 1, [[200, 50], [350, 50]])],
+  ["zArrowBelowShapeDragStart", [boundArrow("w", [150, 50], [[0, 0], [100, 0]], null, null), r1At([]), r2At([])], dragPoint("w", 0, [[100, 50], [50, 50]])],
+  ["zArrowBelowTwoShapesOrbit", [boundArrow("w", [0, 50], [[0, 0], [100, 0]], null, null), r1At([]), r2At([]), r3At([])], dragPoint("w", 1, [[200, 50], [330, 194]])],
+  ["zArrowAboveAlreadyStays", [r1At([]), r2At([]), boundArrow("w", [0, 50], [[0, 0], [100, 0]], null, null)], dragPoint("w", 1, [[200, 50], [350, 50]])],
+  ["zArrowBelowLabeledShape", [boundArrow("w", [0, 50], [[0, 0], [100, 0]], null, null), ...labeledShape()], dragPoint("w", 1, [[150, 50], [250, 50]])],
+
+  // --- creating an arrow by clicking points --------------------------------------------------
+  ["clickLastClickOnShape", s1(), clickCreate([-100, 50], [["move", -50, 60], ["move", 20, 80], ["click", 20, 80], ["move", 100, 90], ["move", 200, 95], ["move", 292, 60], ["click", 292, 60]])],
+  ["clickStartOnShapeEndOnShape", s1(), clickCreate([106, 50], [["move", 150, 100], ["click", 150, 100], ["move", 230, 140], ["move", 292, 60], ["click", 292, 60]])],
+  ["clickInsideShapeKeepsGoing", s1(), clickCreate([-100, 50], [["move", -20, 100], ["click", -20, 100], ["move", 200, 150], ["move", 350, 50], ["click", 350, 50], ["move", 380, 130], ["click", 380, 130], ["click", 381, 131]])],
+  ["clickInsideThenCommitZone", s1(), clickCreate([-100, 50], [["move", -20, 100], ["click", -20, 100], ["move", 200, 150], ["move", 350, 50], ["click", 350, 50], ["move", 352, 52], ["click", 352, 52]])],
+  ["clickInPlaceFinishes", s1(), clickCreate([-100, 50], [["move", -20, 100], ["click", -20, 100], ["move", 100, 150], ["click", 100, 150], ["click", 101, 151]])],
+  ["clickRemovesPointNearCommitted", s1(), clickCreate([-100, 50], [["move", -20, 100], ["click", -20, 100], ["move", 100, 150], ["move", -18, 98], ["move", 60, 120], ["move", 292, 40], ["click", 292, 40]])],
+  ["clickBackToStartShape", s1(), clickCreate([106, 50], [["move", 200, 150], ["click", 200, 150], ["move", 150, -50], ["move", 50, -8], ["click", 50, -8]])],
+  ["clickCtrlDisablesBinding", s1(), clickCreate([-100, 50], [["move", 20, 80], ["click", 20, 80], ["move", 100, 90], ["move", 292, 60], ["click", 292, 60], ["click", 293, 61]], { ctrl: true })],
+  ["clickZoomHalf", s1(), clickCreate([-100, 50], [["move", 20, 80], ["click", 20, 80], ["move", 100, 90], ["move", 283, 60], ["click", 283, 60]], { zoom: 0.5 })],
+];
+
+/** A rectangle with a text label, as the label sits above its container. */
+function labeledShape() {
+  return [
+    element("rectangle", { id: "lab", x: 200, y: 0, width: 100, height: 100, boundElements: [{ id: "lab-t", type: "text" }] }),
+    plainText("lab-t", 220, 40, "hi", { containerId: "lab", width: 24, height: 25 }),
+  ];
+}

@@ -800,11 +800,11 @@ pub fn add_elements(
         if p.kind == "arrow" {
             if let Some(start) = &p.start {
                 let target = resolve_bind_target(&start.id, &alias_to_index, &op_positions, file);
-                bind_arrow(file, position, LinearEnd::Start, target, env);
+                bind_arrow(file, position, LinearEnd::Start, target, "orbit", None, env);
             }
             if let Some(end) = &p.end {
                 let target = resolve_bind_target(&end.id, &alias_to_index, &op_positions, file);
-                bind_arrow(file, position, LinearEnd::End, target, env);
+                bind_arrow(file, position, LinearEnd::End, target, "orbit", None, env);
             }
             apply_binding_point_shift(&mut file.elements[position]);
         }

@@ -6,17 +6,24 @@
 //! (`getApproxMinLineWidth`, `getApproxMinLineHeight`, `getMinTextElementWidth`) and
 //! `sizeHelpers.ts` (`getPositionAfterHeightChange`) at the pinned commit.
 //!
-//! Only rectangle, diamond and ellipse containers are handled. An arrow container's label
-//! follows `LinearElementEditor` rules instead, a `Raw` container is never touched, and the
-//! sticky note branches and `originalContainerCache` do not exist here.
+//! [`redraw_text_bounding_box`] and [`handle_bind_text_resize`] handle rectangle, diamond and
+//! ellipse containers; a `Raw` container is never touched, and the sticky note branches and
+//! `originalContainerCache` do not exist here. An arrow container's label follows
+//! `LinearElementEditor` rules ([`arrow_label_position`]) and the arrow branch of
+//! `getBoundTextMaxWidth`/`getBoundTextMaxHeight`, driven through [`sync_arrow_label`].
 //!
 //! `getApproxMinLineWidth` reads a per-character width cache that Excalidraw fills as a side
 //! effect of canvas measuring. napkin keeps no such cache, so the function always takes the
 //! branch that measures `DUMMY_TEXT` one character per line.
 
+use serde_json::Value;
+
+use crate::collision::Segment;
+use crate::curve::{curve_length, curve_point_at_length};
 use crate::element::{Element, TextElement};
 use crate::env::Env;
 use crate::file::SceneFile;
+use crate::geometry::GeometryCache;
 use crate::geometry::rotate_point;
 use crate::new_element::bump_version;
 use crate::text::{TextMeasure, line_height, measure_text, normalize_text};
@@ -25,6 +32,12 @@ use crate::transform::HandleKind;
 
 /// `BOUND_TEXT_PADDING` (`packages/common/src/constants.ts`).
 pub const BOUND_TEXT_PADDING: f64 = 5.0;
+
+/// `ARROW_LABEL_WIDTH_FRACTION` (`packages/common/src/constants.ts`).
+const ARROW_LABEL_WIDTH_FRACTION: f64 = 0.7;
+
+/// `ARROW_LABEL_FONT_SIZE_TO_MIN_WIDTH_RATIO`.
+const ARROW_LABEL_FONT_SIZE_TO_MIN_WIDTH_RATIO: f64 = 11.0;
 
 /// `DUMMY_TEXT`.
 const DUMMY_TEXT: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -373,6 +386,196 @@ pub fn handle_bind_text_resize(
     changed
 }
 
+/// `getLinearElementPathSegments` (scene space): the curves when the shape has any, else the
+/// lines.
+fn path_segments(geometry: &mut GeometryCache, arrow: &Element) -> Vec<Segment> {
+    let shape = geometry.linear_collision_shape(arrow);
+    let curves: Vec<Segment> = shape
+        .iter()
+        .copied()
+        .filter(|s| matches!(s, Segment::Cubic(_)))
+        .collect();
+    if curves.is_empty() {
+        shape.to_vec()
+    } else {
+        curves
+    }
+}
+
+fn segment_length(segment: &Segment) -> f64 {
+    match segment {
+        Segment::Cubic(c) => curve_length(*c),
+        Segment::Line([a, b]) => rough::js::hypot(b[0] - a[0], b[1] - a[1]),
+    }
+}
+
+/// `LinearElementEditor.getPointAtPathParameter`: the point `path_parameter` (0 to 1,
+/// clamped) of the way along the arrow's path by arc length; `None` for a non-finite
+/// parameter or an empty path.
+fn point_at_path_parameter(
+    geometry: &mut GeometryCache,
+    arrow: &Element,
+    path_parameter: f64,
+) -> Option<[f64; 2]> {
+    if !path_parameter.is_finite() {
+        return None;
+    }
+    let segments = path_segments(geometry, arrow);
+    if segments.is_empty() {
+        return None;
+    }
+    let lengths: Vec<f64> = segments.iter().map(segment_length).collect();
+    let mut prefix_sums = vec![0.0];
+    for length in &lengths {
+        prefix_sums.push(prefix_sums[prefix_sums.len() - 1] + length);
+    }
+    let total = prefix_sums[lengths.len()];
+
+    let target = path_parameter.clamp(0.0, 1.0) * total;
+    let index = (0..segments.len())
+        .find(|&i| target <= prefix_sums[i + 1])
+        .unwrap_or(segments.len() - 1);
+    let fraction = if lengths[index] == 0.0 {
+        0.0
+    } else {
+        ((target - prefix_sums[index]) / lengths[index]).clamp(0.0, 1.0)
+    };
+    Some(match segments[index] {
+        Segment::Cubic(c) => curve_point_at_length(c, fraction, lengths[index]),
+        Segment::Line([a, b]) => [
+            a[0] + fraction * (b[0] - a[0]),
+            a[1] + fraction * (b[1] - a[1]),
+        ],
+    })
+}
+
+/// `LinearElementEditor.getBoundTextElementCenter`: the middle point of an odd-length point
+/// list, else the midpoint of the middle segment.
+fn arrow_label_center(
+    geometry: &mut GeometryCache,
+    arrow: &Element,
+    points: &[[f64; 2]],
+    origin: [f64; 2],
+    angle: f64,
+) -> Option<[f64; 2]> {
+    if points.len() % 2 == 1 {
+        // `getPointGlobalCoordinates`.
+        let p = points[points.len() / 2];
+        let global = [origin[0] + p[0], origin[1] + p[1]];
+        if angle == 0.0 {
+            return Some(global);
+        }
+        let (_, center) = geometry.absolute_coords(arrow)?;
+        return Some(rotate_point(global, center, angle));
+    }
+    // `getSegmentMidPoint` of segment `points.len() / 2` (1-based).
+    let segments = path_segments(geometry, arrow);
+    match segments.get(points.len() / 2 - 1)? {
+        Segment::Line([a, b]) => Some([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]),
+        Segment::Cubic(c) => Some(curve_point_at_length(*c, 0.5, curve_length(*c))),
+    }
+}
+
+/// `LinearElementEditor.getBoundTextElementPosition` (uncached): the label's top-left from its
+/// `labelPosition` path parameter when it has one, else from `getBoundTextElementCenter`.
+/// `None` for anything but a typed line or arrow. Fewer than two points leave the label where
+/// it is.
+pub fn arrow_label_position(
+    geometry: &mut GeometryCache,
+    arrow: &Element,
+    label: &TextElement,
+) -> Option<[f64; 2]> {
+    let (Element::Line(linear) | Element::Arrow(linear)) = arrow else {
+        return None;
+    };
+    if linear.points.len() < 2 {
+        return Some([label.base.x, label.base.y]);
+    }
+    let half = [label.base.width / 2.0, label.base.height / 2.0];
+    if matches!(arrow, Element::Arrow(_))
+        && let Some(parameter) = label.extra.get("labelPosition").and_then(Value::as_f64)
+        && let Some(point) = point_at_path_parameter(geometry, arrow, parameter)
+    {
+        return Some([point[0] - half[0], point[1] - half[1]]);
+    }
+    let origin = [linear.base.x, linear.base.y];
+    let center = arrow_label_center(geometry, arrow, &linear.points, origin, linear.base.angle)?;
+    Some([center[0] - half[0], center[1] - half[1]])
+}
+
+/// `handleBindTextResize`'s arrow branch (rewrap to `getBoundTextMaxWidth` of the arrow,
+/// remeasure, grow the arrow's `height` when the text is taller than `getBoundTextMaxHeight`)
+/// followed by writing `arrow_label_position` into the label's `x`/`y`. A no-op returning
+/// false when `arrow` has no live label. Bumps what changed.
+pub fn sync_arrow_label(
+    geometry: &mut GeometryCache,
+    file: &mut SceneFile,
+    arrow: usize,
+    measure: &mut dyn TextMeasure,
+    env: &mut impl Env,
+) -> bool {
+    if !matches!(file.elements[arrow], Element::Arrow(_)) {
+        return false;
+    }
+    let Some(text_position) = live_bound_text(file, arrow) else {
+        return false;
+    };
+    let Element::Text(start) = &file.elements[text_position] else {
+        return false;
+    };
+    if start.text.is_empty() {
+        return false;
+    }
+    let mut label = start.clone();
+    let mut element = file.elements[arrow].clone();
+    let Some(base) = element.base_mut() else {
+        return false;
+    };
+
+    let max_width = (ARROW_LABEL_WIDTH_FRACTION * base.width)
+        .max(label.font_size * ARROW_LABEL_FONT_SIZE_TO_MIN_WIDTH_RATIO);
+    let original = label
+        .original_text
+        .clone()
+        .unwrap_or_else(|| label.text.clone());
+    let text = wrap_text(
+        &original,
+        label.font_family,
+        label.font_size,
+        max_width,
+        measure,
+    );
+    let [width, height] = measure_text(
+        &normalize_text(&text),
+        label.font_family,
+        label.font_size,
+        text_line_height(&label),
+        measure,
+    );
+
+    // `getBoundTextMaxHeight`: an arrow too short to hold the label padding has no limit.
+    let max_height = if base.height - BOUND_TEXT_PADDING * 8.0 * 2.0 <= 0.0 {
+        label.base.height
+    } else {
+        base.height
+    };
+    if height > max_height {
+        base.height = container_dimension_for_bound_text(height, "arrow");
+    }
+
+    label.text = text;
+    label.base.width = width;
+    label.base.height = height;
+
+    let mut changed = store(file, arrow, element, env);
+    if let Some([x, y]) = arrow_label_position(geometry, &file.elements[arrow], &label) {
+        label.base.x = x;
+        label.base.y = y;
+    }
+    changed |= store(file, text_position, Element::Text(label), env);
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -516,5 +719,101 @@ mod tests {
             min_text_element_width(5.0, 20.0, 1.25, &mut CharWidthMeasure),
             22.0
         );
+    }
+
+    fn label_of(value: Value) -> TextElement {
+        let Element::Text(label) = Element::from_value(value) else {
+            panic!("typed text");
+        };
+        label
+    }
+
+    #[test]
+    fn a_two_point_arrow_label_centers_on_the_segment_midpoint() {
+        let arrow = Element::from_value(sample::linear(
+            "arrow",
+            "a",
+            [0.0, 0.0],
+            &[[0.0, 0.0], [200.0, 0.0]],
+        ));
+        let label = label_of(sample::text("t", [0.0, 0.0, 40.0, 20.0], "hi", Some("a")));
+        let [x, y] = arrow_label_position(&mut GeometryCache::default(), &arrow, &label).unwrap();
+        assert!(
+            (x - 80.0).abs() < 1e-9 && (y + 10.0).abs() < 1e-9,
+            "{x} {y}"
+        );
+    }
+
+    #[test]
+    fn a_three_point_arrow_label_sits_on_the_middle_point() {
+        let arrow = Element::from_value(sample::linear(
+            "arrow",
+            "a",
+            [10.0, 10.0],
+            &[[0.0, 0.0], [100.0, 50.0], [200.0, 0.0]],
+        ));
+        let label = label_of(sample::text("t", [0.0, 0.0, 40.0, 20.0], "hi", Some("a")));
+        let [x, y] = arrow_label_position(&mut GeometryCache::default(), &arrow, &label).unwrap();
+        assert!(
+            (x - 90.0).abs() < 1e-9 && (y - 50.0).abs() < 1e-9,
+            "{x} {y}"
+        );
+    }
+
+    #[test]
+    fn a_label_position_parameter_moves_the_label_along_the_path() {
+        let arrow = Element::from_value(sample::with(
+            sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [200.0, 0.0]]),
+            json!({"roundness": null}),
+        ));
+        let label = label_of(sample::with(
+            sample::text("t", [0.0, 0.0, 40.0, 20.0], "hi", Some("a")),
+            json!({"labelPosition": 0.25}),
+        ));
+        let [x, y] = arrow_label_position(&mut GeometryCache::default(), &arrow, &label).unwrap();
+        assert!(
+            (x - 30.0).abs() < 1e-9 && (y + 10.0).abs() < 1e-9,
+            "{x} {y}"
+        );
+    }
+
+    #[test]
+    fn syncing_rewraps_to_seventy_percent_of_the_arrow_width() {
+        let mut file = sample::file(vec![
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 0.0], &[[0.0, 0.0], [200.0, 0.0]]),
+                json!({"roundness": null, "boundElements": [{"id": "t", "type": "text"}]}),
+            ),
+            sample::text(
+                "t",
+                [0.0, 0.0, 132.0, 25.0],
+                "hello world foo bar baz",
+                Some("a"),
+            ),
+        ]);
+        let mut geometry = GeometryCache::default();
+        assert!(sync_arrow_label(
+            &mut geometry,
+            &mut file,
+            0,
+            &mut CharWidthMeasure,
+            &mut FixedEnv
+        ));
+        // 0.7 * 200 is below the minimum width of 11 * 20; each character is 12 wide.
+        assert_eq!(text_of(&file), "hello world foo\nbar baz");
+        let Element::Text(label) = &file.elements[1] else {
+            panic!()
+        };
+        assert_eq!(label.base.height, 50.0);
+        assert_eq!(label.base.width, 180.0);
+        assert!((label.base.x - 10.0).abs() < 1e-9);
+        assert!((label.base.y + 25.0).abs() < 1e-9);
+        assert!(!sync_arrow_label(
+            &mut geometry,
+            &mut file,
+            0,
+            &mut CharWidthMeasure,
+            &mut FixedEnv
+        ));
     }
 }

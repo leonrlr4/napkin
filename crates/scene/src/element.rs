@@ -444,6 +444,12 @@ impl Element {
             .and_then(Value::as_str)
     }
 
+    /// The `startBinding`/`endBinding` JSON for `end`; `None` when absent or `null`.
+    pub fn binding_value(&self, end: LinearEnd) -> Option<&Value> {
+        self.field(binding_key(end))
+            .filter(|value| !value.is_null())
+    }
+
     /// Sets `x` and `y` (a `Raw` element only when both are already numbers).
     pub fn set_position(&mut self, x: f64, y: f64) {
         match self {

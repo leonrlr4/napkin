@@ -256,3 +256,126 @@ fn setting_text_on_a_rotated_text_keeps_its_left_edge_in_the_rotated_frame() {
     assert!((v["x"].as_f64().unwrap() + 54.0).abs() < 1e-9, "{v}");
     assert!((v["y"].as_f64().unwrap() - 54.0).abs() < 1e-9, "{v}");
 }
+
+#[test]
+fn updating_a_bound_shape_moves_the_arrow_end_and_keeps_its_fixed_point() {
+    use scene::binding::linear_end_point;
+    use scene::element::LinearEnd;
+
+    let mut editor = editor(vec![
+        sample::with(
+            sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+            json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+        ),
+        sample::with(
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+            json!({"endBinding": {"elementId": "r", "mode": "orbit",
+                                  "fixedPoint": [0.0, 0.5001]}}),
+        ),
+    ]);
+    let arrow = |editor: &scene::editor::Editor<_>| {
+        editor
+            .file()
+            .elements
+            .iter()
+            .find(|e| e.id() == Some("a"))
+            .unwrap()
+            .clone()
+    };
+    let before = arrow(&editor);
+    let end_before = linear_end_point(&before, LinearEnd::End).unwrap();
+    editor
+        .apply_batch(
+            &json!({"ops": [{"op": "update", "id": "r", "set": {"x": 300, "y": 40}}]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let after = arrow(&editor);
+    let end = linear_end_point(&after, LinearEnd::End).unwrap();
+    assert!((end[0] - end_before[0] - 100.0).abs() < 1.0, "{end:?}");
+    assert!((end[1] - end_before[1] - 40.0).abs() < 1.0, "{end:?}");
+    assert_eq!(
+        after.to_value()["endBinding"]["fixedPoint"],
+        before.to_value()["endBinding"]["fixedPoint"]
+    );
+    // The start did not move.
+    assert_eq!(
+        linear_end_point(&after, LinearEnd::Start),
+        linear_end_point(&before, LinearEnd::Start)
+    );
+    assert!(editor.command(Command::Undo));
+    assert_eq!(arrow(&editor), before);
+}
+
+#[test]
+fn an_arrow_updated_in_the_same_batch_keeps_its_own_points() {
+    use scene::binding::linear_end_point;
+    use scene::element::LinearEnd;
+
+    let mut editor = editor(vec![
+        sample::with(
+            sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+            json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+        ),
+        sample::with(
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+            json!({"endBinding": {"elementId": "r", "mode": "orbit",
+                                  "fixedPoint": [0.0, 0.5001]}}),
+        ),
+    ]);
+    editor
+        .apply_batch(
+            &json!({"ops": [
+                {"op": "update", "id": "r", "set": {"x": 300}},
+                {"op": "update", "id": "a", "set": {"points": [[0, 0], [50, 0]]}},
+            ]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let arrow = editor
+        .file()
+        .elements
+        .iter()
+        .find(|e| e.id() == Some("a"))
+        .unwrap();
+    assert_eq!(linear_end_point(arrow, LinearEnd::End), Some([50.0, 50.0]));
+}
+
+#[test]
+fn restyling_a_bound_arrow_in_the_same_batch_does_not_stop_it_following() {
+    use scene::binding::linear_end_point;
+    use scene::element::LinearEnd;
+
+    let mut editor = editor(vec![
+        sample::with(
+            sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+            json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+        ),
+        sample::with(
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+            json!({"endBinding": {"elementId": "r", "mode": "orbit",
+                                  "fixedPoint": [0.0, 0.5001]}}),
+        ),
+    ]);
+    let end_of = |editor: &scene::editor::Editor<_>| {
+        let arrow = editor
+            .file()
+            .elements
+            .iter()
+            .find(|e| e.id() == Some("a"))
+            .unwrap();
+        linear_end_point(arrow, LinearEnd::End).unwrap()
+    };
+    let before = end_of(&editor);
+    editor
+        .apply_batch(
+            &json!({"ops": [
+                {"op": "update", "id": "r", "set": {"x": 300}},
+                {"op": "update", "id": "a", "set": {"strokeColor": "#e03131", "opacity": 50}},
+            ]}),
+            &mut CharWidthMeasure,
+        )
+        .expect("valid batch");
+    let end = end_of(&editor);
+    assert!((end[0] - before[0] - 100.0).abs() < 1.0, "{end:?}");
+}

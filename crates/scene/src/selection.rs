@@ -15,9 +15,8 @@
 //! does not select anything inside a frame beyond the frame itself, so box selection skips
 //! `elementsOverlappingBBox`'s frame bookkeeping entirely. `hitElementBoundText` and box
 //! selection's label bounds both read a bound text element's own stored `x`/`y` instead of
-//! porting `LinearElementEditor.getBoundTextElementPosition`'s recomputed position for an
-//! arrow label; this only disagrees with Excalidraw once a multi-point arrow's label has
-//! drifted from that stored position.
+//! recomputing an arrow label's position with `crate::bound_text::arrow_label_position`; the
+//! two only disagree when a file stores a label position that is stale for its arrow.
 
 use std::collections::{BTreeSet, HashMap};
 

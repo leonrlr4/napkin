@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::sync::Arc;
 
+use crate::binding::{self, LinearDragState};
+use crate::bound_text;
 use crate::collision;
 use crate::edit;
 use crate::element::Element;
@@ -91,6 +93,15 @@ pub(super) struct PointDragState {
     /// The grab offset between the pointer-down position and the point itself, kept for every
     /// move the same way `LinearElementEditor`'s `pointerOffset` is.
     offset: [f64; 2],
+    /// What the binding strategy reads of the gesture so far.
+    drag: LinearDragState,
+    /// The latest event seen (the press until the first move), for a finish that has no
+    /// release event of its own.
+    last: PointerEvent,
+    /// Whether any move was applied; releasing without one changes nothing.
+    moved: bool,
+    /// The dragged element is an arrow that binds (not a line, not an elbow arrow).
+    binds: bool,
 }
 
 pub(super) struct BoxSelectState {
@@ -149,6 +160,27 @@ pub(super) fn scene_points(
     )
 }
 
+/// `arrowOtherEndpointInitialBinding?.mode === "inside"`: the arrow's end opposite to the
+/// dragged point `index` is bound inside its shape.
+fn other_end_started_inside(arrow: &Element, index: usize) -> bool {
+    let Element::Arrow(l) = arrow else {
+        return false;
+    };
+    let other = if index == 0 {
+        "endBinding"
+    } else if index + 1 == l.points.len() {
+        "startBinding"
+    } else {
+        return false;
+    };
+    arrow
+        .to_value()
+        .get(other)
+        .and_then(|binding| binding.get("mode"))
+        .and_then(|mode| mode.as_str())
+        == Some("inside")
+}
+
 /// `LinearElementEditor.getPointIndexUnderCursor`: the single selected element's point closest
 /// to `pointer`, tried from the last point to the first (later points render over earlier
 /// ones), within `POINT_HANDLE_SIZE + 1` CSS pixels. Only a single selected line or non-elbow
@@ -187,12 +219,26 @@ pub(super) fn pointer_down(editor: &mut Editor<impl Env>, event: PointerEvent) {
     }
 
     if let Some((position, index, offset)) = hit_point(editor, event.at, event.zoom) {
+        let drag = LinearDragState {
+            new_arrow: false,
+            origin: Some(event.at),
+            alt_focus_point: None,
+            other_end_started_inside: other_end_started_inside(
+                &editor.file.elements[position],
+                index,
+            ),
+            pointer_offset: offset,
+        };
         editor.select_gesture = Gesture::PointDrag(PointDragState {
             start: Arc::clone(&editor.file),
             selection_before: editor.selection.clone(),
             position,
             index,
             offset,
+            drag,
+            last: event,
+            moved: false,
+            binds: super::create::is_binding_arrow(&editor.file.elements[position]),
         });
         return;
     }
@@ -296,7 +342,7 @@ pub(super) fn pointer_move(
                 Gesture::Click(click)
             } else if click.hit.is_some() || click.in_box {
                 let state = begin_drag(editor, &click);
-                apply_drag_move(editor, &state, event);
+                apply_drag_move(editor, &state, event, measure);
                 Gesture::Drag(state)
             } else {
                 let mut state = begin_box_select(&click);
@@ -305,7 +351,7 @@ pub(super) fn pointer_move(
             }
         }
         Gesture::Drag(state) => {
-            apply_drag_move(editor, &state, event);
+            apply_drag_move(editor, &state, event, measure);
             Gesture::Drag(state)
         }
         Gesture::Resize(state) => {
@@ -313,12 +359,13 @@ pub(super) fn pointer_move(
             Gesture::Resize(state)
         }
         Gesture::Rotate(mut state) => {
-            apply_rotate_move(editor, &state, event);
+            apply_rotate_move(editor, &state, event, measure);
             state.moved = true;
             Gesture::Rotate(state)
         }
-        Gesture::PointDrag(state) => {
-            apply_point_drag_move(editor, &state, event);
+        Gesture::PointDrag(mut state) => {
+            apply_point_drag_move(editor, &mut state, event, Some(measure));
+            state.moved = true;
             Gesture::PointDrag(state)
         }
         Gesture::BoxSelect(mut state) => {
@@ -360,8 +407,8 @@ pub(super) fn finish_gesture(
             }
         }
         Gesture::Drag(state) => {
-            if let Some((event, _)) = release {
-                apply_drag_move(editor, &state, event);
+            if let Some((event, measure)) = release {
+                apply_drag_move(editor, &state, event, measure);
             }
             editor.finish_edit(&state.start, &state.selection_before);
         }
@@ -372,15 +419,27 @@ pub(super) fn finish_gesture(
             editor.finish_edit(&state.start, &state.selection_before);
         }
         Gesture::Rotate(state) => {
-            if let Some((event, _)) = release.filter(|_| state.moved) {
-                apply_rotate_move(editor, &state, event);
+            if let Some((event, measure)) = release.filter(|_| state.moved) {
+                apply_rotate_move(editor, &state, event, measure);
             }
             editor.finish_edit(&state.start, &state.selection_before);
         }
-        Gesture::PointDrag(state) => {
-            if let Some((event, _)) = release {
-                apply_point_drag_move(editor, &state, event);
-            }
+        Gesture::PointDrag(mut state) => {
+            // A tool switch has no text measurer, so the arrow's label is resynced on the next
+            // change to the arrow.
+            let measure = match release {
+                Some((event, measure)) => {
+                    // A release where the press happened, with no move in between, is a click
+                    // on the handle: nothing to apply, bind or record.
+                    if state.moved || event.at != state.last.at {
+                        apply_point_drag_move(editor, &mut state, event, Some(&mut *measure));
+                        state.moved = true;
+                    }
+                    Some(measure)
+                }
+                None => None,
+            };
+            finish_point_drag(editor, &state, measure);
             editor.finish_edit(&state.start, &state.selection_before);
         }
         // The current selection is exactly the last box-select result already; nothing more
@@ -410,13 +469,26 @@ fn begin_box_select(click: &ClickState) -> BoxSelectState {
     }
 }
 
-fn apply_drag_move(editor: &mut Editor<impl Env>, state: &DragState, event: PointerEvent) {
+fn apply_drag_move(
+    editor: &mut Editor<impl Env>,
+    state: &DragState,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     let mut offset = [event.at[0] - state.origin[0], event.at[1] - state.origin[1]];
     if event.modifiers.shift {
         offset = edit::lock_drag_axis(offset);
     }
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
-    edit::apply_drag(file, &state.start, &state.targets, offset, &mut editor.env);
+    edit::apply_drag(
+        &mut editor.geometry,
+        file,
+        &state.start,
+        &state.targets,
+        offset,
+        measure,
+        &mut editor.env,
+    );
 }
 
 fn apply_resize_move(
@@ -472,25 +544,58 @@ fn rotation_center(editor: &mut Editor<impl Env>, targets: &[usize]) -> [f64; 2]
         })
 }
 
-fn apply_rotate_move(editor: &mut Editor<impl Env>, state: &RotateState, event: PointerEvent) {
+fn apply_rotate_move(
+    editor: &mut Editor<impl Env>,
+    state: &RotateState,
+    event: PointerEvent,
+    measure: &mut dyn TextMeasure,
+) {
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     transform::rotate_elements(
+        &mut editor.geometry,
         file,
         &state.start,
         &state.targets,
         event.at,
         state.center,
         event.modifiers.shift,
+        measure,
         &mut editor.env,
     );
 }
 
+/// Moves the dragged point to the pointer. An arrow binds or unbinds the end on the way and
+/// resyncs its label; `measure` is `None` for the tool-switch finish, which leaves the label
+/// for the next edit to fix.
 fn apply_point_drag_move(
     editor: &mut Editor<impl Env>,
-    state: &PointDragState,
+    state: &mut PointDragState,
     event: PointerEvent,
+    measure: Option<&mut dyn TextMeasure>,
 ) {
+    state.last = event;
     let target = [event.at[0] - state.offset[0], event.at[1] - state.offset[1]];
+    if state.binds {
+        super::create::drag_arrow_point(
+            editor,
+            &mut state.position,
+            state.index,
+            target,
+            &mut state.drag,
+            event,
+        );
+        if let Some(measure) = measure {
+            let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+            bound_text::sync_arrow_label(
+                &mut editor.geometry,
+                file,
+                state.position,
+                measure,
+                &mut editor.env,
+            );
+        }
+        return;
+    }
     let shift = event.modifiers.shift;
     let start_element = &state.start.elements[state.position];
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
@@ -502,6 +607,53 @@ fn apply_point_drag_move(
         shift,
         &mut editor.env,
     );
+}
+
+/// The end of a point drag (`actionFinalize` with the release event): binds or unbinds the
+/// dragged end where the pointer ended up and resyncs the arrow's label.
+fn finish_point_drag(
+    editor: &mut Editor<impl Env>,
+    state: &PointDragState,
+    measure: Option<&mut dyn TextMeasure>,
+) {
+    editor.binding_hint = None;
+    if !state.moved || !state.binds {
+        return;
+    }
+    let event = state.last;
+    let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
+    let Element::Arrow(l) = &file.elements[state.position] else {
+        return;
+    };
+    let local = if event.modifiers.shift {
+        l.points[state.index]
+    } else {
+        let target = [event.at[0] - state.offset[0], event.at[1] - state.offset[1]];
+        match binding::create_point_at(&mut editor.geometry, &file.elements[state.position], target)
+        {
+            Some(point) => point,
+            None => return,
+        }
+    };
+    binding::finalize_binding(
+        &mut editor.geometry,
+        file,
+        state.position,
+        &[(state.index, local)],
+        super::create::binding_input(event),
+        &state.drag,
+        false,
+        &mut editor.env,
+    );
+    if let Some(measure) = measure {
+        bound_text::sync_arrow_label(
+            &mut editor.geometry,
+            file,
+            state.position,
+            measure,
+            &mut editor.env,
+        );
+    }
 }
 
 fn apply_box_select_move(

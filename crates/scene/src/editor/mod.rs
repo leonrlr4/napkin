@@ -30,8 +30,10 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::batch::{self, BatchReport, OpError};
+use crate::binding::{self, SuggestedBinding};
 use crate::bound_text;
 use crate::clipboard::{self, Pasted};
+use crate::collision;
 use crate::duplicate::{self, DEFAULT_GRID_SIZE, DuplicateMode};
 use crate::edit;
 use crate::element::Element;
@@ -136,6 +138,35 @@ pub struct Overlay {
     pub points: Vec<[f64; 2]>,
     /// The rubber band while box selecting, normalized.
     pub box_selection: Option<Bounds>,
+    /// The shape an arrow end would bind to right now.
+    pub binding_highlight: Option<BindingHighlight>,
+}
+
+/// The binding hint drawn over the canvas while an arrow end can bind (`suggestedBinding`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BindingHighlight {
+    /// The target's outline in scene coordinates, closed, sampled densely enough to draw as a
+    /// polyline (rounded corners and ellipses included), rotated with the target.
+    pub outline: Vec<[f64; 2]>,
+    /// `clamp(1.75, strokeWidth, 4) / max(0.25, zoom)`, scene units.
+    pub stroke_width: f64,
+    /// The side midpoints that JS draws (`renderBindingHighlightForBindableElement_simple`),
+    /// each with whether it is the highlighted one: only the midpoint closest to the pointer,
+    /// when it is within twice the highlight threshold (highlighted within one threshold).
+    /// Empty when the pointer is inside the target or the angle is locked.
+    pub midpoints: Vec<([f64; 2], bool)>,
+    /// `4 / zoom`.
+    pub midpoint_radius: f64,
+}
+
+/// The binding target an arrow end would bind to (`appState.suggestedBinding`), kept by id
+/// because dragging an arrow can reorder the scene.
+#[derive(Clone, Debug, PartialEq)]
+struct BindingHint {
+    target: String,
+    /// The latest pointer position, which picks the highlighted midpoint.
+    pointer: [f64; 2],
+    angle_locked: bool,
 }
 
 pub struct Editor<E: Env> {
@@ -156,6 +187,7 @@ pub struct Editor<E: Env> {
     revision: u64,
     scene_clones: u64,
     cursor: Cursor,
+    binding_hint: Option<BindingHint>,
 }
 
 impl<E: Env> Editor<E> {
@@ -178,6 +210,7 @@ impl<E: Env> Editor<E> {
             revision: 0,
             scene_clones: 0,
             cursor: Cursor::default(),
+            binding_hint: None,
         }
     }
 
@@ -197,6 +230,7 @@ impl<E: Env> Editor<E> {
         self.erase_gesture = erase::Gesture::None;
         self.text_editing = None;
         self.text_edit_base = None;
+        self.binding_hint = None;
         self.geometry.clear();
     }
 
@@ -232,6 +266,7 @@ impl<E: Env> Editor<E> {
         select::finish_gesture(self, None);
         create::finish_gesture(self, None);
         erase::finish_gesture(self, None);
+        self.binding_hint = None;
         if !matches!(tool, Tool::Selection | Tool::Hand) {
             self.selection = Selection::new();
             self.cursor = Cursor::Crosshair;
@@ -255,6 +290,7 @@ impl<E: Env> Editor<E> {
         select::finish_gesture(self, None);
         create::finish_gesture(self, None);
         erase::finish_gesture(self, None);
+        self.binding_hint = None;
     }
 
     pub fn selection(&self) -> &Selection {
@@ -311,6 +347,9 @@ impl<E: Env> Editor<E> {
         select::pointer_move(self, event, measure);
         create::pointer_move(self, event);
         erase::pointer_move(self, event);
+        if matches!(self.select_gesture, select::Gesture::None) {
+            create::update_hover_hint(self, event);
+        }
     }
 
     pub fn pointer_up(&mut self, event: PointerEvent, measure: &mut dyn TextMeasure) {
@@ -738,6 +777,7 @@ impl<E: Env> Editor<E> {
         };
 
         let box_selection = select::box_selection_overlay(&self.select_gesture);
+        let binding_highlight = self.binding_highlight(zoom);
 
         Overlay {
             outlines,
@@ -746,7 +786,78 @@ impl<E: Env> Editor<E> {
             rotation_handle,
             points,
             box_selection,
+            binding_highlight,
         }
+    }
+
+    /// Remembers `suggestion` (a position in the current scene) as the shape to highlight, or
+    /// forgets the hint when there is none.
+    fn set_binding_hint(
+        &mut self,
+        suggestion: Option<SuggestedBinding>,
+        pointer: [f64; 2],
+        angle_locked: bool,
+    ) {
+        self.binding_hint = suggestion.and_then(|s| {
+            let target = self.file.elements.get(s.target)?.id()?.to_owned();
+            Some(BindingHint {
+                target,
+                pointer,
+                angle_locked,
+            })
+        });
+    }
+
+    /// `renderBindingHighlightForBindableElement_simple`.
+    fn binding_highlight(&mut self, zoom: f64) -> Option<BindingHighlight> {
+        let hint = self.binding_hint.clone()?;
+        let target = self
+            .file
+            .elements
+            .iter()
+            .position(|e| !e.is_deleted() && e.id() == Some(hint.target.as_str()))?;
+        let element = self.file.elements[target].clone();
+        if !collision::is_bindable_including_locked(&element) {
+            return None;
+        }
+        let outline = collision::outline_polyline(&mut self.geometry, &element)?;
+        let stroke_width = collision::stroke_width(&element);
+
+        let mut midpoints = Vec::new();
+        let inside = collision::hit_element_itself_with(
+            &mut self.geometry,
+            &element,
+            hint.pointer,
+            0.0,
+            true,
+        );
+        if !hint.angle_locked
+            && !inside
+            && let Some(candidates) = binding::side_midpoints(&mut self.geometry, &element)
+        {
+            let distance =
+                |p: &[f64; 2]| rough::js::hypot(hint.pointer[0] - p[0], hint.pointer[1] - p[1]);
+            let closest = candidates
+                .iter()
+                .copied()
+                .min_by(|a, b| distance(a).total_cmp(&distance(b)));
+            let threshold = binding::max_binding_distance(zoom) + stroke_width / 2.0;
+            if let Some(point) = closest {
+                let d = distance(&point);
+                if d <= threshold {
+                    midpoints.push((point, true));
+                } else if d <= threshold * 2.0 {
+                    midpoints.push((point, false));
+                }
+            }
+        }
+
+        Some(BindingHighlight {
+            outline,
+            stroke_width: stroke_width.clamp(1.75, 4.0) / zoom.max(0.25),
+            midpoints,
+            midpoint_radius: 4.0 / zoom,
+        })
     }
 
     /// Records `before` -> the current scene as one history entry (a no-op, returning `false`,

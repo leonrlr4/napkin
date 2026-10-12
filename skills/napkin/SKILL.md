@@ -97,9 +97,11 @@ batches, since aliases don't carry over.
   off the shape's edge; don't try to compensate for that yourself.
 - `freedraw`: `x`, `y`, `points` (at least 1 pair).
 
-Arrows do not follow the shapes they are bound to: moving or resizing a shape leaves its
-bound arrows exactly where they were. After an `update` that moves or resizes a shape, send
-a separate `update` for each of its arrows' `points`/`x`/`y` so they still meet the shape.
+Arrows follow the shapes they are bound to: an `update` that moves or resizes a shape moves
+the bound end of each arrow attached to it, keeping the end at the same relative spot on the
+shape's outline; the arrow's other end stays put. An arrow that the same batch also moves
+or reshapes (`x`/`y`/`points`) keeps the geometry its own `update` sets; restyling it does not
+stop it from following. No separate `update` is needed to keep arrows attached.
 
 None of these accept a `label` except the three shape types above (arrows and lines don't
 get napkin-managed labels — add a separate `text` element instead).
