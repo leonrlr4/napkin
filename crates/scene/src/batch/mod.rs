@@ -195,6 +195,25 @@ fn follow_moved_shapes(
             (e.placement() != old.placement() || points(e) != points(old)).then(|| id.to_owned())
         })
         .collect();
+    // An arrow the batch reshaped keeps its points; its `fixedPoint`s are measured against the
+    // shapes as the batch leaves them, whichever op came first.
+    for index in 0..next.elements.len() {
+        let element = &next.elements[index];
+        if element.is_deleted()
+            || !matches!(element, Element::Arrow(_))
+            || !element.id().is_some_and(|id| simultaneous.contains(id))
+        {
+            continue;
+        }
+        for end in [LinearEnd::Start, LinearEnd::End] {
+            if let Some(target_id) = next.elements[index].binding_target(end) {
+                let target_id = target_id.to_owned();
+                if let Some(target_index) = find_alive_by_id(&next.elements, &target_id) {
+                    refresh_fixed_point(next, index, end, target_index, env);
+                }
+            }
+        }
+    }
     let mut geometry = GeometryCache::default();
     for index in 0..next.elements.len() {
         let element = &next.elements[index];
@@ -737,8 +756,8 @@ fn apply_text_update(
 }
 
 /// `x`, `y`, `points` (>=2), `STYLE_KEYS` for a line or arrow; `text` errors. An arrow also
-/// translates its own bound label and refreshes its bound ends' `fixedPoint`s when its
-/// position or points change.
+/// translates its own bound label when its position or points change; its bound ends'
+/// `fixedPoint`s are refreshed once the whole batch has run ([`follow_moved_shapes`]).
 fn apply_linear_update(
     next: &mut SceneFile,
     pos: usize,
@@ -814,14 +833,6 @@ fn apply_linear_update(
         };
         if geometry_changed {
             translate_arrow_label(next, index, dx, dy, env);
-            for end in [LinearEnd::Start, LinearEnd::End] {
-                if let Some(target_id) = next.elements[index].binding_target(end) {
-                    let target_id = target_id.to_owned();
-                    if let Some(target_index) = find_alive_by_id(&next.elements, &target_id) {
-                        refresh_fixed_point(next, index, end, target_index, env);
-                    }
-                }
-            }
         }
     }
 
@@ -1218,6 +1229,43 @@ mod tests {
         let end = crate::binding::linear_end_point(get(&next, "a"), crate::element::LinearEnd::End)
             .unwrap();
         assert_eq!(end, [195.0, 30.0]);
+    }
+
+    #[test]
+    fn an_arrow_and_its_target_updated_in_one_batch_end_the_same_in_either_order() {
+        let file = sample::file(vec![
+            sample::with(
+                sample::generic("rectangle", "r", [200.0, 0.0, 100.0, 100.0]),
+                json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+            ),
+            sample::with(
+                sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+                json!({"endBinding": {"elementId": "r", "mode": "orbit",
+                                      "fixedPoint": [-0.06, 0.5001]}}),
+            ),
+        ]);
+        let arrow_op = json!({"op": "update", "id": "a",
+                              "set": {"points": [[0, 0], [294, 30]]}});
+        let shape_op = json!({"op": "update", "id": "r", "set": {"x": 300}});
+        let (arrow_first, _) =
+            apply(&file, json!({"ops": [arrow_op.clone(), shape_op.clone()]})).unwrap();
+        let (shape_first, _) = apply(&file, json!({"ops": [shape_op, arrow_op]})).unwrap();
+        for id in ["a", "r"] {
+            let (mut x, mut y) = (
+                get(&arrow_first, id).to_value(),
+                get(&shape_first, id).to_value(),
+            );
+            for v in [&mut x, &mut y] {
+                v["version"] = Value::Null;
+                v["versionNonce"] = Value::Null;
+            }
+            assert_eq!(x, y, "{id}");
+        }
+        // The fixedPoint is measured against the rectangle where it ended up.
+        assert_eq!(
+            get(&arrow_first, "a").to_value()["endBinding"]["fixedPoint"],
+            json!([-0.06, 0.8])
+        );
     }
 
     #[test]
