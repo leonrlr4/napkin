@@ -95,7 +95,8 @@ pub(super) struct PointDragState {
     offset: [f64; 2],
     /// What the binding strategy reads of the gesture so far.
     drag: LinearDragState,
-    /// The latest event seen, for a finish that has no release event of its own.
+    /// The latest event seen (the press until the first move), for a finish that has no
+    /// release event of its own.
     last: PointerEvent,
     /// Whether any move was applied; releasing without one changes nothing.
     moved: bool,
@@ -364,6 +365,7 @@ pub(super) fn pointer_move(
         }
         Gesture::PointDrag(mut state) => {
             apply_point_drag_move(editor, &mut state, event, Some(measure));
+            state.moved = true;
             Gesture::PointDrag(state)
         }
         Gesture::BoxSelect(mut state) => {
@@ -427,7 +429,12 @@ pub(super) fn finish_gesture(
             // change to the arrow.
             let measure = match release {
                 Some((event, measure)) => {
-                    apply_point_drag_move(editor, &mut state, event, Some(&mut *measure));
+                    // A release where the press happened, with no move in between, is a click
+                    // on the handle: nothing to apply, bind or record.
+                    if state.moved || event.at != state.last.at {
+                        apply_point_drag_move(editor, &mut state, event, Some(&mut *measure));
+                        state.moved = true;
+                    }
                     Some(measure)
                 }
                 None => None,
@@ -567,7 +574,6 @@ fn apply_point_drag_move(
     measure: Option<&mut dyn TextMeasure>,
 ) {
     state.last = event;
-    state.moved = true;
     let target = [event.at[0] - state.offset[0], event.at[1] - state.offset[1]];
     if state.binds {
         super::create::drag_arrow_point(

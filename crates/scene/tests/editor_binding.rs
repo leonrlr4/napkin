@@ -341,3 +341,24 @@ fn editing_a_standalone_text_drags_the_arrow_bound_to_it() {
     assert!(editor.command(Command::Undo));
     assert_eq!(editor.file().as_ref(), &before);
 }
+
+#[test]
+fn pressing_and_releasing_on_a_bound_arrow_end_changes_nothing() {
+    let mut editor = editor(vec![
+        sample::with(
+            filled_rectangle("r", [200.0, 0.0, 100.0, 100.0]),
+            json!({"boundElements": [{"id": "a", "type": "arrow"}]}),
+        ),
+        sample::with(
+            sample::linear("arrow", "a", [0.0, 50.0], &[[0.0, 0.0], [194.0, 0.0]]),
+            json!({"endBinding": {"elementId": "r", "mode": "orbit",
+                                  "fixedPoint": [-0.06, 0.2]}}),
+        ),
+    ]);
+    click(&mut editor, at(100.0, 50.0));
+    assert_eq!(selected(&editor), ["a"]);
+    let before = editor.file().as_ref().clone();
+    click(&mut editor, at(194.0, 50.0));
+    assert_eq!(editor.file().as_ref(), &before);
+    assert!(!editor.command(Command::Undo));
+}
