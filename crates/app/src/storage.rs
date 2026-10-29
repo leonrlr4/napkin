@@ -16,22 +16,23 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The directory canvases live in, and the file that remembers which one was last open.
+/// The directory canvases live in, the file that remembers which one was last open, and the
+/// tool and style preferences ([`crate::prefs`]).
 pub struct Paths {
     pub canvases: PathBuf,
     pub last: PathBuf,
+    pub prefs: PathBuf,
 }
 
 impl Paths {
-    /// `<home>/Documents/napkin` and `<home>/.local/state/napkin/last` (spec §5.4).
+    /// `<home>/Documents/napkin`, `<home>/.local/state/napkin/last` (spec §5.4) and
+    /// `<home>/.local/state/napkin/prefs.json`.
     pub fn from_home(home: &Path) -> Paths {
+        let state = home.join(".local").join("state").join("napkin");
         Paths {
             canvases: home.join("Documents").join("napkin"),
-            last: home
-                .join(".local")
-                .join("state")
-                .join("napkin")
-                .join("last"),
+            last: state.join("last"),
+            prefs: state.join("prefs.json"),
         }
     }
 
@@ -397,6 +398,10 @@ mod tests {
         assert_eq!(
             paths.last,
             PathBuf::from("/home/u/.local/state/napkin/last")
+        );
+        assert_eq!(
+            paths.prefs,
+            PathBuf::from("/home/u/.local/state/napkin/prefs.json")
         );
         assert_eq!(
             paths.scratch(),

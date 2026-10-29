@@ -28,7 +28,8 @@ use crate::image_file::{self, PrepareError};
 use crate::input::{self, CanvasInput};
 use crate::overlay::{self, OverlayColors};
 use crate::pinch::{PinchListener, PinchTracker};
-use crate::properties_panel::{self, PanelColors};
+use crate::prefs::Prefs;
+use crate::properties_panel::{self, PanelColors, PanelLayout};
 use crate::render::callback::{self, CanvasCallback};
 use crate::render::color::render_color;
 use crate::render::gpu::{CanvasFrame, CanvasRenderer};
@@ -236,6 +237,10 @@ pub struct NapkinApp {
     /// requested file could not be opened.
     notice: Option<(String, Instant)>,
     autosave: Autosave,
+    /// Where the tool, padlock and new-element style are kept between runs, with what was last
+    /// written there; `None` in `--bench` and without `$HOME`.
+    prefs: Option<(PathBuf, Prefs)>,
+    panel_layout: PanelLayout,
     /// `None` alongside `path`: nothing to write to.
     writer: Option<SaveWorker>,
     /// The mtime of `path` as last read or written, to detect an external change (spec §5.6).
@@ -417,10 +422,20 @@ impl NapkinApp {
                 eprintln!("napkin: touchpad pinch zoom unavailable: {reason}");
             })
             .ok();
-        let (editor, load_error, known_mtime) = match content {
+        let (mut editor, load_error, known_mtime) = match content {
             Content::Editable { file, mtime } => (Some(Editor::new(file, SystemEnv)), None, mtime),
             Content::Unreadable(message) => (None, Some(message), None),
         };
+        let prefs = (!bench)
+            .then(storage::Paths::from_env)
+            .flatten()
+            .map(|paths| {
+                let prefs = Prefs::load(&paths.prefs);
+                (paths.prefs, prefs)
+            });
+        if let (Some(editor), Some((_, prefs))) = (editor.as_mut(), &prefs) {
+            prefs.apply_to(editor);
+        }
         let revision = editor.as_ref().map_or(0, |editor| editor.revision());
         let view = editor
             .as_ref()
@@ -463,6 +478,10 @@ impl NapkinApp {
             unreadable: None,
             notice: notice.map(|message| (message, Instant::now())),
             autosave: Autosave::new(revision, view),
+            panel_layout: prefs
+                .as_ref()
+                .map_or_else(PanelLayout::default, |(_, p)| p.panel),
+            prefs,
             writer,
             known_mtime,
             generation: 0,
@@ -475,6 +494,27 @@ impl NapkinApp {
             canvas_size: [0.0, 0.0],
             text_edit_buffer: None,
         }
+    }
+
+    /// Writes the tool, padlock and style when they differ from what was last written, except
+    /// while `pointer_down`: dragging the opacity slider changes the style every frame.
+    fn save_prefs(&mut self, pointer_down: bool) {
+        if pointer_down {
+            return;
+        }
+        let (Some(editor), Some((path, saved))) = (&self.editor, &mut self.prefs) else {
+            return;
+        };
+        let current = Prefs::of(editor, self.panel_layout);
+        if current == *saved {
+            return;
+        }
+        // Remembered even when the write fails, so a read-only state directory logs once per
+        // change instead of once per frame.
+        if let Err(error) = current.save(path) {
+            eprintln!("napkin: {}: {error}", path.display());
+        }
+        *saved = current;
     }
 
     /// Applies a background save's outcome: remembers the new mtime on success, then either
@@ -839,6 +879,7 @@ impl eframe::App for NapkinApp {
     /// unwritten, saves once more directly on this thread (spec §5.5). A panic skips
     /// `on_exit` entirely, so nothing is saved after one (spec §8).
     fn on_exit(&mut self) {
+        self.save_prefs(false);
         while let Some(incoming) = self.pending.pop_front() {
             incoming.reply(Response::error("napkin is closing"));
         }
@@ -1225,6 +1266,7 @@ impl eframe::App for NapkinApp {
                                         },
                                     ),
                                     EditorInput::Tool(tool) => editor.set_tool(tool),
+                                    EditorInput::ToggleToolLock => editor.toggle_tool_lock(),
                                     EditorInput::Command(command) => {
                                         editor.command(command);
                                     }
@@ -1448,8 +1490,12 @@ impl eframe::App for NapkinApp {
                     // An unreadable file blocks every other edit (see the pointer/keyboard
                     // gate above); the toolbar still draws so the current tool stays visible,
                     // but a click must not change it.
-                    if let Some(tool) = toolbar::show(ui.ctx(), editor.tool(), toolbar_colors)
-                        && self.unreadable.is_none()
+                    if let Some(click) = toolbar::show(
+                        ui.ctx(),
+                        editor.tool(),
+                        editor.tool_locked(),
+                        toolbar_colors,
+                    ) && self.unreadable.is_none()
                     {
                         // A tool change ends a text edit in progress rather than abandoning it
                         // (the toolbar itself is a click the canvas never sees, so the usual
@@ -1461,7 +1507,10 @@ impl eframe::App for NapkinApp {
                             &mut self.measure_rx,
                             Some(ui.ctx()),
                         );
-                        editor.set_tool(tool);
+                        match click {
+                            toolbar::Click::Tool(tool) => editor.set_tool(tool),
+                            toolbar::Click::Lock => editor.toggle_tool_lock(),
+                        }
                     }
 
                     let panel_colors = PanelColors::from_theme(&self.theme);
@@ -1469,6 +1518,7 @@ impl eframe::App for NapkinApp {
                     if let Some(property) = properties_panel::show(
                         ui.ctx(),
                         &panel_state,
+                        &mut self.panel_layout,
                         panel_colors,
                         self.theme.dark,
                     ) && self.unreadable.is_none()
@@ -1573,6 +1623,8 @@ impl eframe::App for NapkinApp {
                     });
                 });
         }
+
+        self.save_prefs(ui.input(|i| i.pointer.any_down()));
     }
 }
 

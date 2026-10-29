@@ -152,8 +152,61 @@ fn icon(painter: &egui::Painter, tool: Tool, rect: egui::Rect, color: egui::Colo
     }
 }
 
-/// Draws the toolbar at the top centre; returns the tool the user clicked.
-pub fn show(ctx: &egui::Context, current: Tool, colors: ToolbarColors) -> Option<Tool> {
+/// What a toolbar click asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+    Tool(Tool),
+    /// The padlock (`LockButton.tsx`).
+    Lock,
+}
+
+/// A closed padlock when `locked`, its shackle swung open otherwise.
+fn padlock(painter: &egui::Painter, rect: egui::Rect, locked: bool, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.5, color);
+    let body = egui::Rect::from_min_max(
+        egui::pos2(rect.min.x + 1.0, rect.center().y - 1.0),
+        egui::pos2(rect.max.x - 1.0, rect.max.y),
+    );
+    painter.rect_stroke(body, 1.5, stroke, egui::StrokeKind::Inside);
+    let radius = body.width() * 0.3;
+    let center_x = if locked {
+        body.center().x
+    } else {
+        body.center().x + body.width() * 0.45
+    };
+    let top = rect.min.y + radius;
+    let shackle: Vec<egui::Pos2> = (0..=12)
+        .map(|i| {
+            let angle = std::f32::consts::PI * (1.0 + i as f32 / 12.0);
+            egui::pos2(center_x + radius * angle.cos(), top + radius * angle.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(shackle, stroke));
+    let legs_bottom = if locked { body.min.y } else { top + 1.5 };
+    painter.line_segment(
+        [
+            egui::pos2(center_x - radius, top),
+            egui::pos2(center_x - radius, body.min.y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center_x + radius, top),
+            egui::pos2(center_x + radius, legs_bottom),
+        ],
+        stroke,
+    );
+}
+
+/// Draws the toolbar at the top centre: the padlock, then one button per tool. Returns what the
+/// user clicked.
+pub fn show(
+    ctx: &egui::Context,
+    current: Tool,
+    locked: bool,
+    colors: ToolbarColors,
+) -> Option<Click> {
     egui::Area::new(egui::Id::new("napkin-toolbar"))
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 8.0))
         .show(ctx, |ui| {
@@ -169,35 +222,33 @@ pub fn show(ctx: &egui::Context, current: Tool, colors: ToolbarColors) -> Option
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = BUTTON_GAP;
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(BUTTON_SIZE, BUTTON_SIZE),
+                            egui::Sense::click(),
+                        );
+                        let icon_color = button_background(ui, rect, locked, &response, colors);
+                        padlock(ui.painter(), rect.shrink(ICON_MARGIN), locked, icon_color);
+                        let hint = if locked {
+                            "Tool stays active after drawing (Q)"
+                        } else {
+                            "Keep the tool active after drawing (Q)"
+                        };
+                        if response.on_hover_text(hint).clicked() {
+                            clicked = Some(Click::Lock);
+                        }
+                        ui.separator();
                         for &(tool, hint) in &TOOLS {
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(BUTTON_SIZE, BUTTON_SIZE),
                                 egui::Sense::click(),
                             );
-                            let selected = tool == current;
-                            let icon_color = if selected {
-                                painter_fill(ui, rect, colors.accent);
-                                colors.background
-                            } else {
-                                if response.hovered() {
-                                    painter_fill(
-                                        ui,
-                                        rect,
-                                        egui::Color32::from_rgba_unmultiplied(
-                                            colors.foreground.r(),
-                                            colors.foreground.g(),
-                                            colors.foreground.b(),
-                                            30,
-                                        ),
-                                    );
-                                }
-                                colors.foreground
-                            };
+                            let icon_color =
+                                button_background(ui, rect, tool == current, &response, colors);
                             icon(ui.painter(), tool, rect.shrink(ICON_MARGIN), icon_color);
                             let response =
                                 response.on_hover_text(format!("{} ({hint})", name(tool)));
                             if response.clicked() {
-                                clicked = Some(tool);
+                                clicked = Some(Click::Tool(tool));
                             }
                         }
                     });
@@ -207,8 +258,29 @@ pub fn show(ctx: &egui::Context, current: Tool, colors: ToolbarColors) -> Option
         .inner
 }
 
-fn painter_fill(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
-    ui.painter().rect_filled(rect, CORNER_RADIUS, color);
+/// Fills a selected button with the accent and a hovered one faintly; returns the icon color
+/// that reads on top of it.
+fn button_background(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    selected: bool,
+    response: &egui::Response,
+    colors: ToolbarColors,
+) -> egui::Color32 {
+    if selected {
+        ui.painter().rect_filled(rect, CORNER_RADIUS, colors.accent);
+        return colors.background;
+    }
+    if response.hovered() {
+        let hover = egui::Color32::from_rgba_unmultiplied(
+            colors.foreground.r(),
+            colors.foreground.g(),
+            colors.foreground.b(),
+            30,
+        );
+        ui.painter().rect_filled(rect, CORNER_RADIUS, hover);
+    }
+    colors.foreground
 }
 
 #[cfg(test)]

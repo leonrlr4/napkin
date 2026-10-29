@@ -14,6 +14,8 @@ pub enum EditorInput {
     Move(PointerEvent),
     Up(PointerEvent),
     Tool(Tool),
+    /// Q: the padlock (`Editor::toggle_tool_lock`).
+    ToggleToolLock,
     Command(Command),
     Copy,
     /// Ctrl+X: copy the selection, then delete it.
@@ -113,6 +115,7 @@ fn key_input(key: egui::Key, modifiers: egui::Modifiers) -> Option<EditorInput> 
         egui::Key::T | egui::Key::Num8 => Some(EditorInput::Tool(Tool::Text)),
         egui::Key::E | egui::Key::Num0 => Some(EditorInput::Tool(Tool::Eraser)),
         egui::Key::H => Some(EditorInput::Tool(Tool::Hand)),
+        egui::Key::Q => Some(EditorInput::ToggleToolLock),
         egui::Key::Delete | egui::Key::Backspace => Some(EditorInput::Command(Command::Delete)),
         egui::Key::Escape => Some(EditorInput::Command(Command::Escape)),
         egui::Key::Enter => Some(EditorInput::Command(Command::Finalize)),
@@ -407,6 +410,7 @@ mod tests {
             key(egui::Key::D, ctrl),
             key(egui::Key::CloseBracket, ctrl),
             key(egui::Key::OpenBracket, ctrl),
+            key(egui::Key::Q, none),
         ];
         assert_eq!(
             translate(&frame(&events), &mut PointerCapture::default()),
@@ -418,6 +422,7 @@ mod tests {
                 EditorInput::Command(Command::Duplicate),
                 EditorInput::Command(Command::BringForward),
                 EditorInput::Command(Command::SendBackward),
+                EditorInput::ToggleToolLock,
             ]
         );
     }
