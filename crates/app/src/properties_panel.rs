@@ -19,6 +19,17 @@ use scene::editor::{ArrowType, EdgeStyle, PanelState, Property, Section, StrokeW
 
 use crate::theme::Theme;
 
+/// Which parts of the panel are open; kept in [`crate::prefs`] so they survive a restart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PanelLayout {
+    /// Only the header shows.
+    pub collapsed: bool,
+    /// The stroke color section's full palette grid ("...").
+    pub stroke_palette: bool,
+    /// The background color section's full palette grid.
+    pub background_palette: bool,
+}
+
 /// Colors the panel draws with.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelColors {
@@ -197,13 +208,14 @@ fn color_swatch(
     response.on_hover_text(color).clicked()
 }
 
-/// A color section: the five quick picks, plus a "more" toggle that expands the full
-/// 5-per-row palette grid below it. `id_source` keeps this section's expanded/collapsed state
-/// (kept in egui's temporary memory, since it is pure UI state with no effect on the document)
+/// A color section: the five quick picks, plus a "more" toggle that flips `expanded`, which
+/// shows the full 5-per-row palette grid below it. `id_source` keeps this section's grid id
 /// distinct from the other color section's.
+#[allow(clippy::too_many_arguments)]
 fn color_section(
     ui: &mut egui::Ui,
     id_source: &str,
+    expanded: &mut bool,
     picks: &[&str; 5],
     palette: &[&str; 15],
     current: Option<&str>,
@@ -211,11 +223,6 @@ fn color_section(
     dark: bool,
 ) -> Option<String> {
     let mut picked = None;
-    let expand_id = ui.id().with((id_source, "expanded"));
-    let mut expanded = ui
-        .ctx()
-        .data(|d| d.get_temp::<bool>(expand_id))
-        .unwrap_or(false);
     ui.horizontal(|ui| {
         for &color in picks {
             if color_swatch(ui, color, dark, current == Some(color), colors) {
@@ -223,11 +230,10 @@ fn color_section(
             }
         }
         if ui.small_button("...").clicked() {
-            expanded = !expanded;
-            ui.ctx().data_mut(|d| d.insert_temp(expand_id, expanded));
+            *expanded = !*expanded;
         }
     });
-    if expanded {
+    if *expanded {
         egui::Grid::new(ui.id().with((id_source, "grid")))
             .num_columns(5)
             .spacing([4.0, 4.0])
@@ -300,6 +306,7 @@ fn section_row(
     ui: &mut egui::Ui,
     section: Section,
     state: &PanelState,
+    layout: &mut PanelLayout,
     colors: PanelColors,
     dark: bool,
 ) -> Option<Property> {
@@ -307,6 +314,7 @@ fn section_row(
         Section::StrokeColor => color_section(
             ui,
             "stroke",
+            &mut layout.stroke_palette,
             &STROKE_PICKS,
             &STROKE_PALETTE,
             state.stroke_color.as_deref(),
@@ -317,6 +325,7 @@ fn section_row(
         Section::BackgroundColor => color_section(
             ui,
             "background",
+            &mut layout.background_palette,
             &BACKGROUND_PICKS,
             &BACKGROUND_PALETTE,
             state.background_color.as_deref(),
@@ -351,11 +360,12 @@ fn section_row(
     }
 }
 
-/// Draws the panel on the left when `state.sections` is non-empty; returns the property the
-/// user picked.
+/// Draws the panel on the left when `state.sections` is non-empty, below a header whose button
+/// flips `layout.collapsed`; returns the property the user picked.
 pub fn show(
     ctx: &egui::Context,
     state: &PanelState,
+    layout: &mut PanelLayout,
     colors: PanelColors,
     dark: bool,
 ) -> Option<Property> {
@@ -376,13 +386,31 @@ pub fn show(
                 ))
                 .show(ui, |ui| {
                     ui.set_max_width(PANEL_WIDTH);
+                    let toggle = if layout.collapsed {
+                        "Style +"
+                    } else {
+                        "Hide -"
+                    };
+                    if ui
+                        .small_button(toggle)
+                        .on_hover_text("Show or hide the style panel")
+                        .clicked()
+                    {
+                        layout.collapsed = !layout.collapsed;
+                    }
+                    if layout.collapsed {
+                        return;
+                    }
+                    ui.add_space(4.0);
                     for &section in &state.sections {
                         ui.label(
                             egui::RichText::new(title(section))
                                 .small()
                                 .color(colors.muted),
                         );
-                        if let Some(property) = section_row(ui, section, state, colors, dark) {
+                        if let Some(property) =
+                            section_row(ui, section, state, layout, colors, dark)
+                        {
                             picked = Some(property);
                         }
                         ui.add_space(6.0);
@@ -438,7 +466,10 @@ mod tests {
             muted: egui::Color32::GRAY,
         };
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            assert_eq!(show(ui.ctx(), &state, colors, false), None);
+            assert_eq!(
+                show(ui.ctx(), &state, &mut PanelLayout::default(), colors, false),
+                None
+            );
         });
         // `FullOutput` panics on drop if its `textures_delta` is not explicitly cleared.
         output.textures_delta.clear();

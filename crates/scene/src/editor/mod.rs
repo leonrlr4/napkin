@@ -12,7 +12,7 @@
 //! The selection tool, the creation tools and the eraser each keep their own gesture
 //! (`select_gesture`, `create_gesture`, `erase_gesture`); at most one is active at a time, since
 //! [`Editor::set_tool`] finishes all three before switching. `Command::Escape` clears the
-//! selection while idle, discards or finishes an active creation gesture (see `create::escape`),
+//! selection while idle (or, with nothing selected, switches back to the selection tool), discards or finishes an active creation gesture (see `create::escape`),
 //! and abandons an in-progress eraser stroke (see `erase::escape`). A text edit in progress
 //! never reaches this command at all: the overlay's own `TextEdit` widget already treats Escape
 //! as a loss of focus and commits it first (see the `app` crate's `text_edit` module).
@@ -173,6 +173,9 @@ pub struct Editor<E: Env> {
     file: Arc<SceneFile>,
     env: E,
     tool: Tool,
+    /// `activeTool.locked`: a creation tool stays active after drawing, and what it drew is
+    /// not selected (`App.isToolLocked`).
+    tool_locked: bool,
     selection: Selection,
     select_gesture: select::Gesture,
     create_gesture: create::Gesture,
@@ -198,6 +201,7 @@ impl<E: Env> Editor<E> {
             file: Arc::new(file),
             env,
             tool: Tool::default(),
+            tool_locked: false,
             selection: Selection::new(),
             select_gesture: select::Gesture::None,
             create_gesture: create::Gesture::None,
@@ -274,6 +278,24 @@ impl<E: Env> Editor<E> {
         self.tool = tool;
     }
 
+    pub fn tool_locked(&self) -> bool {
+        self.tool_locked
+    }
+
+    /// Sets the padlock without touching the tool, for restoring a saved preference.
+    pub fn set_tool_locked(&mut self, locked: bool) {
+        self.tool_locked = locked;
+    }
+
+    /// The padlock button and Q (`App.toggleLock`): locking keeps the current tool, unlocking
+    /// switches to [`Tool::Selection`].
+    pub fn toggle_tool_lock(&mut self) {
+        if self.tool_locked {
+            self.set_tool(Tool::Selection);
+        }
+        self.tool_locked = !self.tool_locked;
+    }
+
     /// Finishes any in-progress pointer gesture or multi-point line without changing the
     /// tool, the same code path [`Editor::set_tool`] runs before switching: a selection-tool
     /// drag, resize or point-drag records one history step; a shape, initial linear drag or
@@ -300,6 +322,12 @@ impl<E: Env> Editor<E> {
     /// The style values (`currentItem*`) a newly created element takes.
     pub fn style(&self) -> &ItemStyle {
         &self.style
+    }
+
+    /// Replaces the style new elements take without touching any element, for restoring a
+    /// saved preference.
+    pub fn set_style(&mut self, style: ItemStyle) {
+        self.style = style;
     }
 
     /// What the property panel shows for the current selection and tool.
@@ -411,10 +439,19 @@ impl<E: Env> Editor<E> {
                 if let Some(handled) = erase::escape(self) {
                     return handled;
                 }
-                if !self.is_idle() || self.selection.is_empty() {
+                if !self.is_idle() {
                     return false;
                 }
-                self.selection = Selection::new();
+                if !self.selection.is_empty() {
+                    self.selection = Selection::new();
+                    return true;
+                }
+                // Not in Excalidraw: with nothing left to cancel, Escape leaves a creation tool
+                // (or the hand or eraser), the way out of a locked tool that needs no reach for V.
+                if self.tool == Tool::Selection {
+                    return false;
+                }
+                self.set_tool(Tool::Selection);
                 true
             }
             Command::Finalize => create::finalize_command(self),
