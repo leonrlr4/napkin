@@ -305,7 +305,7 @@ fn apply_shape_move(editor: &mut Editor<impl Env>, state: &ShapeState, event: Po
 /// The generic-shape completion (`isInvisiblySmallElement` branch of
 /// `onPointerUpFromPointerDownHandler`): an invisible (0x0) shape is removed and the tool stays
 /// put, matching that branch's early return; a real one is selected and the tool reverts to
-/// `Selection`.
+/// `Selection`, unless the tool is locked, which does neither.
 fn finish_shape(editor: &mut Editor<impl Env>, state: ShapeState) {
     let placement = editor.file.elements[state.position]
         .placement()
@@ -314,7 +314,7 @@ fn finish_shape(editor: &mut Editor<impl Env>, state: ShapeState) {
     let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
     if invisible {
         file.elements.remove(state.position);
-    } else {
+    } else if !editor.tool_locked {
         if let Some(id) = file.elements[state.position].id().map(str::to_owned) {
             editor.selection = Selection::from_ids([id]);
         }
@@ -847,8 +847,8 @@ fn finish_freedraw(editor: &mut Editor<impl Env>, state: FreedrawState, at: [f64
 /// invisible result (`isInvisiblySmallElement`) is removed; otherwise a line or freedraw that
 /// closes into a loop gets its last point snapped onto its first, and a line's `polygon` flag
 /// set to whether that leaves it with more than 3 points. The tool always reverts to
-/// `Selection` and the element gets selected, unless `keep_tool` (freedraw), which does
-/// neither — even when the element itself was removed as invisible, since a linear or freedraw
+/// `Selection` and the element gets selected, unless `keep_tool` (freedraw) or the tool is
+/// locked, either of which does neither — even when the element itself was removed as invisible, since a linear or freedraw
 /// gesture always reaches this same return in `actionFinalize` regardless of visibility (unlike
 /// a generic shape, which returns before ever reaching its own tool-revert code).
 fn finalize_linear_or_freedraw(
@@ -859,6 +859,7 @@ fn finalize_linear_or_freedraw(
     zoom: f64,
     keep_tool: bool,
 ) {
+    let keep_tool = keep_tool || editor.tool_locked;
     let invisible = {
         let file = clone_scene(&mut editor.file, &mut editor.scene_clones);
         let before = file.elements[position].clone();

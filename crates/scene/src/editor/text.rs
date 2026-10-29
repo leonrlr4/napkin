@@ -640,8 +640,8 @@ fn create_new_free_text(
 }
 
 /// Writes the edited text back as one history step (`textWysiwyg`'s `onSubmit` and
-/// `handleTextWysiwyg`'s submit branch), ends editing and returns the tool to Selection. A
-/// no-op (returning `false`) when nothing was being edited.
+/// `handleTextWysiwyg`'s submit branch), ends editing and returns the tool to Selection unless
+/// the tool is locked. A no-op (returning `false`) when nothing was being edited.
 ///
 /// `text.trim()` being empty (`!nextOriginalText.trim()`) means: a new text or label is never
 /// created at all; an existing one is soft-deleted like [`edit::delete_selection`] would
@@ -650,7 +650,7 @@ fn create_new_free_text(
 /// (`element.containerId || (!isDeleted ? element.id : null)`, applied unconditionally rather
 /// than only on a keyboard submit, napkin's own submit path having no such distinction):
 /// the container when the (possibly just-created) text is bound to one, else the text itself
-/// when it survives, else nothing.
+/// when it survives, else nothing; always nothing when the tool is locked.
 ///
 /// The element (or, for a new label, the container) an in-progress edit refers to is checked
 /// for existence again here rather than trusted: every editor path that could otherwise delete
@@ -672,7 +672,9 @@ pub(super) fn commit_text(
     let Some(editing) = editor.text_editing.take() else {
         return false;
     };
-    editor.tool = Tool::Selection;
+    if !editor.tool_locked {
+        editor.tool = Tool::Selection;
+    }
     let deleted = text.trim().is_empty();
 
     // A new label's container may have grown when the editor opened; the step starts from the
@@ -739,6 +741,8 @@ pub(super) fn commit_text(
     follow_grown_container(editor, &before, surviving_id.as_deref(), &editing, measure);
 
     editor.selection = match surviving_id {
+        // A locked tool selects nothing it made (`handleTextWysiwyg`'s `elementIdToSelect`).
+        _ if editor.tool_locked => Selection::new(),
         None => Selection::new(),
         Some(id) => {
             let bound_container = editor
